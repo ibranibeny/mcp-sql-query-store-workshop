@@ -30,6 +30,14 @@ def batch_index(name: str, pattern: str) -> int:
     return next(index for index, batch in enumerate(batches(name)) if expression.search(batch))
 
 
+def sqlcmd_substitute(text: str, variables: dict[str, str]) -> str:
+    return re.sub(
+        r"\$\((\w+)\)",
+        lambda match: variables.get(match.group(1), match.group(0)),
+        text,
+    )
+
+
 def test_preflight_is_sqlcmd_parameterized() -> None:
     text = sql("00-Preflight.sql")
     assert ":on error exit" in text.lower()
@@ -40,6 +48,22 @@ def test_preflight_is_sqlcmd_parameterized() -> None:
         "PreflightPhase",
     }
     assert required.issubset(set(re.findall(r"\$\((\w+)\)", text)))
+
+
+def test_preflight_minimal_sqlcmd_invocation_has_no_unresolved_variables() -> None:
+    text = sqlcmd_substitute(
+        sql("00-Preflight.sql"),
+        {
+            "ExpectedServerName": "sql01",
+            "DatabaseName": "AdventureWorks2022",
+            "ExpectedPhysicalMemoryMB": "65536",
+            "PreflightPhase": "Infrastructure",
+        },
+    )
+    assert not re.search(r"\$\(\w+\)", text)
+    assert "SESSION_CONTEXT(N'MCP_SQL_PlannedRestorePath')" in text
+    assert "SESSION_CONTEXT(N'MCP_SQL_PlannedDataPath')" in text
+    assert "SESSION_CONTEXT(N'MCP_SQL_MinimumFreeSpaceMB')" in text
 
 
 def test_preflight_rejects_wrong_phase_before_phase_specific_checks() -> None:
@@ -200,14 +224,32 @@ def test_resource_governor_collisions_are_rejected_before_mutating_configuration
     assert group_collision < feedback_change
 
 
-def test_resource_governor_ownership_is_recorded_only_after_successful_create() -> None:
+def test_resource_governor_ownership_is_pending_before_ddl_and_activated_after_success() -> None:
     text = normalized("01-ConfigureInstance.sql")
-    pool_create = text.index("CREATE RESOURCE POOL [MCP_SQL_WORKSHOP_POOL]")
-    pool_claim = text.index("(@WORKSHOPMARKER, @WORKSHOPSCHEMAVERSION, 'POOL'")
-    group_create = text.index("CREATE WORKLOAD GROUP [MCP_SQL_WORKSHOP_GROUP]")
-    group_claim = text.index("(@WORKSHOPMARKER, @WORKSHOPSCHEMAVERSION, 'GROUP'")
-    assert pool_create < pool_claim < group_create < group_claim
+    assert "OWNERSHIPSTATE" in text
+    pool_pending = text.index("'POOL', N'MCP_SQL_WORKSHOP_POOL', 'PENDING'")
+    pool_create = text.index("CREATE RESOURCE POOL [MCP_SQL_WORKSHOP_POOL]", pool_pending)
+    pool_active = text.index("SET OWNERSHIPSTATE = 'ACTIVE'", pool_create)
+    group_pending = text.index("'GROUP', N'MCP_SQL_WORKSHOP_GROUP', 'PENDING'")
+    group_create = text.index("CREATE WORKLOAD GROUP [MCP_SQL_WORKSHOP_GROUP]", group_pending)
+    group_active = text.index("SET OWNERSHIPSTATE = 'ACTIVE'", group_create)
+    assert pool_pending < pool_create < pool_active
+    assert group_pending < group_create < group_active
+    assert "@CREATEDPOOL" in text and "@CREATEDGROUP" in text
     assert "SP_GETAPPLOCK" in text and "SP_RELEASEAPPLOCK" in text
+
+
+def test_pending_resource_governor_ownership_is_recoverable_and_foreign_objects_are_preserved() -> None:
+    text = normalized("01-ConfigureInstance.sql")
+    assert re.search(r"OWNERSHIPSTATE\s*=\s*'PENDING'.*?MIN_MEMORY_PERCENT\s*=\s*0.*?MAX_MEMORY_PERCENT\s*=\s*50.*?OWNERSHIPSTATE\s*=\s*'ACTIVE'", text)
+    assert re.search(r"OWNERSHIPSTATE\s*=\s*'PENDING'.*?REQUEST_MAX_MEMORY_GRANT_PERCENT\s*=\s*40.*?MAX_DOP\s*=\s*4.*?GROUP_MAX_REQUESTS\s*=\s*4.*?OWNERSHIPSTATE\s*=\s*'ACTIVE'", text)
+    assert "EXISTS WITHOUT WORKSHOP OWNERSHIP METADATA" in text
+    assert "IF @CREATEDGROUP = 1" in text
+    assert "DROP WORKLOAD GROUP [MCP_SQL_WORKSHOP_GROUP]" in text
+    assert "IF @CREATEDPOOL = 1" in text
+    assert "DROP RESOURCE POOL [MCP_SQL_WORKSHOP_POOL]" in text
+    assert "PENDING POOL DOES NOT MATCH THE WORKSHOP CONTRACT" in text
+    assert "PENDING WORKLOAD GROUP DOES NOT MATCH THE WORKSHOP CONTRACT" in text
 
 
 def test_classifier_is_schema_bound_exact_and_preserves_non_workshop_classifier() -> None:
@@ -222,30 +264,74 @@ def test_classifier_is_schema_bound_exact_and_preserves_non_workshop_classifier(
     assert "ALTER RESOURCE GOVERNOR WITH (CLASSIFIER_FUNCTION = DBO.MCP_SQL_WORKSHOP_CLASSIFIER)" in text
 
 
+def test_classifier_requires_exact_normalized_hash_and_dual_ownership_markers() -> None:
+    text = normalized("01-ConfigureInstance.sql")
+    assert "HASHBYTES('SHA2_256'" in text
+    assert re.search(r"OBJECT_DEFINITION\(@\w*WORKSHOPCLASSIFIERID\)", text)
+    assert re.search(r"OBJECTPROPERTYEX\(@\w*WORKSHOPCLASSIFIERID, N'ISSCHEMABOUND'\)", text)
+    assert "OBJECTTYPE = 'CLASSIFIER'" in text
+    assert "DEFINITIONHASH" in text
+    assert re.search(r"SYS\.EXTENDED_PROPERTIES.*?MCP_SQL_WORKSHOP", text)
+    assert "UNEXPECTED FUNCTION DEFINITION OR OWNERSHIP" in text
+    assert "NOT LIKE N'%APP_NAME" not in text
+
+
+def test_post_applock_work_is_globally_guarded_and_restores_on_failure() -> None:
+    text = normalized("01-ConfigureInstance.sql")
+    lock = text.index("SP_GETAPPLOCK")
+    guarded_try = text.index("BEGIN TRY", lock)
+    guarded_catch = text.index("BEGIN CATCH", guarded_try)
+    assert lock < guarded_try < guarded_catch
+    assert text.count("SP_RELEASEAPPLOCK") >= 2
+    catch = text[guarded_catch:]
+    assert "@ORIGINALMAXSERVERMEMORYMB" in catch
+    assert "@ORIGINALMINSERVERMEMORYMB" in catch
+    assert "SP_CONFIGURE N'MAX SERVER MEMORY (MB)'" in catch
+    assert "SP_CONFIGURE N'MIN SERVER MEMORY (MB)'" in catch
+    assert "ROW_MODE_MEMORY_GRANT_FEEDBACK" in catch
+    assert "BATCH_MODE_MEMORY_GRANT_FEEDBACK" in catch
+    assert "CLASSIFIER_FUNCTION" in catch
+    assert "ALTER RESOURCE GOVERNOR DISABLE" in catch
+    assert "@RESTORATIONERRORS" in catch
+    assert re.search(r"THROW\s+@ORIGINALERRORNUMBER\s*,\s*@ORIGINALERRORMESSAGE\s*,\s*@ORIGINALERRORSTATE", catch)
+
+
+def test_catch_compensation_proves_exact_current_state_before_drop() -> None:
+    text = normalized("01-ConfigureInstance.sql")
+    catch = text[text.index("BEGIN CATCH", text.index("SP_GETAPPLOCK")):]
+    group_cleanup = catch[catch.index("IF @CREATEDGROUP = 1"):catch.index("IF @CREATEDPOOL = 1")]
+    pool_cleanup = catch[catch.index("IF @CREATEDPOOL = 1"):catch.index("IF @CREATEDCLASSIFIER = 1")]
+    classifier_cleanup = catch[catch.index("IF @CREATEDCLASSIFIER = 1"):]
+    assert "SYS.RESOURCE_GOVERNOR_WORKLOAD_GROUPS" in group_cleanup
+    assert "REQUEST_MAX_MEMORY_GRANT_PERCENT = 40" in group_cleanup
+    assert "MAX_DOP = 4" in group_cleanup and "GROUP_MAX_REQUESTS = 4" in group_cleanup
+    assert "SYS.RESOURCE_GOVERNOR_RESOURCE_POOLS" in pool_cleanup
+    assert "MIN_MEMORY_PERCENT = 0" in pool_cleanup and "MAX_MEMORY_PERCENT = 50" in pool_cleanup
+    assert "OBJECT_DEFINITION" in classifier_cleanup
+    assert "@EXPECTEDCLASSIFIERHASH" in classifier_cleanup
+
+
 def test_resource_governor_ddl_is_outside_user_transactions_and_ordered() -> None:
-    parsed = batches("01-ConfigureInstance.sql")
-    rg_batches = [
-        batch
-        for batch in parsed
-        if re.search(r"\b(?:CREATE|ALTER)\s+(?:RESOURCE\s+POOL|WORKLOAD\s+GROUP|RESOURCE\s+GOVERNOR)\b", batch, re.I)
-    ]
-    assert rg_batches
-    assert all("BEGIN TRAN" not in batch.upper() for batch in rg_batches)
-    backup_index = batch_index("01-ConfigureInstance.sql", r"INSERT\s+INTO\s+WorkshopAdmin\.dbo\.ConfigurationBackup")
-    pool_index = batch_index("01-ConfigureInstance.sql", r"CREATE\s+RESOURCE\s+POOL")
-    group_index = batch_index("01-ConfigureInstance.sql", r"CREATE\s+WORKLOAD\s+GROUP")
-    classifier_index = batch_index("01-ConfigureInstance.sql", r"ALTER\s+RESOURCE\s+GOVERNOR\s+WITH\s*\(\s*CLASSIFIER_FUNCTION")
-    reconfigure_index = batch_index("01-ConfigureInstance.sql", r"ALTER\s+RESOURCE\s+GOVERNOR\s+RECONFIGURE")
-    assert backup_index < pool_index < group_index < classifier_index < reconfigure_index
+    text = normalized("01-ConfigureInstance.sql")
+    backup = text.index("INSERT INTO WORKSHOPADMIN.DBO.CONFIGURATIONBACKUP")
+    pool_pending_commit = text.index("'POOL', N'MCP_SQL_WORKSHOP_POOL', 'PENDING'")
+    pool = text.index("CREATE RESOURCE POOL")
+    group_pending_commit = text.index("'GROUP', N'MCP_SQL_WORKSHOP_GROUP', 'PENDING'")
+    group = text.index("CREATE WORKLOAD GROUP")
+    classifier = text.index("ALTER RESOURCE GOVERNOR WITH (CLASSIFIER_FUNCTION")
+    reconfigure = text.index("ALTER RESOURCE GOVERNOR RECONFIGURE")
+    assert backup < pool_pending_commit < pool < group_pending_commit < group < classifier < reconfigure
+    assert re.search(r"'POOL', N'MCP_SQL_WORKSHOP_POOL', 'PENDING'.*?COMMIT TRANSACTION.*?CREATE RESOURCE POOL", text)
+    assert re.search(r"'GROUP', N'MCP_SQL_WORKSHOP_GROUP', 'PENDING'.*?COMMIT TRANSACTION.*?CREATE WORKLOAD GROUP", text)
 
 
-def test_classifier_creation_occupies_its_own_batch() -> None:
-    function_batches = [batch for batch in batches("01-ConfigureInstance.sql") if "CREATE FUNCTION dbo.mcp_sql_workshop_classifier" in batch]
-    assert len(function_batches) == 1
-    function_batch = function_batches[0].upper()
-    assert "CREATE OR ALTER FUNCTION" not in function_batch
-    assert re.search(r"IF\s+OBJECT_ID\s*\(.*?MCP_SQL_WORKSHOP_CLASSIFIER.*?\)\s+IS\s+NULL", function_batch)
-    assert "BEGIN TRAN" not in function_batch
+def test_classifier_creation_is_deterministic_dynamic_ddl_after_pending_claim() -> None:
+    text = normalized("01-ConfigureInstance.sql")
+    claim = text.index("'CLASSIFIER', N'MCP_SQL_WORKSHOP_CLASSIFIER', 'PENDING'")
+    execute = text.index("EXEC SYS.SP_EXECUTESQL @CLASSIFIERCREATESQL")
+    assert claim < execute
+    assert "CREATE OR ALTER FUNCTION" not in text
+    assert "EXEC SYS.SP_EXECUTESQL @CLASSIFIERCREATESQL" in text
 
 
 def test_effective_resource_governor_values_are_verified_after_reconfigure() -> None:
