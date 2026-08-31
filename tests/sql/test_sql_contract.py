@@ -967,6 +967,48 @@ def test_equivalence_harness_checks_metadata_rows_sets_hashes_order_and_errors()
     assert "LAB.VALIDATIONRUN" in text
 
 
+def test_equivalence_harness_rejects_an_existing_transaction_before_side_effects() -> None:
+    text = normalized("07-ValidateEquivalence.sql")
+    guard = re.search(r"IF\s+@@TRANCOUNT\s*<>\s*0\s+THROW\s+51515,\s*'[^']*TRANSACTION[^']*'", text)
+    assert guard
+    for side_effect in (
+        "SET NOCOUNT ON",
+        "SET XACT_ABORT ON",
+        "SP_SET_SESSION_CONTEXT",
+        "CREATE TABLE LAB.VALIDATIONRUN",
+        "INSERT LAB.VALIDATIONRUN",
+    ):
+        assert guard.start() < text.index(side_effect)
+
+
+def test_equivalence_harness_protects_and_restores_exact_session_context_values() -> None:
+    text = normalized("07-ValidateEquivalence.sql")
+    raw_text = sql("07-ValidateEquivalence.sql").upper()
+    first_try = text.index("BEGIN TRY")
+    set_run_id = text.index(
+        "EXEC SYS.SP_SET_SESSION_CONTEXT @KEY = N'WORKSHOPRUNID', @VALUE = @VALIDATIONRUNIDCONTEXT"
+    )
+    set_manual = text.index(
+        "EXEC SYS.SP_SET_SESSION_CONTEXT @KEY = N'WORKSHOPMANUALEXECUTION', "
+        "@VALUE = @VALIDATIONMANUALEXECUTIONCONTEXT"
+    )
+    assert first_try < set_run_id < set_manual < text.index("CREATE TABLE LAB.VALIDATIONRUN")
+    assert "DECLARE @ORIGINALRUNID SQL_VARIANT = SESSION_CONTEXT(N'WORKSHOPRUNID')" in text
+    assert "DECLARE @ORIGINALMANUALEXECUTION SQL_VARIANT = SESSION_CONTEXT(N'WORKSHOPMANUALEXECUTION')" in text
+    assert "DECLARE @VALIDATIONRUNIDCONTEXT SQL_VARIANT = CONVERT(SQL_VARIANT, @VALIDATIONRUNID)" in text
+    assert "DECLARE @VALIDATIONMANUALEXECUTIONCONTEXT SQL_VARIANT = CONVERT(SQL_VARIANT, CONVERT(INT, 1))" in text
+    assert "@VALUE = @ORIGINALRUNID" in text
+    assert "@VALUE = @ORIGINALMANUALEXECUTION" in text
+    assert "@READ_ONLY = 1" not in text
+    assert text.count("EXEC SYS.SP_SET_SESSION_CONTEXT @KEY = N'WORKSHOPRUNID', @VALUE = @ORIGINALRUNID") >= 2
+    assert text.count(
+        "EXEC SYS.SP_SET_SESSION_CONTEXT @KEY = N'WORKSHOPMANUALEXECUTION', "
+        "@VALUE = @ORIGINALMANUALEXECUTION"
+    ) >= 2
+    assert "SESSION SHOULD BE DISCARDED" in raw_text
+    assert text.index("INSERT LAB.VALIDATIONRUN") > set_manual
+
+
 def test_equivalence_failures_have_bounded_case_specific_count_diagnostics() -> None:
     text = normalized("07-ValidateEquivalence.sql")
     for case_name in ("VALIDATIONRUN-METADATA", "PROCEDURE-METADATA", "TERRITORY-CARDINALITY"):

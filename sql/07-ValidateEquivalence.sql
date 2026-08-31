@@ -3,8 +3,27 @@
 Static and executable correctness harness for the Task 9 candidate. It performs no
 configuration changes and derives territory cases from the deterministic source domain.
 */
+IF @@TRANCOUNT <> 0
+    THROW 51515, 'Equivalence validation cannot run inside an active transaction.', 1;
+
 SET NOCOUNT ON;
 SET XACT_ABORT ON;
+
+DECLARE @OriginalRunId sql_variant = SESSION_CONTEXT(N'WorkshopRunId');
+DECLARE @OriginalManualExecution sql_variant = SESSION_CONTEXT(N'WorkshopManualExecution');
+DECLARE @ValidationRunId nvarchar(128) = N'Task9Validation-' + CONVERT(nvarchar(36), NEWID());
+DECLARE @ValidationRunIdContext sql_variant = CONVERT(sql_variant, @ValidationRunId);
+DECLARE @ValidationManualExecutionContext sql_variant = CONVERT(sql_variant, CONVERT(int, 1));
+DECLARE @RunIdContextChanged bit = 0;
+DECLARE @ManualExecutionContextChanged bit = 0;
+
+BEGIN TRY
+    EXEC sys.sp_set_session_context
+        @key = N'WorkshopRunId', @value = @ValidationRunIdContext;
+    SET @RunIdContextChanged = 1;
+    EXEC sys.sp_set_session_context
+        @key = N'WorkshopManualExecution', @value = @ValidationManualExecutionContext;
+    SET @ManualExecutionContextChanged = 1;
 
 DECLARE @WorkshopMarker uniqueidentifier = '68A70D6E-62D8-4A77-8F0A-9DA7934DBA7C';
 DECLARE @WorkshopSchemaVersion int = 1;
@@ -248,10 +267,6 @@ BEGIN
     THROW 51504, @ProcedureMetadataMessage, 1;
 END;
 
-DECLARE @OriginalRunId sql_variant = SESSION_CONTEXT(N'WorkshopRunId');
-DECLARE @OriginalManualExecution sql_variant = SESSION_CONTEXT(N'WorkshopManualExecution');
-DECLARE @ValidationRunId nvarchar(128) = N'Task9Validation-' + CONVERT(nvarchar(36), NEWID());
-
 DECLARE @TerritoryCardinality table
 (
     TerritoryID int NOT NULL PRIMARY KEY,
@@ -390,9 +405,6 @@ DECLARE @PassingCases table
 
 DECLARE @CaseNumber int = 1;
 DECLARE @CaseCount int = (SELECT COUNT(*) FROM @Cases);
-EXEC sys.sp_set_session_context @key = N'WorkshopRunId', @value = @ValidationRunId;
-EXEC sys.sp_set_session_context @key = N'WorkshopManualExecution', @value = 1;
-BEGIN TRY
     WHILE @CaseNumber <= @CaseCount
     BEGIN
         DECLARE @CaseName sysname;
@@ -651,12 +663,39 @@ BEGIN TRY
         BaselineRowCount, OptimizedRowCount, BaselineHash, OptimizedHash, Passed, ValidatedAtUtc
     FROM @PassingCases;
 
-    EXEC sys.sp_set_session_context @key = N'WorkshopRunId', @value = @OriginalRunId;
-    EXEC sys.sp_set_session_context @key = N'WorkshopManualExecution', @value = @OriginalManualExecution;
+    EXEC sys.sp_set_session_context
+        @key = N'WorkshopRunId', @value = @OriginalRunId;
+    SET @RunIdContextChanged = 0;
+    EXEC sys.sp_set_session_context
+        @key = N'WorkshopManualExecution', @value = @OriginalManualExecution;
+    SET @ManualExecutionContextChanged = 0;
 END TRY
 BEGIN CATCH
-    EXEC sys.sp_set_session_context @key = N'WorkshopRunId', @value = @OriginalRunId;
-    EXEC sys.sp_set_session_context @key = N'WorkshopManualExecution', @value = @OriginalManualExecution;
+    /*
+    read_only state cannot be introspected. Each changed key is therefore restored
+    independently, including clearing it when its original sql_variant value was NULL.
+    If a key has become read_only and restoration fails, the session should be discarded;
+    nested restore errors are intentionally swallowed so bare THROW preserves the error
+    that triggered this outer CATCH.
+    */
+    IF @RunIdContextChanged = 1
+    BEGIN
+        BEGIN TRY
+            EXEC sys.sp_set_session_context
+                @key = N'WorkshopRunId', @value = @OriginalRunId;
+        END TRY
+        BEGIN CATCH
+        END CATCH;
+    END;
+    IF @ManualExecutionContextChanged = 1
+    BEGIN
+        BEGIN TRY
+            EXEC sys.sp_set_session_context
+                @key = N'WorkshopManualExecution', @value = @OriginalManualExecution;
+        END TRY
+        BEGIN CATCH
+        END CATCH;
+    END;
     THROW;
 END CATCH;
 
