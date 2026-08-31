@@ -374,6 +374,40 @@ function Invoke-WorkshopReadOperation {
     }
 }
 
+function Get-WorkshopNestedIdentifier {
+    [CmdletBinding()]
+    param(
+        [object] $InputObject,
+        [Parameter(Mandatory)][string] $PropertyName
+    )
+
+    if ($null -eq $InputObject -or $InputObject.PSObject.Properties.Name -notcontains $PropertyName) {
+        return ''
+    }
+    $value = $InputObject.$PropertyName
+    if ($null -eq $value) {
+        return ''
+    }
+    if ($value.PSObject.Properties.Name -contains 'Id') {
+        return [string] $value.Id
+    }
+    return [string] $value
+}
+
+function Test-WorkshopLocationMatch {
+    [CmdletBinding()]
+    param(
+        [object[]] $Locations,
+        [Parameter(Mandatory)][string] $RequiredLocation
+    )
+
+    $normalizedRequired = $RequiredLocation.ToLowerInvariant() -replace '[^a-z0-9]', ''
+    return $null -ne ($Locations | Where-Object {
+        $normalizedLocation = ([string] $_).ToLowerInvariant() -replace '[^a-z0-9]', ''
+        $normalizedLocation -eq $normalizedRequired
+    } | Select-Object -First 1)
+}
+
 function Get-DefaultWorkshopOperationSet {
     [CmdletBinding()]
     param()
@@ -450,16 +484,23 @@ ${function:Test-WorkshopPrerequisites} = {
 
     $contextResult = Invoke-WorkshopReadOperation -Operation $Operations.GetContext
     $context = if ($contextResult.Value.Count -gt 0) { $contextResult.Value[0] } else { $null }
-    $actualSubscription = if ($null -ne $context -and $null -ne $context.Subscription) { [string] $context.Subscription.Id } else { '' }
+    $actualAccount = Get-WorkshopNestedIdentifier -InputObject $context -PropertyName 'Account'
+    $actualTenant = Get-WorkshopNestedIdentifier -InputObject $context -PropertyName 'Tenant'
+    $actualSubscription = Get-WorkshopNestedIdentifier -InputObject $context -PropertyName 'Subscription'
+    $accountPassed = $contextResult.Succeeded -and -not [string]::IsNullOrWhiteSpace($actualAccount)
+    Add-WorkshopCheck -Checks $checks -Name 'Azure context account' -Passed $accountPassed `
+        -Detail "Authenticated account '$actualAccount'." `
+        -Remediation 'Authenticate to Azure with a nonempty account before running preflight again.'
     Add-WorkshopCheck -Checks $checks -Name 'Azure context subscription' -Passed ($contextResult.Succeeded -and $actualSubscription -eq $SubscriptionId) `
         -Detail "Expected subscription '$SubscriptionId'; current subscription '$actualSubscription'." `
         -Remediation 'Select the explicit subscription before running preflight again.'
-    if ($PSBoundParameters.ContainsKey('TenantId')) {
-        $actualTenant = if ($null -ne $context -and $null -ne $context.Tenant) { [string] $context.Tenant.Id } else { '' }
-        Add-WorkshopCheck -Checks $checks -Name 'Azure context tenant' -Passed ($contextResult.Succeeded -and $actualTenant -eq $TenantId) `
-            -Detail "Expected tenant '$TenantId'; current tenant '$actualTenant'." `
-            -Remediation 'Authenticate to and select the explicit tenant before running preflight again.'
-    }
+    $tenantSupplied = $PSBoundParameters.ContainsKey('TenantId')
+    $tenantPassed = $contextResult.Succeeded -and -not [string]::IsNullOrWhiteSpace($actualTenant) -and
+        (-not $tenantSupplied -or $actualTenant -eq $TenantId)
+    $expectedTenant = if ($tenantSupplied) { "'$TenantId'" } else { 'any nonempty authenticated tenant' }
+    Add-WorkshopCheck -Checks $checks -Name 'Azure context tenant' -Passed $tenantPassed `
+        -Detail "Expected $expectedTenant; current tenant '$actualTenant'." `
+        -Remediation 'Authenticate to and select the required tenant before running preflight again.'
 
     $providerResult = Invoke-WorkshopReadOperation -Operation $Operations.GetProviders
     foreach ($providerName in $script:RequiredProviders) {
@@ -496,6 +537,80 @@ ${function:Test-WorkshopPrerequisites} = {
         Add-WorkshopCheck -Checks $checks -Name "VM SKU $($vm.Size)" -Passed $skuPassed `
             -Detail "Exact SKU in $($Config.Location); restrictions: $restrictionDetail. Availability is not claimed until this check passes." `
             -Remediation "Resolve subscription restrictions or choose an approved capacity path for $($vm.Size)."
+    }
+
+    $diskSku = $skuResult.Value | Where-Object {
+        $_.Name -eq 'Premium_LRS' -and $_.ResourceType -eq 'disks' -and
+        (Test-WorkshopLocationMatch -Locations @($_.Locations) -RequiredLocation $Config.Location)
+    } | Select-Object -First 1
+    $diskRestrictions = @()
+    if ($null -ne $diskSku) {
+        $diskRestrictions = @($diskSku.Restrictions)
+    }
+    $diskSkuPassed = $skuResult.Succeeded -and $null -ne $diskSku -and $diskRestrictions.Count -eq 0
+    $diskRestrictionDetail = if ($diskRestrictions.Count -eq 0) { 'none' } else { ($diskRestrictions.ReasonCode -join ', ') }
+    $diskSkuDetail = if (-not $skuResult.Succeeded) {
+        "Managed disk SKU query failed: $($skuResult.Error)"
+    }
+    elseif ($null -eq $diskSku) {
+        "Premium_LRS was not returned for managed disks in $($Config.Location)."
+    }
+    elseif ($diskRestrictions.Count -gt 0) {
+        "Premium_LRS managed disks in $($Config.Location) have restrictions: $diskRestrictionDetail."
+    }
+    else {
+        "Exact managed disk SKU in $($Config.Location); restrictions: none."
+    }
+    Add-WorkshopCheck -Checks $checks -Name 'Managed disk SKU Premium_LRS' -Passed $diskSkuPassed `
+        -Detail $diskSkuDetail `
+        -Remediation "Confirm Premium_LRS managed disks are available without subscription restrictions in $($Config.Location)."
+
+    $requiredResourceTypes = @(
+        @{ Provider = 'Microsoft.Compute'; Type = 'disks'; RequiredSku = 'Premium_LRS'; ExactSkuValidated = $true }
+        @{ Provider = 'Microsoft.Network'; Type = 'publicIPAddresses'; RequiredSku = 'Standard'; ExactSkuValidated = $false }
+        @{ Provider = 'Microsoft.Network'; Type = 'natGateways'; RequiredSku = 'Standard'; ExactSkuValidated = $false }
+        @{ Provider = 'Microsoft.Network'; Type = 'virtualNetworks'; RequiredSku = ''; ExactSkuValidated = $false }
+        @{ Provider = 'Microsoft.Network'; Type = 'networkSecurityGroups'; RequiredSku = ''; ExactSkuValidated = $false }
+        @{ Provider = 'Microsoft.Network'; Type = 'applicationSecurityGroups'; RequiredSku = ''; ExactSkuValidated = $false }
+        @{ Provider = 'Microsoft.Network'; Type = 'privateDnsZones'; RequiredSku = ''; ExactSkuValidated = $false }
+    )
+    foreach ($requirement in $requiredResourceTypes) {
+        $provider = $providerResult.Value | Where-Object ProviderNamespace -EQ $requirement.Provider | Select-Object -First 1
+        $resourceTypes = if ($null -ne $provider -and $provider.PSObject.Properties.Name -contains 'ResourceTypes') {
+            @($provider.ResourceTypes)
+        }
+        else {
+            @()
+        }
+        $resourceType = $resourceTypes | Where-Object {
+            $_.PSObject.Properties.Name -contains 'ResourceTypeName' -and $_.ResourceTypeName -eq $requirement.Type
+        } | Select-Object -First 1
+        $locations = if ($null -ne $resourceType -and $resourceType.PSObject.Properties.Name -contains 'Locations') {
+            @($resourceType.Locations)
+        }
+        else {
+            @()
+        }
+        $resourceTypePassed = $providerResult.Succeeded -and $null -ne $resourceType -and
+            (Test-WorkshopLocationMatch -Locations $locations -RequiredLocation $Config.Location)
+        if (-not $resourceTypePassed) {
+            $detail = "Provider metadata does not confirm resource-type support in location '$($Config.Location)'."
+            if (-not [string]::IsNullOrWhiteSpace([string] $requirement.RequiredSku) -and -not $requirement.ExactSkuValidated) {
+                $detail += " Deployment still requires SKU '$($requirement.RequiredSku)', whose exact regional listing is not asserted by this metadata."
+            }
+        }
+        elseif (-not [string]::IsNullOrWhiteSpace([string] $requirement.RequiredSku) -and -not $requirement.ExactSkuValidated) {
+            $detail = "Provider metadata confirms location '$($Config.Location)'; deployment requires SKU '$($requirement.RequiredSku)', whose exact regional listing is not asserted by this metadata."
+        }
+        elseif ($requirement.ExactSkuValidated) {
+            $detail = "Provider metadata confirms location '$($Config.Location)'; exact deployment SKU '$($requirement.RequiredSku)' is validated separately by the managed disk SKU check."
+        }
+        else {
+            $detail = "Provider metadata confirms resource-type support in location '$($Config.Location)'."
+        }
+        Add-WorkshopCheck -Checks $checks -Name "Resource type $($requirement.Provider)/$($requirement.Type)" -Passed $resourceTypePassed `
+            -Detail $detail `
+            -Remediation "Confirm $($requirement.Provider)/$($requirement.Type) supports $($Config.Location), then rerun preflight."
     }
 
     foreach ($role in @('Admin', 'Sql')) {
@@ -551,10 +666,18 @@ ${function:Test-WorkshopPrerequisites} = {
     foreach ($family in @($familyRequirements.Keys | Sort-Object)) {
         $usage = $usageResult.Value | Where-Object { $_.Name.Value -eq $family } | Select-Object -First 1
         $required = [int] $familyRequirements[$family]
-        $available = if ($null -eq $usage) { 0 } else { [int] $usage.Limit - [int] $usage.CurrentValue }
-        $quotaPassed = $usageResult.Succeeded -and $null -ne $usage -and $available -ge $required
+        $usageAvailable = $usageResult.Succeeded -and $null -ne $usage
+        $available = if ($usageAvailable) { [int] $usage.Limit - [int] $usage.CurrentValue } else { $null }
+        $missing = if ($usageAvailable) { [Math]::Max(0, $required - $available) } else { $null }
+        $quotaPassed = $usageAvailable -and $available -ge $required
+        $quotaDetail = if ($usageAvailable) {
+            "Required vCPUs: $required; available vCPUs: $available; missing vCPUs: $missing."
+        }
+        else {
+            "Required vCPUs: $required; available vCPUs: unknown; missing vCPUs: unknown."
+        }
         Add-WorkshopCheck -Checks $checks -Name "Quota $family" -Passed $quotaPassed `
-            -Detail "$required required vCPUs; $available available vCPUs for this family." `
+            -Detail $quotaDetail `
             -Remediation "Request at least $required available vCPUs for $family in $($Config.Location)."
     }
 

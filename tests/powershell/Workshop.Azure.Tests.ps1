@@ -34,15 +34,33 @@ BeforeAll {
             }
             GetProviders = {
                 @(
-                    'Microsoft.Compute', 'Microsoft.Network', 'Microsoft.Resources',
-                    'Microsoft.SqlVirtualMachine'
-                ) | ForEach-Object { [pscustomobject]@{ ProviderNamespace = $_; RegistrationState = 'Registered' } }
+                    [pscustomobject]@{
+                        ProviderNamespace = 'Microsoft.Compute'
+                        RegistrationState = 'Registered'
+                        ResourceTypes = @(
+                            [pscustomobject]@{ ResourceTypeName = 'disks'; Locations = @('Indonesia Central') }
+                        )
+                    }
+                    [pscustomobject]@{
+                        ProviderNamespace = 'Microsoft.Network'
+                        RegistrationState = 'Registered'
+                        ResourceTypes = @(
+                            'publicIPAddresses', 'natGateways', 'virtualNetworks',
+                            'networkSecurityGroups', 'applicationSecurityGroups', 'privateDnsZones'
+                        ) | ForEach-Object {
+                            [pscustomobject]@{ ResourceTypeName = $_; Locations = @('Indonesia Central') }
+                        }
+                    }
+                    [pscustomobject]@{ ProviderNamespace = 'Microsoft.Resources'; RegistrationState = 'Registered'; ResourceTypes = @() }
+                    [pscustomobject]@{ ProviderNamespace = 'Microsoft.SqlVirtualMachine'; RegistrationState = 'Registered'; ResourceTypes = @() }
+                )
             }
             GetLocations = { @([pscustomobject]@{ Location = 'indonesiacentral' }) }
             GetComputeSkus = {
                 @(
                     [pscustomobject]@{ Name = 'Standard_D4s_v5'; ResourceType = 'virtualMachines'; Family = 'standardDSv5Family'; Locations = @('indonesiacentral'); Restrictions = @() }
                     [pscustomobject]@{ Name = 'Standard_E8s_v5'; ResourceType = 'virtualMachines'; Family = 'standardESv5Family'; Locations = @('indonesiacentral'); Restrictions = @() }
+                    [pscustomobject]@{ Name = 'Premium_LRS'; ResourceType = 'disks'; Locations = @('indonesiacentral'); Restrictions = @() }
                 )
             }
             GetImages = {
@@ -282,6 +300,121 @@ Describe 'Non-destructive workshop preflight' {
         $script:RegisterCalls | Should -Be 0
     }
 
+    It 'accepts an authenticated context when the optional tenant parameter is omitted' {
+        $ops = Get-PassingOperationSet
+        $result = Test-WorkshopPrerequisites -Config $script:Config `
+            -SubscriptionId '11111111-1111-1111-1111-111111111111' `
+            -FacilitatorCidr '203.0.113.8/32' `
+            -WindowsClientLicenseAttested $true `
+            -SqlEnterpriseCostAcknowledged $true `
+            -ExpiresOn (Get-Date).Date.AddDays(2) `
+            -Operations $ops
+
+        $result.Passed | Should -BeTrue
+        ($result.Checks | Where-Object Name -EQ 'Azure context tenant').Status | Should -Be 'Passed'
+    }
+
+    It 'aggregates a missing authenticated account without throwing' {
+        $ops = Get-PassingOperationSet
+        $ops.GetContext = {
+            [pscustomobject]@{
+                Subscription = [pscustomobject]@{ Id = '11111111-1111-1111-1111-111111111111' }
+                Tenant = [pscustomobject]@{ Id = '22222222-2222-2222-2222-222222222222' }
+                Account = $null
+            }
+        }
+        { $script:Result = Invoke-PassingPreflight -Operations $ops } | Should -Not -Throw
+        $script:Result.Passed | Should -BeFalse
+        ($script:Result.Checks | Where-Object Name -EQ 'Azure context account').Status | Should -Be 'Failed'
+        ($script:Result.Checks | Where-Object Name -EQ 'Azure context subscription').Status | Should -Be 'Passed'
+    }
+
+    It 'aggregates a missing authenticated tenant without throwing' {
+        $ops = Get-PassingOperationSet
+        $ops.GetContext = {
+            [pscustomobject]@{
+                Subscription = [pscustomobject]@{ Id = '11111111-1111-1111-1111-111111111111' }
+                Tenant = $null
+                Account = [pscustomobject]@{ Id = 'facilitator@example.test' }
+            }
+        }
+        { $script:Result = Invoke-PassingPreflight -Operations $ops } | Should -Not -Throw
+        $script:Result.Passed | Should -BeFalse
+        ($script:Result.Checks | Where-Object Name -EQ 'Azure context tenant').Status | Should -Be 'Failed'
+        ($script:Result.Checks | Where-Object Name -EQ 'Azure context subscription').Status | Should -Be 'Passed'
+    }
+
+    It 'aggregates a subscription mismatch without throwing' {
+        $ops = Get-PassingOperationSet
+        $ops.GetContext = {
+            [pscustomobject]@{
+                Subscription = [pscustomobject]@{ Id = '33333333-3333-3333-3333-333333333333' }
+                Tenant = [pscustomobject]@{ Id = '22222222-2222-2222-2222-222222222222' }
+                Account = [pscustomobject]@{ Id = 'facilitator@example.test' }
+            }
+        }
+        { $script:Result = Invoke-PassingPreflight -Operations $ops } | Should -Not -Throw
+        $script:Result.Passed | Should -BeFalse
+        ($script:Result.Checks | Where-Object Name -EQ 'Azure context subscription').Status | Should -Be 'Failed'
+        ($script:Result.Checks | Where-Object Name -EQ 'Azure context account').Status | Should -Be 'Passed'
+    }
+
+    It 'aggregates an optional supplied-tenant mismatch without throwing' {
+        $ops = Get-PassingOperationSet
+        $ops.GetContext = {
+            [pscustomobject]@{
+                Subscription = [pscustomobject]@{ Id = '11111111-1111-1111-1111-111111111111' }
+                Tenant = [pscustomobject]@{ Id = '44444444-4444-4444-4444-444444444444' }
+                Account = [pscustomobject]@{ Id = 'facilitator@example.test' }
+            }
+        }
+        { $script:Result = Invoke-PassingPreflight -Operations $ops } | Should -Not -Throw
+        $script:Result.Passed | Should -BeFalse
+        ($script:Result.Checks | Where-Object Name -EQ 'Azure context tenant').Status | Should -Be 'Failed'
+        ($script:Result.Checks | Where-Object Name -EQ 'Azure context subscription').Status | Should -Be 'Passed'
+    }
+
+    It 'validates the approved managed disk SKU and required resource types in the region' {
+        $result = Invoke-PassingPreflight
+        ($result.Checks | Where-Object Name -EQ 'Managed disk SKU Premium_LRS').Status | Should -Be 'Passed'
+        foreach ($resourceType in @(
+            'Microsoft.Compute/disks', 'Microsoft.Network/publicIPAddresses',
+            'Microsoft.Network/natGateways', 'Microsoft.Network/virtualNetworks',
+            'Microsoft.Network/networkSecurityGroups', 'Microsoft.Network/applicationSecurityGroups',
+            'Microsoft.Network/privateDnsZones'
+        )) {
+            ($result.Checks | Where-Object Name -EQ "Resource type $resourceType").Status | Should -Be 'Passed'
+        }
+        ($result.Checks | Where-Object Name -EQ 'Resource type Microsoft.Network/publicIPAddresses').Detail |
+            Should -Be "Provider metadata confirms location 'indonesiacentral'; deployment requires SKU 'Standard', whose exact regional listing is not asserted by this metadata."
+        ($result.Checks | Where-Object Name -EQ 'Resource type Microsoft.Network/natGateways').Detail |
+            Should -Be "Provider metadata confirms location 'indonesiacentral'; deployment requires SKU 'Standard', whose exact regional listing is not asserted by this metadata."
+    }
+
+    It 'fails a restricted managed disk SKU and missing resource-type locations without throwing' {
+        $ops = Get-PassingOperationSet
+        $ops.GetComputeSkus = {
+            @(
+                [pscustomobject]@{ Name = 'Standard_D4s_v5'; ResourceType = 'virtualMachines'; Family = 'standardDSv5Family'; Locations = @('indonesiacentral'); Restrictions = @() }
+                [pscustomobject]@{ Name = 'Standard_E8s_v5'; ResourceType = 'virtualMachines'; Family = 'standardESv5Family'; Locations = @('indonesiacentral'); Restrictions = @() }
+                [pscustomobject]@{ Name = 'Premium_LRS'; ResourceType = 'disks'; Locations = @('indonesiacentral'); Restrictions = @([pscustomobject]@{ ReasonCode = 'NotAvailableForSubscription' }) }
+            )
+        }
+        $ops.GetProviders = {
+            @(
+                [pscustomobject]@{ ProviderNamespace = 'Microsoft.Compute'; RegistrationState = 'Registered'; ResourceTypes = @([pscustomobject]@{ ResourceTypeName = 'disks'; Locations = @('East US') }) }
+                [pscustomobject]@{ ProviderNamespace = 'Microsoft.Network'; RegistrationState = 'Registered'; ResourceTypes = @() }
+                [pscustomobject]@{ ProviderNamespace = 'Microsoft.Resources'; RegistrationState = 'Registered'; ResourceTypes = @() }
+                [pscustomobject]@{ ProviderNamespace = 'Microsoft.SqlVirtualMachine'; RegistrationState = 'Registered'; ResourceTypes = @() }
+            )
+        }
+        { $script:Result = Invoke-PassingPreflight -Operations $ops } | Should -Not -Throw
+        ($script:Result.Checks | Where-Object Name -EQ 'Managed disk SKU Premium_LRS').Status | Should -Be 'Failed'
+        @($script:Result.Checks | Where-Object { $_.Name -like 'Resource type *' -and $_.Status -eq 'Failed' }).Count | Should -Be 7
+        ($script:Result.Checks | Where-Object Name -EQ 'Resource type Microsoft.Compute/disks').Detail |
+            Should -Be "Provider metadata does not confirm resource-type support in location 'indonesiacentral'."
+    }
+
     It 'aggregates context, location, restriction, image, quota, attestation, date, and collision failures' {
         $ops = Get-PassingOperationSet
         $ops.GetContext = { [pscustomobject]@{ Subscription = [pscustomobject]@{ Id = 'wrong' }; Tenant = [pscustomobject]@{ Id = 'wrong' } } }
@@ -335,7 +468,8 @@ Describe 'Non-destructive workshop preflight' {
         $ops.GetVmUsages = { @([pscustomobject]@{ Name = [pscustomobject]@{ Value = 'sameFamily'; LocalizedValue = 'Same family' }; CurrentValue = 0; Limit = 11 }) }
         $result = Invoke-PassingPreflight -Operations $ops
         $result.Passed | Should -BeFalse
-        ($result.Checks | Where-Object Name -EQ 'Quota sameFamily').Detail | Should -Match '12 required'
+        ($result.Checks | Where-Object Name -EQ 'Quota sameFamily').Detail |
+            Should -Be 'Required vCPUs: 12; available vCPUs: 11; missing vCPUs: 1.'
     }
 
     It 'reports missing and outdated required Az modules without throwing' {
@@ -360,6 +494,12 @@ Describe 'Non-destructive workshop preflight' {
         $script:Result.Passed | Should -BeFalse
         ($script:Result.Checks.Name -join ',') | Should -Match 'Quota standardDSv5Family'
         ($script:Result.Checks.Name -join ',') | Should -Match 'Quota standardESv5Family'
+        ($script:Result.Checks | Where-Object Name -EQ 'Quota standardDSv5Family').Detail |
+            Should -Be 'Required vCPUs: 4; available vCPUs: unknown; missing vCPUs: unknown.'
+        ($script:Result.Checks | Where-Object Name -EQ 'Managed disk SKU Premium_LRS').Status | Should -Be 'Failed'
+        ($script:Result.Checks | Where-Object Name -EQ 'Managed disk SKU Premium_LRS').Detail |
+            Should -Be 'Managed disk SKU query failed: simulated read failure'
+        @($script:Result.Checks | Where-Object { $_.Name -like 'Resource type *' -and $_.Status -eq 'Failed' }).Count | Should -Be 7
         @($script:Result.Checks | Where-Object Status -EQ 'Failed').Count | Should -BeGreaterThan 10
     }
 
