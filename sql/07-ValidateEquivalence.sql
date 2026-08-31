@@ -11,8 +11,8 @@ SET XACT_ABORT ON;
 
 DECLARE @OriginalRunId sql_variant = SESSION_CONTEXT(N'WorkshopRunId');
 DECLARE @OriginalManualExecution sql_variant = SESSION_CONTEXT(N'WorkshopManualExecution');
-DECLARE @ValidationRunId nvarchar(128) = N'Task9Validation-' + CONVERT(nvarchar(36), NEWID());
-DECLARE @ValidationRunIdContext sql_variant = CONVERT(sql_variant, @ValidationRunId);
+DECLARE @ValidationBatchID uniqueidentifier = NEWID();
+DECLARE @ValidationRunIdContext sql_variant = CONVERT(sql_variant, @ValidationBatchID);
 DECLARE @ValidationManualExecutionContext sql_variant = CONVERT(sql_variant, CONVERT(int, 1));
 DECLARE @RunIdContextChanged bit = 0;
 DECLARE @ManualExecutionContextChanged bit = 0;
@@ -51,7 +51,9 @@ BEGIN
     CREATE TABLE lab.ValidationRun
     (
         ValidationRunID bigint IDENTITY(1,1) NOT NULL CONSTRAINT PK_ValidationRun PRIMARY KEY,
-        RunID nvarchar(128) NOT NULL,
+        ValidationBatchID uniqueidentifier NOT NULL,
+        BaselineRunID uniqueidentifier NULL,
+        OptimizedRunID uniqueidentifier NULL,
         ValidationCaseName sysname NOT NULL,
         StartDate date NOT NULL,
         EndDateExclusive date NOT NULL,
@@ -62,7 +64,15 @@ BEGIN
         BaselineHash varbinary(32) NOT NULL,
         OptimizedHash varbinary(32) NOT NULL,
         Passed bit NOT NULL,
-        ValidatedAtUtc datetime2(0) NOT NULL
+        ValidatedAtUtc datetime2(0) NOT NULL,
+        CONSTRAINT UQ_ValidationRun_BatchCase UNIQUE (ValidationBatchID, ValidationCaseName),
+        CONSTRAINT FK_ValidationRun_BaselineWorkshopRun FOREIGN KEY (BaselineRunID)
+            REFERENCES lab.WorkshopRun (RunID),
+        CONSTRAINT FK_ValidationRun_OptimizedWorkshopRun FOREIGN KEY (OptimizedRunID)
+            REFERENCES lab.WorkshopRun (RunID),
+        CONSTRAINT CK_ValidationRun_Linkage CHECK
+            ((BaselineRunID IS NULL AND OptimizedRunID IS NULL)
+             OR (BaselineRunID IS NOT NULL AND OptimizedRunID IS NOT NULL))
     );
 END;
 
@@ -81,18 +91,20 @@ INSERT @ExpectedValidationColumns
     (column_id, name, type_name, max_length, precision, scale, is_nullable, is_identity)
 VALUES
     (1, N'ValidationRunID', N'bigint', 8, 19, 0, 0, 1),
-    (2, N'RunID', N'nvarchar', 256, 0, 0, 0, 0),
-    (3, N'ValidationCaseName', N'nvarchar', 256, 0, 0, 0, 0),
-    (4, N'StartDate', N'date', 3, 10, 0, 0, 0),
-    (5, N'EndDateExclusive', N'date', 3, 10, 0, 0, 0),
-    (6, N'TerritoryID', N'int', 4, 10, 0, 1, 0),
-    (7, N'TopCount', N'int', 4, 10, 0, 0, 0),
-    (8, N'BaselineRowCount', N'bigint', 8, 19, 0, 0, 0),
-    (9, N'OptimizedRowCount', N'bigint', 8, 19, 0, 0, 0),
-    (10, N'BaselineHash', N'varbinary', 32, 0, 0, 0, 0),
-    (11, N'OptimizedHash', N'varbinary', 32, 0, 0, 0, 0),
-    (12, N'Passed', N'bit', 1, 1, 0, 0, 0),
-    (13, N'ValidatedAtUtc', N'datetime2', 6, 19, 0, 0, 0);
+    (2, N'ValidationBatchID', N'uniqueidentifier', 16, 0, 0, 0, 0),
+    (3, N'BaselineRunID', N'uniqueidentifier', 16, 0, 0, 1, 0),
+    (4, N'OptimizedRunID', N'uniqueidentifier', 16, 0, 0, 1, 0),
+    (5, N'ValidationCaseName', N'nvarchar', 256, 0, 0, 0, 0),
+    (6, N'StartDate', N'date', 3, 10, 0, 0, 0),
+    (7, N'EndDateExclusive', N'date', 3, 10, 0, 0, 0),
+    (8, N'TerritoryID', N'int', 4, 10, 0, 1, 0),
+    (9, N'TopCount', N'int', 4, 10, 0, 0, 0),
+    (10, N'BaselineRowCount', N'bigint', 8, 19, 0, 0, 0),
+    (11, N'OptimizedRowCount', N'bigint', 8, 19, 0, 0, 0),
+    (12, N'BaselineHash', N'varbinary', 32, 0, 0, 0, 0),
+    (13, N'OptimizedHash', N'varbinary', 32, 0, 0, 0, 0),
+    (14, N'Passed', N'bit', 1, 1, 0, 0, 0),
+    (15, N'ValidatedAtUtc', N'datetime2', 6, 19, 0, 0, 0);
 
 IF EXISTS
 (
@@ -389,7 +401,9 @@ CREATE TABLE #Optimized
 
 DECLARE @PassingCases table
 (
-    RunID nvarchar(128) NOT NULL,
+    ValidationBatchID uniqueidentifier NOT NULL,
+    BaselineRunID uniqueidentifier NULL,
+    OptimizedRunID uniqueidentifier NULL,
     ValidationCaseName sysname NOT NULL,
     StartDate date NOT NULL,
     EndDateExclusive date NOT NULL,
@@ -561,10 +575,11 @@ DECLARE @CaseCount int = (SELECT COUNT(*) FROM @Cases);
         END;
 
         INSERT @PassingCases
-            (RunID, ValidationCaseName, StartDate, EndDateExclusive, TerritoryID, TopCount,
+            (ValidationBatchID, BaselineRunID, OptimizedRunID, ValidationCaseName,
+             StartDate, EndDateExclusive, TerritoryID, TopCount,
              BaselineRowCount, OptimizedRowCount, BaselineHash, OptimizedHash, Passed, ValidatedAtUtc)
         VALUES
-            (@ValidationRunId, @CaseName, @StartDate, @EndDateExclusive, @TerritoryID, @TopCount,
+            (@ValidationBatchID, NULL, NULL, @CaseName, @StartDate, @EndDateExclusive, @TerritoryID, @TopCount,
              @BaselineRowCount, @OptimizedRowCount, @BaselineHash, @OptimizedHash, 1, SYSUTCDATETIME());
 
         SET @CaseNumber += 1;
@@ -657,9 +672,11 @@ DECLARE @CaseCount int = (SELECT COUNT(*) FROM @Cases);
 
     /* Publish evidence only after every result and invalid-input case has passed. */
     INSERT lab.ValidationRun
-        (RunID, ValidationCaseName, StartDate, EndDateExclusive, TerritoryID, TopCount,
+        (ValidationBatchID, BaselineRunID, OptimizedRunID, ValidationCaseName,
+         StartDate, EndDateExclusive, TerritoryID, TopCount,
          BaselineRowCount, OptimizedRowCount, BaselineHash, OptimizedHash, Passed, ValidatedAtUtc)
-    SELECT RunID, ValidationCaseName, StartDate, EndDateExclusive, TerritoryID, TopCount,
+    SELECT ValidationBatchID, BaselineRunID, OptimizedRunID, ValidationCaseName,
+        StartDate, EndDateExclusive, TerritoryID, TopCount,
         BaselineRowCount, OptimizedRowCount, BaselineHash, OptimizedHash, Passed, ValidatedAtUtc
     FROM @PassingCases;
 
@@ -699,5 +716,6 @@ BEGIN CATCH
     THROW;
 END CATCH;
 
-SELECT @ValidationRunId AS RunID, @CaseCount AS PassingCaseCount, N'ValidationPassed' AS ValidationStatus;
+SELECT @ValidationBatchID AS ValidationBatchID, @CaseCount AS PassingCaseCount,
+    N'ValidationPassed' AS ValidationStatus;
 GO

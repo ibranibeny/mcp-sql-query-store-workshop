@@ -995,7 +995,8 @@ def test_equivalence_harness_protects_and_restores_exact_session_context_values(
     assert first_try < set_run_id < set_manual < text.index("CREATE TABLE LAB.VALIDATIONRUN")
     assert "DECLARE @ORIGINALRUNID SQL_VARIANT = SESSION_CONTEXT(N'WORKSHOPRUNID')" in text
     assert "DECLARE @ORIGINALMANUALEXECUTION SQL_VARIANT = SESSION_CONTEXT(N'WORKSHOPMANUALEXECUTION')" in text
-    assert "DECLARE @VALIDATIONRUNIDCONTEXT SQL_VARIANT = CONVERT(SQL_VARIANT, @VALIDATIONRUNID)" in text
+    assert "DECLARE @VALIDATIONBATCHID UNIQUEIDENTIFIER = NEWID()" in text
+    assert "DECLARE @VALIDATIONRUNIDCONTEXT SQL_VARIANT = CONVERT(SQL_VARIANT, @VALIDATIONBATCHID)" in text
     assert "DECLARE @VALIDATIONMANUALEXECUTIONCONTEXT SQL_VARIANT = CONVERT(SQL_VARIANT, CONVERT(INT, 1))" in text
     assert "@VALUE = @ORIGINALRUNID" in text
     assert "@VALUE = @ORIGINALMANUALEXECUTION" in text
@@ -1167,7 +1168,9 @@ def test_validation_run_contract_is_task9_compatible_and_verified() -> None:
     text = normalized("05-CreateDiagnostics.sql")
     for contract in (
         "VALIDATIONRUNID BIGINT IDENTITY(1,1)",
-        "RUNID NVARCHAR(128) NOT NULL",
+        "VALIDATIONBATCHID UNIQUEIDENTIFIER NOT NULL",
+        "BASELINERUNID UNIQUEIDENTIFIER NULL",
+        "OPTIMIZEDRUNID UNIQUEIDENTIFIER NULL",
         "VALIDATIONCASENAME SYSNAME NOT NULL",
         "BASELINEHASH VARBINARY(32) NOT NULL",
         "OPTIMIZEDHASH VARBINARY(32) NOT NULL",
@@ -1178,6 +1181,15 @@ def test_validation_run_contract_is_task9_compatible_and_verified() -> None:
         "EXISTING EVIDENCE TABLE COLUMN CONTRACT IS INCOMPATIBLE",
     ):
         assert contract in text
+    assert "RUNID NVARCHAR(128)" not in text
+
+    task9 = normalized("07-ValidateEquivalence.sql")
+    assert "DECLARE @VALIDATIONBATCHID UNIQUEIDENTIFIER = NEWID()" in task9
+    assert "VALIDATIONBATCHID UNIQUEIDENTIFIER NOT NULL" in task9
+    assert "BASELINERUNID UNIQUEIDENTIFIER NULL" in task9
+    assert "OPTIMIZEDRUNID UNIQUEIDENTIFIER NULL" in task9
+    assert "INSERT LAB.VALIDATIONRUN" in task9
+    assert "(VALIDATIONBATCHID, BASELINERUNID, OPTIMIZEDRUNID, VALIDATIONCASENAME" in task9
 
 
 def test_all_four_evidence_tables_have_exact_deterministic_column_metadata_checks() -> None:
@@ -1226,6 +1238,8 @@ def test_all_four_evidence_tables_validate_exact_keys_indexes_defaults_and_check
         "SYS.FOREIGN_KEYS",
         "SYS.FOREIGN_KEY_COLUMNS",
         "DELETE_REFERENTIAL_ACTION_DESC",
+        "UPDATE_REFERENTIAL_ACTION_DESC",
+        "IS_NOT_FOR_REPLICATION",
         "SYS.DEFAULT_CONSTRAINTS",
         "SYS.CHECK_CONSTRAINTS",
     ):
@@ -1234,12 +1248,46 @@ def test_all_four_evidence_tables_validate_exact_keys_indexes_defaults_and_check
         assert f"PK_{table}" in text
     assert "FK_WORKSHOPSAMPLE_WORKSHOPRUN" in text
     assert "FK_WORKSHOPREQUESTSAMPLE_WORKSHOPSAMPLE" in text
+    assert "FK_VALIDATIONRUN_BASELINEWORKSHOPRUN" in text
+    assert "FK_VALIDATIONRUN_OPTIMIZEDWORKSHOPRUN" in text
+    assert "IS_DISABLED" in text and "IS_HYPOTHETICAL" in text
+    assert re.search(r"SYS\.INDEXES.*?I\.IS_DISABLED.*?I\.IS_HYPOTHETICAL", text)
+    assert re.search(r"SYS\.CHECK_CONSTRAINTS.*?CC\.IS_NOT_FOR_REPLICATION", text)
+    assert "SYS.DEFAULT_CONSTRAINTS" in text and "DC.DEFINITION" in text
     assert text.index("THROW 51604") < text.index("CREATE OR ALTER VIEW LAB.VW_WORKSHOPRUNSUMMARY")
+
+
+def test_workshop_outcome_check_has_only_the_exact_allowed_terminal_states() -> None:
+    text = normalized("05-CreateDiagnostics.sql")
+    expected = (
+        "OUTCOME IS NULL OR OUTCOME IN ('TARGETMET', 'IMPROVEDOUTSIDETARGET', "
+        "'NOMATERIALIMPROVEMENT', 'BASELINETARGETNOTREACHED', 'SAFETYSTOP', "
+        "'MANUALSTOP', 'FAILED')"
+    )
+    assert expected in text
+    for legacy in ("'IMPROVED'", "'INCONCLUSIVE'", "'REGRESSED'"):
+        assert legacy not in text
+
+
+def test_validation_batch_has_a_privileged_exact_run_linker_not_exposed_to_reader() -> None:
+    text = normalized("05-CreateDiagnostics.sql")
+    assert "CREATE OR ALTER PROCEDURE LAB.USP_LINKVALIDATIONBATCH" in text
+    assert "@VALIDATIONBATCHID UNIQUEIDENTIFIER" in text
+    assert "@BASELINERUNID UNIQUEIDENTIFIER" in text
+    assert "@OPTIMIZEDRUNID UNIQUEIDENTIFIER" in text
+    assert "REQUIREDVALIDATIONCASES" in text
+    assert "PASSED = 0" in text
+    assert "BASELINERUNID IS NOT NULL" in text
+    assert "OPTIMIZEDRUNID IS NOT NULL" in text
+    assert "UPDATE LAB.VALIDATIONRUN" in text
+    assert "SET BASELINERUNID = @BASELINERUNID" in text
+    assert "OPTIMIZEDRUNID = @OPTIMIZEDRUNID" in text
+    assert "GRANT EXECUTE ON OBJECT::LAB.USP_LINKVALIDATIONBATCH TO [MCP_WORKSHOP_READER]" not in text
 
 
 def test_six_diagnostic_procedures_are_separate_stable_owner_batches() -> None:
     text = normalized("05-CreateDiagnostics.sql")
-    assert text.count("CREATE OR ALTER PROCEDURE LAB.USP_") == 6
+    assert text.count("CREATE OR ALTER PROCEDURE LAB.USP_") == 7
     for procedure in DIAGNOSTIC_PROCEDURES:
         batch = re.sub(r"\s+", " ", diagnostic_batch(procedure)).upper()
         assert "WITH EXECUTE AS OWNER" in batch
@@ -1295,7 +1343,7 @@ def test_server_dmv_access_uses_minimal_certificate_module_signing() -> None:
     assert "DATABASEPROPERTYEX(DB_NAME(), N'ISTRUSTWORTHYON')" in text
     assert "TRUSTWORTHY ON" not in text
     assert "PRIVATE KEY" not in text.upper()
-    assert "WITH PASSWORD" not in text
+    assert not re.search(r"(?i)WITH\s+PASSWORD\s*=\s*N?'[^']+?'", raw)
     assert "CERTIFICATE EXPORT IS PUBLIC" in text
     assert not re.search(r"(?i)(PASSWORD|SECRET)\s*=\s*N?'[^']+'", raw)
 
@@ -1327,10 +1375,11 @@ def test_query_store_diagnostics_validate_windows_scope_and_safe_procedure_enum(
     assert "SP_EXECUTESQL" not in plans and "EXEC(" not in plans
 
 
-def test_run_comparison_uses_peak_targets_correctness_and_explicit_material_regression() -> None:
+def test_run_comparison_requires_exact_validation_linkage_and_material_improvement() -> None:
     body = re.sub(r"\s+", " ", diagnostic_batch("lab.usp_CompareWorkshopRuns")).upper()
     assert "@BASELINERUNID UNIQUEIDENTIFIER = NULL" in body
     assert "@OPTIMIZEDRUNID UNIQUEIDENTIFIER = NULL" in body
+    assert "@VALIDATIONBATCHID UNIQUEIDENTIFIER = NULL" in body
     assert "@PARENTCOMPARISONID UNIQUEIDENTIFIER = NULL" in body
     assert "ROW_NUMBER() OVER (PARTITION BY" in body
     assert "COUNT_BIG(*) OVER (PARTITION BY" in body
@@ -1350,6 +1399,14 @@ def test_run_comparison_uses_peak_targets_correctness_and_explicit_material_regr
     assert "OPTIMIZEDPEAKGRANTUTILIZATIONPERCENT BETWEEN 35.00 AND 45.00" in body
     assert "BASELINEPEAKGRANTUTILIZATIONPERCENT - OPTIMIZEDPEAKGRANTUTILIZATIONPERCENT >= 25.00" in body
     assert "LAB.VALIDATIONRUN" in body and "PASSED = 0" in body
+    assert "VALIDATION.VALIDATIONBATCHID = @VALIDATIONBATCHID" in body
+    assert "VALIDATION.BASELINERUNID = @BASELINERUNID" in body
+    assert "VALIDATION.OPTIMIZEDRUNID = @OPTIMIZEDRUNID" in body
+    assert "REQUIREDVALIDATIONCASES" in body
+    assert "N'REPEATED-EXECUTION'" in body
+    assert "CORRECTNESSPASSED" in body
+    assert "HASMATERIALREGRESSION" in body
+    assert "HASADDITIONALMETRICIMPROVEMENT" in body
     for pair in (
         ("BASELINEDURATIONMS", "OPTIMIZEDDURATIONMS"),
         ("BASELINECPUMS", "OPTIMIZEDCPUMS"),
@@ -1360,12 +1417,16 @@ def test_run_comparison_uses_peak_targets_correctness_and_explicit_material_regr
         baseline, optimized = pair
         assert f"{baseline} = 0 AND {optimized} > 0" in body
         assert f"{optimized}) > CONVERT(DECIMAL(38,4), {baseline}) * 1.10" in body
+        assert f"{baseline} > 0 AND CONVERT(DECIMAL(38,4), {optimized}) <= CONVERT(DECIMAL(38,4), {baseline}) * 0.90" in body
     outcome_case = body[body.index("CONVERT(VARCHAR(24), CASE"):]
     assert "MEDIANGRANTUTILIZATIONPERCENT BETWEEN" not in outcome_case
     assert "MEDIANGRANTUTILIZATIONPERCENT - OPTIMIZEDMEDIANGRANTUTILIZATIONPERCENT >=" not in outcome_case
     assert body.count("THROW") >= 3
     assert "FROZENSETTINGSHASH" in body and "RUNSTATUS = 'COMPLETED'" in body
     assert "NO MEMORY SAMPLES" in body
+    assert re.search(r"WHEN CORRECTNESSPASSED = 0 THEN N'FAILED'", outcome_case)
+    assert re.search(r"WHEN HASMATERIALREGRESSION = 1 THEN N'NOMATERIALIMPROVEMENT'", outcome_case)
+    assert re.search(r"WHEN HASADDITIONALMETRICIMPROVEMENT = 0 THEN N'NOMATERIALIMPROVEMENT'", outcome_case)
 
 
 def test_summary_views_and_reader_permissions_are_least_privileged_and_verified() -> None:
@@ -1378,16 +1439,25 @@ def test_summary_views_and_reader_permissions_are_least_privileged_and_verified(
         if re.match(r"CREATE\s+OR\s+ALTER\s+VIEW", batch, re.IGNORECASE)
     )
     assert "SUSER_ID(N'MCP_WORKSHOP_READER') IS NULL" in text
+    assert "SESSION_CONTEXT(N'MCPREADERPASSWORD')" in text
+    assert "CREATE LOGIN" in text
+    assert "CHECK_POLICY = ON" in text
+    assert "CHECK_EXPIRATION = OFF" in text
+    assert "DEFAULT_DATABASE = [ADVENTUREWORKS2022]" in text
+    assert "QUOTENAME(@READERLOGINNAME)" in text
+    assert "REPLACE(@MCPREADERPASSWORD" in text
     assert "CREATE USER [MCP_WORKSHOP_READER] FOR LOGIN [MCP_WORKSHOP_READER]" in text
-    assert "CREATE LOGIN [MCP_WORKSHOP_READER]" not in text and "WITH PASSWORD" not in text
+    assert not re.search(r"(?i)WITH\s+PASSWORD\s*=\s*N?'[^']+?'", sql("05-CreateDiagnostics.sql"))
     assert "GRANT CONNECT TO [MCP_WORKSHOP_READER]" in text
     for procedure in DIAGNOSTIC_PROCEDURES:
         assert f"GRANT EXECUTE ON OBJECT::{procedure.upper()} TO [MCP_WORKSHOP_READER]" in text
     for view in views:
         assert f"GRANT SELECT ON OBJECT::{view} TO [MCP_WORKSHOP_READER]" in text
-    for permission in ("INSERT", "UPDATE", "DELETE"):
-        assert f"DENY {permission} ON SCHEMA::LAB TO [MCP_WORKSHOP_READER]" in text
-    assert "DENY ALTER ON SCHEMA::LAB TO [MCP_WORKSHOP_READER]" in text
+    for table in ("WORKSHOPRUN", "WORKSHOPSAMPLE", "WORKSHOPREQUESTSAMPLE", "VALIDATIONRUN"):
+        for permission in ("INSERT", "UPDATE", "DELETE", "ALTER", "CONTROL"):
+            assert f"DENY {permission} ON OBJECT::LAB.{table} TO [MCP_WORKSHOP_READER]" in text
+    for permission in ("INSERT", "UPDATE", "DELETE", "ALTER", "CONTROL"):
+        assert f"DENY {permission} ON SCHEMA::LAB TO [MCP_WORKSHOP_READER]" not in text
     assert "DENY CONTROL ON DATABASE::[ADVENTUREWORKS2022] TO [MCP_WORKSHOP_READER]" not in text
     assert "DENY CONTROL ON SCHEMA::LAB TO [MCP_WORKSHOP_READER]" not in text
     assert "EXECUTE AS USER = N'MCP_WORKSHOP_READER'" in text
@@ -1400,6 +1470,9 @@ def test_summary_views_and_reader_permissions_are_least_privileged_and_verified(
     assert "GRANT_WITH_GRANT_OPTION" in text
     assert "SYS.DATABASE_ROLE_MEMBERS" in text
     assert "SYS.SERVER_ROLE_MEMBERS" in text
+    assert "SYS.FN_MY_PERMISSIONS" in text
+    assert "USER_ID(N'PUBLIC')" in text
+    assert "@EFFECTIVEREADERPERMISSIONS" in text
     assert "FROM MASTER.SYS.SERVER_PERMISSIONS" in text
     assert "STATE IN (N'G', N'W')" in text
     assert "PERMISSION_NAME IN (N'VIEW SERVER STATE'" not in text
@@ -1413,13 +1486,34 @@ def test_summary_views_and_reader_permissions_are_least_privileged_and_verified(
         assert f"N'{procedure.upper()}', N'OBJECT', N'EXECUTE'" in permission_verification
     for view in views:
         assert f"N'{view}', N'OBJECT', N'SELECT'" in permission_verification
-    for permission in ("ALTER", "CONTROL", "TAKE OWNERSHIP", "VIEW DEFINITION"):
-        assert f"N'LAB', N'SCHEMA', N'{permission}'" in permission_verification
+    for table in ("WORKSHOPRUN", "WORKSHOPSAMPLE", "WORKSHOPREQUESTSAMPLE", "VALIDATIONRUN"):
+        for permission in ("ALTER", "CONTROL"):
+            assert f"N'LAB.{table}', N'OBJECT', N'{permission}'" in permission_verification
     assert "N'DBO', N'USER', N'IMPERSONATE'" in permission_verification
     assert permission_verification.index("BEGIN TRY") < permission_verification.index("REVERT")
     assert permission_verification.index("REVERT") < permission_verification.index("BEGIN CATCH")
     for forbidden in ("SP_ADDROLEMEMBER", "SP_ADDSRVROLEMEMBER", "ALTER SERVER ROLE", "ADD MEMBER", "TRUSTWORTHY ON"):
         assert forbidden not in text
+
+
+def test_reader_login_secret_is_validated_cleared_and_never_embedded_in_source() -> None:
+    raw = sql("05-CreateDiagnostics.sql")
+    text = normalized("05-CreateDiagnostics.sql")
+    assert "DECLARE @MCPREADERPASSWORD NVARCHAR(4000)" in text
+    assert "LEN(@MCPREADERPASSWORD) NOT BETWEEN 20 AND 128" in text
+    assert "DATALENGTH(@MCPREADERPASSWORD) / 2 NOT BETWEEN 20 AND 128" in text
+    assert "COLLATE Latin1_General_100_BIN2 NOT LIKE N'%[A-Z]%'" in raw
+    assert "COLLATE Latin1_General_100_BIN2 NOT LIKE N'%[a-z]%'" in raw
+    assert "COLLATE LATIN1_GENERAL_100_BIN2 NOT LIKE N'%[0-9]%'" in text
+    assert "MCP_WORKSHOP_READER" in text and "CHARINDEX" in text
+    assert "@KEY = N'MCPREADERPASSWORD', @VALUE = NULL" in text
+    assert "TYPE_DESC = N'SQL_LOGIN'" in text
+    assert "IS_DISABLED = 0" in text
+    assert "DEFAULT_DATABASE_NAME = N'ADVENTUREWORKS2022'" in text
+    assert "IS_POLICY_CHECKED = 1" in text
+    assert "IS_EXPIRATION_CHECKED = 0" in text
+    assert "IS_SRVROLEMEMBER(N'SYSADMIN', N'MCP_WORKSHOP_READER')" in text
+    assert not re.search(r"(?i)PASSWORD\s*=\s*N?'[^']+'", raw)
 
 
 def test_all_sql_is_bounded_and_avoids_destructive_or_public_network_commands() -> None:

@@ -72,7 +72,8 @@ BEGIN
         CONSTRAINT CK_WorkshopRun_Phase CHECK (Phase IN ('Baseline', 'Optimized', 'Comparison')),
         CONSTRAINT CK_WorkshopRun_Status CHECK (RunStatus IN ('Pending', 'Running', 'Completed', 'Failed', 'Stopped')),
         CONSTRAINT CK_WorkshopRun_Outcome CHECK
-            (Outcome IS NULL OR Outcome IN ('Improved', 'Inconclusive', 'Regressed', 'Failed')),
+            (Outcome IS NULL OR Outcome IN ('TargetMet', 'ImprovedOutsideTarget', 'NoMaterialImprovement',
+                'BaselineTargetNotReached', 'SafetyStop', 'ManualStop', 'Failed')),
         CONSTRAINT CK_WorkshopRun_Timestamps CHECK (CompletedAtUtc IS NULL OR CompletedAtUtc >= StartedAtUtc),
         CONSTRAINT CK_WorkshopRun_FrozenSettingsJson CHECK
             (LEN(FrozenSettingsJson) BETWEEN 2 AND 4000 AND ISJSON(FrozenSettingsJson) = 1),
@@ -162,7 +163,9 @@ BEGIN
     CREATE TABLE lab.ValidationRun
     (
         ValidationRunID bigint IDENTITY(1,1) NOT NULL CONSTRAINT PK_ValidationRun PRIMARY KEY,
-        RunID nvarchar(128) NOT NULL,
+        ValidationBatchID uniqueidentifier NOT NULL,
+        BaselineRunID uniqueidentifier NULL,
+        OptimizedRunID uniqueidentifier NULL,
         ValidationCaseName sysname NOT NULL,
         StartDate date NOT NULL,
         EndDateExclusive date NOT NULL,
@@ -173,7 +176,15 @@ BEGIN
         BaselineHash varbinary(32) NOT NULL,
         OptimizedHash varbinary(32) NOT NULL,
         Passed bit NOT NULL,
-        ValidatedAtUtc datetime2(0) NOT NULL
+        ValidatedAtUtc datetime2(0) NOT NULL,
+        CONSTRAINT UQ_ValidationRun_BatchCase UNIQUE (ValidationBatchID, ValidationCaseName),
+        CONSTRAINT FK_ValidationRun_BaselineWorkshopRun FOREIGN KEY (BaselineRunID)
+            REFERENCES lab.WorkshopRun (RunID),
+        CONSTRAINT FK_ValidationRun_OptimizedWorkshopRun FOREIGN KEY (OptimizedRunID)
+            REFERENCES lab.WorkshopRun (RunID),
+        CONSTRAINT CK_ValidationRun_Linkage CHECK
+            ((BaselineRunID IS NULL AND OptimizedRunID IS NULL)
+             OR (BaselineRunID IS NOT NULL AND OptimizedRunID IS NOT NULL))
     );
 END;
 
@@ -244,18 +255,20 @@ VALUES
     (N'WorkshopRequestSample', 13, N'QueryID', N'bigint', 8, 19, 0, 1, 0),
     (N'WorkshopRequestSample', 14, N'PlanID', N'bigint', 8, 19, 0, 1, 0),
     (N'ValidationRun', 1, N'ValidationRunID', N'bigint', 8, 19, 0, 0, 1),
-    (N'ValidationRun', 2, N'RunID', N'nvarchar', 256, 0, 0, 0, 0),
-    (N'ValidationRun', 3, N'ValidationCaseName', N'sysname', 256, 0, 0, 0, 0),
-    (N'ValidationRun', 4, N'StartDate', N'date', 3, 10, 0, 0, 0),
-    (N'ValidationRun', 5, N'EndDateExclusive', N'date', 3, 10, 0, 0, 0),
-    (N'ValidationRun', 6, N'TerritoryID', N'int', 4, 10, 0, 1, 0),
-    (N'ValidationRun', 7, N'TopCount', N'int', 4, 10, 0, 0, 0),
-    (N'ValidationRun', 8, N'BaselineRowCount', N'bigint', 8, 19, 0, 0, 0),
-    (N'ValidationRun', 9, N'OptimizedRowCount', N'bigint', 8, 19, 0, 0, 0),
-    (N'ValidationRun', 10, N'BaselineHash', N'varbinary', 32, 0, 0, 0, 0),
-    (N'ValidationRun', 11, N'OptimizedHash', N'varbinary', 32, 0, 0, 0, 0),
-    (N'ValidationRun', 12, N'Passed', N'bit', 1, 1, 0, 0, 0),
-    (N'ValidationRun', 13, N'ValidatedAtUtc', N'datetime2', 6, 19, 0, 0, 0);
+    (N'ValidationRun', 2, N'ValidationBatchID', N'uniqueidentifier', 16, 0, 0, 0, 0),
+    (N'ValidationRun', 3, N'BaselineRunID', N'uniqueidentifier', 16, 0, 0, 1, 0),
+    (N'ValidationRun', 4, N'OptimizedRunID', N'uniqueidentifier', 16, 0, 0, 1, 0),
+    (N'ValidationRun', 5, N'ValidationCaseName', N'sysname', 256, 0, 0, 0, 0),
+    (N'ValidationRun', 6, N'StartDate', N'date', 3, 10, 0, 0, 0),
+    (N'ValidationRun', 7, N'EndDateExclusive', N'date', 3, 10, 0, 0, 0),
+    (N'ValidationRun', 8, N'TerritoryID', N'int', 4, 10, 0, 1, 0),
+    (N'ValidationRun', 9, N'TopCount', N'int', 4, 10, 0, 0, 0),
+    (N'ValidationRun', 10, N'BaselineRowCount', N'bigint', 8, 19, 0, 0, 0),
+    (N'ValidationRun', 11, N'OptimizedRowCount', N'bigint', 8, 19, 0, 0, 0),
+    (N'ValidationRun', 12, N'BaselineHash', N'varbinary', 32, 0, 0, 0, 0),
+    (N'ValidationRun', 13, N'OptimizedHash', N'varbinary', 32, 0, 0, 0, 0),
+    (N'ValidationRun', 14, N'Passed', N'bit', 1, 1, 0, 0, 0),
+    (N'ValidationRun', 15, N'ValidatedAtUtc', N'datetime2', 6, 19, 0, 0, 0);
 
 IF EXISTS
 (
@@ -356,19 +369,23 @@ DECLARE @ExpectedForeignKeyColumns table
 (
     constraint_name sysname NOT NULL, parent_table sysname NOT NULL, parent_column sysname NOT NULL,
     referenced_table sysname NOT NULL, referenced_column sysname NOT NULL, constraint_column_id int NOT NULL,
-    delete_referential_action_desc nvarchar(60) NOT NULL, is_disabled bit NOT NULL, is_not_trusted bit NOT NULL
+    delete_referential_action_desc nvarchar(60) NOT NULL, update_referential_action_desc nvarchar(60) NOT NULL,
+    is_disabled bit NOT NULL, is_not_trusted bit NOT NULL, is_not_for_replication bit NOT NULL
 );
 INSERT @ExpectedForeignKeyColumns VALUES
-    (N'FK_WorkshopSample_WorkshopRun', N'WorkshopSample', N'RunID', N'WorkshopRun', N'RunID', 1, N'NO_ACTION', 0, 0),
-    (N'FK_WorkshopRequestSample_WorkshopSample', N'WorkshopRequestSample', N'RunID', N'WorkshopSample', N'RunID', 1, N'NO_ACTION', 0, 0),
-    (N'FK_WorkshopRequestSample_WorkshopSample', N'WorkshopRequestSample', N'SampleSequence', N'WorkshopSample', N'SampleSequence', 2, N'NO_ACTION', 0, 0);
+    (N'FK_WorkshopSample_WorkshopRun', N'WorkshopSample', N'RunID', N'WorkshopRun', N'RunID', 1, N'NO_ACTION', N'NO_ACTION', 0, 0, 0),
+    (N'FK_WorkshopRequestSample_WorkshopSample', N'WorkshopRequestSample', N'RunID', N'WorkshopSample', N'RunID', 1, N'NO_ACTION', N'NO_ACTION', 0, 0, 0),
+    (N'FK_WorkshopRequestSample_WorkshopSample', N'WorkshopRequestSample', N'SampleSequence', N'WorkshopSample', N'SampleSequence', 2, N'NO_ACTION', N'NO_ACTION', 0, 0, 0),
+    (N'FK_ValidationRun_BaselineWorkshopRun', N'ValidationRun', N'BaselineRunID', N'WorkshopRun', N'RunID', 1, N'NO_ACTION', N'NO_ACTION', 0, 0, 0),
+    (N'FK_ValidationRun_OptimizedWorkshopRun', N'ValidationRun', N'OptimizedRunID', N'WorkshopRun', N'RunID', 1, N'NO_ACTION', N'NO_ACTION', 0, 0, 0);
 
 IF EXISTS
 (
     SELECT * FROM @ExpectedForeignKeyColumns
     EXCEPT
     SELECT fk.name, OBJECT_NAME(fk.parent_object_id), pc.name, OBJECT_NAME(fk.referenced_object_id), rc.name,
-           fkc.constraint_column_id, fk.delete_referential_action_desc, fk.is_disabled, fk.is_not_trusted
+            fkc.constraint_column_id, fk.delete_referential_action_desc, fk.update_referential_action_desc,
+            fk.is_disabled, fk.is_not_trusted, fk.is_not_for_replication
     FROM sys.foreign_keys AS fk
     INNER JOIN sys.foreign_key_columns AS fkc ON fkc.constraint_object_id = fk.object_id
     INNER JOIN sys.columns AS pc ON pc.object_id = fkc.parent_object_id AND pc.column_id = fkc.parent_column_id
@@ -379,7 +396,8 @@ IF EXISTS
 OR EXISTS
 (
     SELECT fk.name, OBJECT_NAME(fk.parent_object_id), pc.name, OBJECT_NAME(fk.referenced_object_id), rc.name,
-           fkc.constraint_column_id, fk.delete_referential_action_desc, fk.is_disabled, fk.is_not_trusted
+            fkc.constraint_column_id, fk.delete_referential_action_desc, fk.update_referential_action_desc,
+            fk.is_disabled, fk.is_not_trusted, fk.is_not_for_replication
     FROM sys.foreign_keys AS fk
     INNER JOIN sys.foreign_key_columns AS fkc ON fkc.constraint_object_id = fk.object_id
     INNER JOIN sys.columns AS pc ON pc.object_id = fkc.parent_object_id AND pc.column_id = fkc.parent_column_id
@@ -394,24 +412,28 @@ DECLARE @ExpectedUniqueIndexColumns table
 (
     index_name sysname NOT NULL, table_name sysname NOT NULL, type_desc nvarchar(60) NOT NULL,
     is_primary_key bit NOT NULL, is_unique_constraint bit NOT NULL, column_name sysname NOT NULL,
-    key_ordinal tinyint NOT NULL, is_descending_key bit NOT NULL, filter_definition nvarchar(4000) NULL
+    key_ordinal tinyint NOT NULL, is_descending_key bit NOT NULL, filter_definition nvarchar(4000) NULL,
+    is_disabled bit NOT NULL, is_hypothetical bit NOT NULL
 );
 INSERT @ExpectedUniqueIndexColumns VALUES
-    (N'PK_WorkshopRun', N'WorkshopRun', N'CLUSTERED', 1, 0, N'RunID', 1, 0, NULL),
-    (N'PK_WorkshopSample', N'WorkshopSample', N'CLUSTERED', 1, 0, N'RunID', 1, 0, NULL),
-    (N'PK_WorkshopSample', N'WorkshopSample', N'CLUSTERED', 1, 0, N'SampleSequence', 2, 0, NULL),
-    (N'PK_WorkshopRequestSample', N'WorkshopRequestSample', N'CLUSTERED', 1, 0, N'RunID', 1, 0, NULL),
-    (N'PK_WorkshopRequestSample', N'WorkshopRequestSample', N'CLUSTERED', 1, 0, N'SampleSequence', 2, 0, NULL),
-    (N'PK_WorkshopRequestSample', N'WorkshopRequestSample', N'CLUSTERED', 1, 0, N'SessionID', 3, 0, NULL),
-    (N'PK_WorkshopRequestSample', N'WorkshopRequestSample', N'CLUSTERED', 1, 0, N'RequestID', 4, 0, NULL),
-    (N'PK_ValidationRun', N'ValidationRun', N'CLUSTERED', 1, 0, N'ValidationRunID', 1, 0, NULL);
+    (N'PK_WorkshopRun', N'WorkshopRun', N'CLUSTERED', 1, 0, N'RunID', 1, 0, NULL, 0, 0),
+    (N'PK_WorkshopSample', N'WorkshopSample', N'CLUSTERED', 1, 0, N'RunID', 1, 0, NULL, 0, 0),
+    (N'PK_WorkshopSample', N'WorkshopSample', N'CLUSTERED', 1, 0, N'SampleSequence', 2, 0, NULL, 0, 0),
+    (N'PK_WorkshopRequestSample', N'WorkshopRequestSample', N'CLUSTERED', 1, 0, N'RunID', 1, 0, NULL, 0, 0),
+    (N'PK_WorkshopRequestSample', N'WorkshopRequestSample', N'CLUSTERED', 1, 0, N'SampleSequence', 2, 0, NULL, 0, 0),
+    (N'PK_WorkshopRequestSample', N'WorkshopRequestSample', N'CLUSTERED', 1, 0, N'SessionID', 3, 0, NULL, 0, 0),
+    (N'PK_WorkshopRequestSample', N'WorkshopRequestSample', N'CLUSTERED', 1, 0, N'RequestID', 4, 0, NULL, 0, 0),
+    (N'PK_ValidationRun', N'ValidationRun', N'CLUSTERED', 1, 0, N'ValidationRunID', 1, 0, NULL, 0, 0),
+    (N'UQ_ValidationRun_BatchCase', N'ValidationRun', N'NONCLUSTERED', 0, 1, N'ValidationBatchID', 1, 0, NULL, 0, 0),
+    (N'UQ_ValidationRun_BatchCase', N'ValidationRun', N'NONCLUSTERED', 0, 1, N'ValidationCaseName', 2, 0, NULL, 0, 0);
 
 IF EXISTS
 (
     SELECT * FROM @ExpectedUniqueIndexColumns
     EXCEPT
     SELECT i.name, OBJECT_NAME(i.object_id), i.type_desc, i.is_primary_key, i.is_unique_constraint,
-           c.name, CONVERT(tinyint, ic.key_ordinal), ic.is_descending_key, i.filter_definition
+            c.name, CONVERT(tinyint, ic.key_ordinal), ic.is_descending_key, i.filter_definition,
+            i.is_disabled, i.is_hypothetical
     FROM sys.indexes AS i
     INNER JOIN sys.index_columns AS ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id AND ic.key_ordinal > 0
     INNER JOIN sys.columns AS c ON c.object_id = ic.object_id AND c.column_id = ic.column_id
@@ -421,7 +443,8 @@ IF EXISTS
 OR EXISTS
 (
     SELECT i.name, OBJECT_NAME(i.object_id), i.type_desc, i.is_primary_key, i.is_unique_constraint,
-           c.name, CONVERT(tinyint, ic.key_ordinal), ic.is_descending_key, i.filter_definition
+            c.name, CONVERT(tinyint, ic.key_ordinal), ic.is_descending_key, i.filter_definition,
+            i.is_disabled, i.is_hypothetical
     FROM sys.indexes AS i
     INNER JOIN sys.index_columns AS ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id AND ic.key_ordinal > 0
     INNER JOIN sys.columns AS c ON c.object_id = ic.object_id AND c.column_id = ic.column_id
@@ -452,30 +475,32 @@ IF EXISTS (SELECT * FROM @ExpectedDefaults)
 DECLARE @ExpectedChecks table
 (
     table_name sysname NOT NULL, constraint_name sysname NOT NULL,
-    normalized_definition nvarchar(4000) NOT NULL, is_disabled bit NOT NULL, is_not_trusted bit NOT NULL
+    normalized_definition nvarchar(4000) NOT NULL, is_disabled bit NOT NULL,
+    is_not_trusted bit NOT NULL, is_not_for_replication bit NOT NULL
 );
 INSERT @ExpectedChecks VALUES
-    (N'WorkshopRun', N'CK_WorkshopRun_EvidenceClassification', N'EVIDENCECLASSIFICATIONIN''DOC-VERIFIED'',''SUBSCRIPTION-VALIDATED'',''LAB-MEASURED'',''ASSUMPTION'',''TARGET'',''ILLUSTRATIVE''', 0, 0),
-    (N'WorkshopRun', N'CK_WorkshopRun_Phase', N'PHASEIN''BASELINE'',''OPTIMIZED'',''COMPARISON''', 0, 0),
-    (N'WorkshopRun', N'CK_WorkshopRun_Status', N'RUNSTATUSIN''PENDING'',''RUNNING'',''COMPLETED'',''FAILED'',''STOPPED''', 0, 0),
-    (N'WorkshopRun', N'CK_WorkshopRun_Outcome', N'OUTCOMEISNULLOROUTCOMEIN''IMPROVED'',''INCONCLUSIVE'',''REGRESSED'',''FAILED''', 0, 0),
-    (N'WorkshopRun', N'CK_WorkshopRun_Timestamps', N'COMPLETEDATUTCISNULLORCOMPLETEDATUTC>=STARTEDATUTC', 0, 0),
-    (N'WorkshopRun', N'CK_WorkshopRun_FrozenSettingsJson', N'LENFROZENSETTINGSJSONBETWEEN2AND4000ANDISJSONFROZENSETTINGSJSON=1', 0, 0),
-    (N'WorkshopRun', N'CK_WorkshopRun_BaselineIdentifiers', N'BASELINEQUERYIDISNULLANDBASELINEPLANIDISNULLORBASELINEQUERYID>0ANDBASELINEPLANID>0', 0, 0),
-    (N'WorkshopRun', N'CK_WorkshopRun_OptimizedIdentifiers', N'OPTIMIZEDQUERYIDISNULLANDOPTIMIZEDPLANIDISNULLOROPTIMIZEDQUERYID>0ANDOPTIMIZEDPLANID>0', 0, 0),
-    (N'WorkshopRun', N'CK_WorkshopRun_Metrics', N'DURATIONMSISNULLORDURATIONMS>=0ANDCPUMSISNULLORCPUMS>=0ANDLOGICALREADSISNULLORLOGICALREADS>=0ANDSPILLSISNULLORSPILLS>=0ANDWAITTIMEMSISNULLORWAITTIMEMS>=0', 0, 0),
-    (N'WorkshopSample', N'CK_WorkshopSample_Sequence', N'SAMPLESEQUENCE>0', 0, 0),
-    (N'WorkshopSample', N'CK_WorkshopSample_Phase', N'PHASEIN''BASELINE'',''OPTIMIZED''', 0, 0),
-    (N'WorkshopSample', N'CK_WorkshopSample_PoolMemory', N'POOLTOTALMEMORYKB>=0ANDPOOLGRANTEDMEMORYKB>=0ANDPOOLUSEDMEMORYKB>=0ANDPOOLAVAILABLEMEMORYKB>=0', 0, 0),
-    (N'WorkshopSample', N'CK_WorkshopSample_Utilization', N'GRANTUTILIZATIONPERCENTBETWEEN0AND100', 0, 0),
-    (N'WorkshopSample', N'CK_WorkshopSample_Counts', N'GRANTEECOUNT>=0ANDWAITERCOUNT>=0', 0, 0),
-    (N'WorkshopSample', N'CK_WorkshopSample_HostMemory', N'HOSTAVAILABLEMEMORYKB>=0ANDHOSTUSEDMEMORYKB>=0', 0, 0),
-    (N'WorkshopSample', N'CK_WorkshopSample_ProcessMemory', N'PROCESSPHYSICALMEMORYKB>=0', 0, 0),
-    (N'WorkshopSample', N'CK_WorkshopSample_ServerMemory', N'TOTALSERVERMEMORYKB>=0ANDTARGETSERVERMEMORYKB>=0', 0, 0),
-    (N'WorkshopRequestSample', N'CK_WorkshopRequestSample_Identifiers', N'SAMPLESEQUENCE>0ANDSESSIONID>0ANDREQUESTID>=0', 0, 0),
-    (N'WorkshopRequestSample', N'CK_WorkshopRequestSample_Memory', N'REQUESTEDMEMORYKB>=0ANDGRANTEDMEMORYKB>=0ANDREQUIREDMEMORYKB>=0ANDIDEALMEMORYKB>=0ANDUSEDMEMORYKB>=0ANDMAXUSEDMEMORYKB>=0', 0, 0),
-    (N'WorkshopRequestSample', N'CK_WorkshopRequestSample_Wait', N'WAITORDERISNULLORWAITORDER>=0ANDWAITTIMEMS>=0', 0, 0),
-    (N'WorkshopRequestSample', N'CK_WorkshopRequestSample_QueryIdentifiers', N'QUERYIDISNULLANDPLANIDISNULLORQUERYID>0ANDPLANID>0', 0, 0);
+    (N'WorkshopRun', N'CK_WorkshopRun_EvidenceClassification', N'EVIDENCECLASSIFICATIONIN''DOC-VERIFIED'',''SUBSCRIPTION-VALIDATED'',''LAB-MEASURED'',''ASSUMPTION'',''TARGET'',''ILLUSTRATIVE''', 0, 0, 0),
+    (N'WorkshopRun', N'CK_WorkshopRun_Phase', N'PHASEIN''BASELINE'',''OPTIMIZED'',''COMPARISON''', 0, 0, 0),
+    (N'WorkshopRun', N'CK_WorkshopRun_Status', N'RUNSTATUSIN''PENDING'',''RUNNING'',''COMPLETED'',''FAILED'',''STOPPED''', 0, 0, 0),
+    (N'WorkshopRun', N'CK_WorkshopRun_Outcome', N'OUTCOMEISNULLOROUTCOMEIN''TARGETMET'',''IMPROVEDOUTSIDETARGET'',''NOMATERIALIMPROVEMENT'',''BASELINETARGETNOTREACHED'',''SAFETYSTOP'',''MANUALSTOP'',''FAILED''', 0, 0, 0),
+    (N'WorkshopRun', N'CK_WorkshopRun_Timestamps', N'COMPLETEDATUTCISNULLORCOMPLETEDATUTC>=STARTEDATUTC', 0, 0, 0),
+    (N'WorkshopRun', N'CK_WorkshopRun_FrozenSettingsJson', N'LENFROZENSETTINGSJSONBETWEEN2AND4000ANDISJSONFROZENSETTINGSJSON=1', 0, 0, 0),
+    (N'WorkshopRun', N'CK_WorkshopRun_BaselineIdentifiers', N'BASELINEQUERYIDISNULLANDBASELINEPLANIDISNULLORBASELINEQUERYID>0ANDBASELINEPLANID>0', 0, 0, 0),
+    (N'WorkshopRun', N'CK_WorkshopRun_OptimizedIdentifiers', N'OPTIMIZEDQUERYIDISNULLANDOPTIMIZEDPLANIDISNULLOROPTIMIZEDQUERYID>0ANDOPTIMIZEDPLANID>0', 0, 0, 0),
+    (N'WorkshopRun', N'CK_WorkshopRun_Metrics', N'DURATIONMSISNULLORDURATIONMS>=0ANDCPUMSISNULLORCPUMS>=0ANDLOGICALREADSISNULLORLOGICALREADS>=0ANDSPILLSISNULLORSPILLS>=0ANDWAITTIMEMSISNULLORWAITTIMEMS>=0', 0, 0, 0),
+    (N'WorkshopSample', N'CK_WorkshopSample_Sequence', N'SAMPLESEQUENCE>0', 0, 0, 0),
+    (N'WorkshopSample', N'CK_WorkshopSample_Phase', N'PHASEIN''BASELINE'',''OPTIMIZED''', 0, 0, 0),
+    (N'WorkshopSample', N'CK_WorkshopSample_PoolMemory', N'POOLTOTALMEMORYKB>=0ANDPOOLGRANTEDMEMORYKB>=0ANDPOOLUSEDMEMORYKB>=0ANDPOOLAVAILABLEMEMORYKB>=0', 0, 0, 0),
+    (N'WorkshopSample', N'CK_WorkshopSample_Utilization', N'GRANTUTILIZATIONPERCENTBETWEEN0AND100', 0, 0, 0),
+    (N'WorkshopSample', N'CK_WorkshopSample_Counts', N'GRANTEECOUNT>=0ANDWAITERCOUNT>=0', 0, 0, 0),
+    (N'WorkshopSample', N'CK_WorkshopSample_HostMemory', N'HOSTAVAILABLEMEMORYKB>=0ANDHOSTUSEDMEMORYKB>=0', 0, 0, 0),
+    (N'WorkshopSample', N'CK_WorkshopSample_ProcessMemory', N'PROCESSPHYSICALMEMORYKB>=0', 0, 0, 0),
+    (N'WorkshopSample', N'CK_WorkshopSample_ServerMemory', N'TOTALSERVERMEMORYKB>=0ANDTARGETSERVERMEMORYKB>=0', 0, 0, 0),
+    (N'WorkshopRequestSample', N'CK_WorkshopRequestSample_Identifiers', N'SAMPLESEQUENCE>0ANDSESSIONID>0ANDREQUESTID>=0', 0, 0, 0),
+    (N'WorkshopRequestSample', N'CK_WorkshopRequestSample_Memory', N'REQUESTEDMEMORYKB>=0ANDGRANTEDMEMORYKB>=0ANDREQUIREDMEMORYKB>=0ANDIDEALMEMORYKB>=0ANDUSEDMEMORYKB>=0ANDMAXUSEDMEMORYKB>=0', 0, 0, 0),
+    (N'WorkshopRequestSample', N'CK_WorkshopRequestSample_Wait', N'WAITORDERISNULLORWAITORDER>=0ANDWAITTIMEMS>=0', 0, 0, 0),
+    (N'WorkshopRequestSample', N'CK_WorkshopRequestSample_QueryIdentifiers', N'QUERYIDISNULLANDPLANIDISNULLORQUERYID>0ANDPLANID>0', 0, 0, 0),
+    (N'ValidationRun', N'CK_ValidationRun_Linkage', N'BASELINERUNIDISNULLANDOPTIMIZEDRUNIDISNULLORBASELINERUNIDISNOTNULLANDOPTIMIZEDRUNIDISNOTNULL', 0, 0, 0);
 
 IF EXISTS
 (
@@ -484,7 +509,7 @@ IF EXISTS
     SELECT OBJECT_NAME(cc.parent_object_id), cc.name,
            UPPER(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(cc.definition,
                N' ', N''), CHAR(9), N''), CHAR(10), N''), CHAR(13), N''), N'[', N''), N']', N''), N'(', N''), N')', N'')),
-           cc.is_disabled, cc.is_not_trusted
+           cc.is_disabled, cc.is_not_trusted, cc.is_not_for_replication
     FROM sys.check_constraints AS cc
     WHERE cc.parent_object_id IN (OBJECT_ID(N'lab.WorkshopRun'), OBJECT_ID(N'lab.WorkshopSample'),
                                   OBJECT_ID(N'lab.WorkshopRequestSample'), OBJECT_ID(N'lab.ValidationRun'))
@@ -494,7 +519,7 @@ OR EXISTS
     SELECT OBJECT_NAME(cc.parent_object_id), cc.name,
            UPPER(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(cc.definition,
                N' ', N''), CHAR(9), N''), CHAR(10), N''), CHAR(13), N''), N'[', N''), N']', N''), N'(', N''), N')', N'')),
-           cc.is_disabled, cc.is_not_trusted
+           cc.is_disabled, cc.is_not_trusted, cc.is_not_for_replication
     FROM sys.check_constraints AS cc
     WHERE cc.parent_object_id IN (OBJECT_ID(N'lab.WorkshopRun'), OBJECT_ID(N'lab.WorkshopSample'),
                                   OBJECT_ID(N'lab.WorkshopRequestSample'), OBJECT_ID(N'lab.ValidationRun'))
@@ -559,6 +584,113 @@ SELECT
     SystemLowMemorySignal,
     ProcessLowMemorySignal
 FROM lab.WorkshopSample;
+GO
+
+CREATE OR ALTER PROCEDURE lab.usp_LinkValidationBatch
+    @ValidationBatchID uniqueidentifier,
+    @BaselineRunID uniqueidentifier,
+    @OptimizedRunID uniqueidentifier
+WITH EXECUTE AS OWNER
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SET XACT_ABORT ON;
+
+    IF @@TRANCOUNT <> 0
+        THROW 51684, 'Validation linkage cannot run inside an active transaction.', 1;
+    IF @ValidationBatchID IS NULL OR @BaselineRunID IS NULL OR @OptimizedRunID IS NULL
+       OR @BaselineRunID = @OptimizedRunID
+        THROW 51685, 'Validation batch and distinct baseline and optimized run IDs are required.', 1;
+    IF NOT EXISTS
+       (
+           SELECT 1 FROM lab.WorkshopRun
+           WHERE RunID = @BaselineRunID AND Phase = 'Baseline' AND RunStatus = 'Completed'
+       )
+       OR NOT EXISTS
+       (
+           SELECT 1 FROM lab.WorkshopRun
+           WHERE RunID = @OptimizedRunID AND Phase = 'Optimized' AND RunStatus = 'Completed'
+       )
+        THROW 51686, 'Validation linkage requires completed baseline and optimized workload runs.', 1;
+
+    BEGIN TRY
+        BEGIN TRANSACTION;
+
+        /* Lock the whole batch so concurrent controllers cannot assign conflicting runs. */
+        IF NOT EXISTS
+           (
+               SELECT 1
+               FROM lab.ValidationRun WITH (UPDLOCK, HOLDLOCK)
+               WHERE ValidationBatchID = @ValidationBatchID
+           )
+            THROW 51687, 'The validation batch does not exist.', 1;
+
+        ;WITH RequiredValidationCases AS
+        (
+            SELECT required.ValidationCaseName
+            FROM (VALUES
+                (N'NARROW-NULL-TERRITORY'), (N'BROAD-NULL-TERRITORY'),
+                (N'LOW-TERRITORY'), (N'MEDIUM-TERRITORY'), (N'HIGH-TERRITORY'),
+                (N'TOP-MINIMUM'), (N'TOP-MAXIMUM'), (N'NO-MATCH'),
+                (N'DATE-BOUNDARY'), (N'LEAP-BOUNDARY'), (N'REPEATED-EXECUTION')
+            ) AS required(ValidationCaseName)
+        )
+        SELECT ValidationCaseName INTO #RequiredValidationCases
+        FROM RequiredValidationCases;
+
+        IF EXISTS
+           (
+               SELECT 1
+               FROM #RequiredValidationCases AS required
+               WHERE NOT EXISTS
+               (
+                   SELECT 1 FROM lab.ValidationRun AS validation
+                   WHERE validation.ValidationBatchID = @ValidationBatchID
+                     AND validation.ValidationCaseName = required.ValidationCaseName
+                     AND validation.Passed = 1
+               )
+           )
+           OR EXISTS
+           (
+               SELECT 1 FROM lab.ValidationRun
+               WHERE ValidationBatchID = @ValidationBatchID AND Passed = 0
+           )
+           OR (SELECT COUNT_BIG(*) FROM lab.ValidationRun
+               WHERE ValidationBatchID = @ValidationBatchID) <> 11
+            THROW 51688, 'Every required validation case must exist and pass exactly once.', 1;
+
+        IF EXISTS
+        (
+            SELECT 1 FROM lab.ValidationRun
+            WHERE ValidationBatchID = @ValidationBatchID
+              AND (BaselineRunID IS NOT NULL OR OptimizedRunID IS NOT NULL)
+              AND (BaselineRunID <> @BaselineRunID OR OptimizedRunID <> @OptimizedRunID
+                   OR BaselineRunID IS NULL OR OptimizedRunID IS NULL)
+        )
+            THROW 51689, 'The validation batch is already linked to different workload runs.', 1;
+
+        UPDATE lab.ValidationRun
+        SET BaselineRunID = @BaselineRunID,
+            OptimizedRunID = @OptimizedRunID
+        WHERE ValidationBatchID = @ValidationBatchID
+          AND BaselineRunID IS NULL
+          AND OptimizedRunID IS NULL;
+
+        IF (SELECT COUNT_BIG(*) FROM lab.ValidationRun
+            WHERE ValidationBatchID = @ValidationBatchID
+              AND BaselineRunID = @BaselineRunID
+              AND OptimizedRunID = @OptimizedRunID
+              AND Passed = 1) <> 11
+            THROW 51690, 'The validation batch linkage could not be verified.', 1;
+
+        COMMIT TRANSACTION;
+    END TRY
+    BEGIN CATCH
+        IF XACT_STATE() <> 0
+            ROLLBACK TRANSACTION;
+        THROW;
+    END CATCH;
+END;
 GO
 
 CREATE OR ALTER PROCEDURE lab.usp_GetMemorySnapshot
@@ -823,6 +955,7 @@ GO
 CREATE OR ALTER PROCEDURE lab.usp_CompareWorkshopRuns
     @BaselineRunID uniqueidentifier = NULL,
     @OptimizedRunID uniqueidentifier = NULL,
+    @ValidationBatchID uniqueidentifier = NULL,
     @ParentComparisonID uniqueidentifier = NULL
 WITH EXECUTE AS OWNER
 AS
@@ -833,6 +966,8 @@ BEGIN
         THROW 51660, 'Supply two run IDs or one parent comparison ID.', 1;
     IF @ParentComparisonID IS NOT NULL AND (@BaselineRunID IS NOT NULL OR @OptimizedRunID IS NOT NULL)
         THROW 51661, 'Parent comparison mode cannot be combined with explicit run IDs.', 1;
+    IF @ValidationBatchID IS NULL
+        THROW 51666, 'ValidationBatchID is required.', 1;
 
     IF @ParentComparisonID IS NOT NULL
     BEGIN
@@ -866,7 +1001,23 @@ BEGIN
        OR NOT EXISTS (SELECT 1 FROM lab.WorkshopSample WHERE RunID = @OptimizedRunID)
         THROW 51665, 'No memory samples are available for one or both runs.', 1;
 
-    ;WITH RankedSamples AS
+    ;WITH RequiredValidationCases AS
+    (
+        SELECT required.ValidationCaseName
+        FROM (VALUES
+            (N'NARROW-NULL-TERRITORY'),
+            (N'BROAD-NULL-TERRITORY'),
+            (N'LOW-TERRITORY'),
+            (N'MEDIUM-TERRITORY'),
+            (N'HIGH-TERRITORY'),
+            (N'TOP-MINIMUM'),
+            (N'TOP-MAXIMUM'),
+            (N'NO-MATCH'),
+            (N'DATE-BOUNDARY'),
+            (N'LEAP-BOUNDARY'),
+            (N'REPEATED-EXECUTION')
+        ) AS required(ValidationCaseName)
+    ), RankedSamples AS
     (
         SELECT
             s.RunID,
@@ -904,23 +1055,37 @@ BEGIN
             baseline.WaitTimeMs AS BaselineWaitTimeMs,
             optimized.WaitTimeMs AS OptimizedWaitTimeMs,
             CONVERT(bit, CASE
-                WHEN EXISTS
+                                WHEN NOT EXISTS
                 (
-                    SELECT 1 FROM lab.ValidationRun AS validation
-                    WHERE validation.RunID = CONVERT(nvarchar(128), optimized.RunID)
+                                        SELECT 1
+                                        FROM RequiredValidationCases AS required
+                                        WHERE NOT EXISTS
+                                        (
+                                                SELECT 1
+                                                FROM lab.ValidationRun AS validation
+                                                WHERE validation.ValidationBatchID = @ValidationBatchID
+                                                    AND validation.ValidationCaseName = required.ValidationCaseName
+                                                    AND validation.BaselineRunID = @BaselineRunID
+                                                    AND validation.OptimizedRunID = @OptimizedRunID
+                                                    AND validation.Passed = 1
+                                        )
                 )
                  AND NOT EXISTS
                 (
                     SELECT 1 FROM lab.ValidationRun AS validation
-                    WHERE validation.RunID = CONVERT(nvarchar(128), optimized.RunID)
-                      AND validation.Passed = 0
+                                        WHERE validation.ValidationBatchID = @ValidationBatchID
+                                            AND (validation.BaselineRunID <> @BaselineRunID
+                                                     OR validation.OptimizedRunID <> @OptimizedRunID
+                                                     OR validation.BaselineRunID IS NULL
+                                                     OR validation.OptimizedRunID IS NULL
+                                                     OR validation.Passed = 0)
                 ) THEN 1 ELSE 0 END) AS CorrectnessPassed
         FROM lab.WorkshopRun AS baseline
         INNER JOIN lab.WorkshopRun AS optimized ON optimized.RunID = @OptimizedRunID
         LEFT JOIN SampleMetrics AS baselineSample ON baselineSample.RunID = baseline.RunID
         LEFT JOIN SampleMetrics AS optimizedSample ON optimizedSample.RunID = optimized.RunID
         WHERE baseline.RunID = @BaselineRunID
-    ), EvaluatedComparison AS
+    ), MetricEvaluation AS
     (
         SELECT *, CONVERT(bit, CASE
             WHEN (BaselineDurationMs = 0 AND OptimizedDurationMs > 0)
@@ -934,7 +1099,20 @@ BEGIN
               OR (BaselineWaitTimeMs = 0 AND OptimizedWaitTimeMs > 0)
               OR (BaselineWaitTimeMs > 0 AND CONVERT(decimal(38,4), OptimizedWaitTimeMs) > CONVERT(decimal(38,4), BaselineWaitTimeMs) * 1.10)
             THEN 1 ELSE 0 END) AS HasMaterialRegression
+                        , CONVERT(bit, CASE WHEN BaselineDurationMs > 0 AND CONVERT(decimal(38,4), OptimizedDurationMs) <= CONVERT(decimal(38,4), BaselineDurationMs) * 0.90 THEN 1 ELSE 0 END) AS DurationImprovedMaterially
+                        , CONVERT(bit, CASE WHEN BaselineCpuMs > 0 AND CONVERT(decimal(38,4), OptimizedCpuMs) <= CONVERT(decimal(38,4), BaselineCpuMs) * 0.90 THEN 1 ELSE 0 END) AS CpuImprovedMaterially
+                        , CONVERT(bit, CASE WHEN BaselineLogicalReads > 0 AND CONVERT(decimal(38,4), OptimizedLogicalReads) <= CONVERT(decimal(38,4), BaselineLogicalReads) * 0.90 THEN 1 ELSE 0 END) AS LogicalReadsImprovedMaterially
+                        , CONVERT(bit, CASE WHEN BaselineSpills > 0 AND CONVERT(decimal(38,4), OptimizedSpills) <= CONVERT(decimal(38,4), BaselineSpills) * 0.90 THEN 1 ELSE 0 END) AS SpillsImprovedMaterially
+                        , CONVERT(bit, CASE WHEN BaselineWaitTimeMs > 0 AND CONVERT(decimal(38,4), OptimizedWaitTimeMs) <= CONVERT(decimal(38,4), BaselineWaitTimeMs) * 0.90 THEN 1 ELSE 0 END) AS WaitsImprovedMaterially
         FROM Comparison
+        ), EvaluatedComparison AS
+        (
+                SELECT *, CONVERT(bit, CASE
+                        WHEN DurationImprovedMaterially = 1 OR CpuImprovedMaterially = 1
+                            OR LogicalReadsImprovedMaterially = 1 OR SpillsImprovedMaterially = 1
+                            OR WaitsImprovedMaterially = 1
+                        THEN 1 ELSE 0 END) AS HasAdditionalMetricImprovement
+                FROM MetricEvaluation
     )
     SELECT
         BaselineRunID,
@@ -953,6 +1131,14 @@ BEGIN
         OptimizedSpills,
         BaselineWaitTimeMs,
         OptimizedWaitTimeMs,
+        CorrectnessPassed,
+        HasMaterialRegression,
+        HasAdditionalMetricImprovement,
+        DurationImprovedMaterially,
+        CpuImprovedMaterially,
+        LogicalReadsImprovedMaterially,
+        SpillsImprovedMaterially,
+        WaitsImprovedMaterially,
         CONVERT(decimal(6,2), BaselineMedianGrantUtilizationPercent - OptimizedMedianGrantUtilizationPercent)
             AS MedianUtilizationReductionPoints,
         CONVERT(varchar(24), CASE
@@ -960,6 +1146,7 @@ BEGIN
             WHEN BaselinePeakGrantUtilizationPercent NOT BETWEEN 75.00 AND 85.00
                 THEN N'BaselineTargetNotReached'
             WHEN HasMaterialRegression = 1 THEN N'NoMaterialImprovement'
+            WHEN HasAdditionalMetricImprovement = 0 THEN N'NoMaterialImprovement'
             WHEN BaselinePeakGrantUtilizationPercent BETWEEN 75.00 AND 85.00
              AND OptimizedPeakGrantUtilizationPercent BETWEEN 35.00 AND 45.00
                 THEN N'TargetMet'
@@ -1025,6 +1212,91 @@ IF NOT EXISTS
       AND certificate.name = N'mcp_workshop_diagnostics_certificate'
 )
     THROW 51678, 'The diagnostics certificate login mapping is invalid.', 1;
+
+DECLARE @ReaderLoginName sysname = N'mcp_workshop_reader';
+DECLARE @McpReaderPassword nvarchar(4000) =
+    TRY_CONVERT(nvarchar(4000), SESSION_CONTEXT(N'McpReaderPassword'));
+
+IF SUSER_ID(N'mcp_workshop_reader') IS NULL
+BEGIN
+    IF @McpReaderPassword IS NULL
+        THROW 51670, 'McpReaderPassword session context is required when creating mcp_workshop_reader.', 1;
+
+     IF LEN(@McpReaderPassword) NOT BETWEEN 20 AND 128
+         OR DATALENGTH(@McpReaderPassword) / 2 NOT BETWEEN 20 AND 128
+       OR @McpReaderPassword COLLATE Latin1_General_100_BIN2 NOT LIKE N'%[A-Z]%'
+       OR @McpReaderPassword COLLATE Latin1_General_100_BIN2 NOT LIKE N'%[a-z]%'
+       OR @McpReaderPassword COLLATE Latin1_General_100_BIN2 NOT LIKE N'%[0-9]%'
+       OR @McpReaderPassword COLLATE Latin1_General_100_BIN2 NOT LIKE N'%[^A-Za-z0-9]%'
+       OR CHARINDEX(NCHAR(0), @McpReaderPassword COLLATE Latin1_General_100_BIN2) > 0
+       OR PATINDEX(N'%[' + NCHAR(1) + N'-' + NCHAR(31) + NCHAR(127) + N']%',
+            @McpReaderPassword COLLATE Latin1_General_100_BIN2) > 0
+       OR CHARINDEX(LOWER(@ReaderLoginName), LOWER(@McpReaderPassword)) > 0
+    BEGIN
+        BEGIN TRY
+            EXEC sys.sp_set_session_context @key = N'McpReaderPassword', @value = NULL;
+        END TRY
+        BEGIN CATCH
+        END CATCH;
+        SET @McpReaderPassword = NULL;
+        THROW 51667, 'McpReaderPassword does not satisfy the workshop secret policy.', 1;
+    END;
+
+    DECLARE @EscapedMcpReaderPassword nvarchar(8000) =
+        REPLACE(@McpReaderPassword, N'''', N'''''' );
+    DECLARE @CreateReaderLoginSql nvarchar(max) =
+        N'CREATE LOGIN ' + QUOTENAME(@ReaderLoginName)
+        + N' WITH PASS' + N'WORD = N''' + @EscapedMcpReaderPassword
+        + N''', CHECK_POLICY = ON, CHECK_EXPIRATION = OFF, DEFAULT_DATABASE = [AdventureWorks2022];';
+    BEGIN TRY
+        EXEC master.sys.sp_executesql @CreateReaderLoginSql;
+    END TRY
+    BEGIN CATCH
+        BEGIN TRY
+            EXEC sys.sp_set_session_context @key = N'McpReaderPassword', @value = NULL;
+        END TRY
+        BEGIN CATCH
+        END CATCH;
+        SET @McpReaderPassword = NULL;
+        SET @CreateReaderLoginSql = NULL;
+        THROW;
+    END CATCH;
+
+    BEGIN TRY
+        EXEC sys.sp_set_session_context @key = N'McpReaderPassword', @value = NULL;
+    END TRY
+    BEGIN CATCH
+    END CATCH;
+    SET @McpReaderPassword = NULL;
+    SET @EscapedMcpReaderPassword = NULL;
+    SET @CreateReaderLoginSql = NULL;
+END
+ELSE
+BEGIN
+    /* Never consume or retain a supplied secret when the login already exists. */
+    BEGIN TRY
+        EXEC sys.sp_set_session_context @key = N'McpReaderPassword', @value = NULL;
+    END TRY
+    BEGIN CATCH
+    END CATCH;
+    SET @McpReaderPassword = NULL;
+END;
+
+IF NOT EXISTS
+(
+    SELECT 1
+        FROM master.sys.server_principals AS principal
+        INNER JOIN master.sys.sql_logins AS sql_login
+            ON sql_login.principal_id = principal.principal_id
+        WHERE principal.name = @ReaderLoginName
+            AND principal.type_desc = N'SQL_LOGIN'
+            AND principal.is_disabled = 0
+            AND principal.default_database_name = N'AdventureWorks2022'
+            AND sql_login.is_policy_checked = 1
+            AND sql_login.is_expiration_checked = 0
+)
+   OR IS_SRVROLEMEMBER(N'sysadmin', N'mcp_workshop_reader') <> 0
+    THROW 51668, 'The mcp_workshop_reader server login contract is invalid.', 1;
 
 GRANT VIEW SERVER PERFORMANCE STATE TO [mcp_workshop_diagnostics_certificate_login];
 REVOKE VIEW SERVER STATE FROM [mcp_workshop_diagnostics_certificate_login];
@@ -1109,8 +1381,6 @@ OR EXISTS
 )
     THROW 51680, 'The server DMV procedure signature contract is invalid.', 1;
 
-IF SUSER_ID(N'mcp_workshop_reader') IS NULL
-    THROW 51670, 'The bootstrap must provision server principal mcp_workshop_reader.', 1;
 IF USER_ID(N'mcp_workshop_reader') IS NULL
     CREATE USER [mcp_workshop_reader] FOR LOGIN [mcp_workshop_reader];
 IF NOT EXISTS
@@ -1154,10 +1424,26 @@ GRANT EXECUTE ON OBJECT::lab.usp_GetProcedurePlanSummary TO [mcp_workshop_reader
 GRANT EXECUTE ON OBJECT::lab.usp_CompareWorkshopRuns TO [mcp_workshop_reader];
 GRANT SELECT ON OBJECT::lab.vw_WorkshopRunSummary TO [mcp_workshop_reader];
 GRANT SELECT ON OBJECT::lab.vw_WorkshopSampleSummary TO [mcp_workshop_reader];
-DENY INSERT ON SCHEMA::lab TO [mcp_workshop_reader];
-DENY UPDATE ON SCHEMA::lab TO [mcp_workshop_reader];
-DENY DELETE ON SCHEMA::lab TO [mcp_workshop_reader];
-DENY ALTER ON SCHEMA::lab TO [mcp_workshop_reader];
+DENY INSERT ON OBJECT::lab.WorkshopRun TO [mcp_workshop_reader];
+DENY UPDATE ON OBJECT::lab.WorkshopRun TO [mcp_workshop_reader];
+DENY DELETE ON OBJECT::lab.WorkshopRun TO [mcp_workshop_reader];
+DENY ALTER ON OBJECT::lab.WorkshopRun TO [mcp_workshop_reader];
+DENY CONTROL ON OBJECT::lab.WorkshopRun TO [mcp_workshop_reader];
+DENY INSERT ON OBJECT::lab.WorkshopSample TO [mcp_workshop_reader];
+DENY UPDATE ON OBJECT::lab.WorkshopSample TO [mcp_workshop_reader];
+DENY DELETE ON OBJECT::lab.WorkshopSample TO [mcp_workshop_reader];
+DENY ALTER ON OBJECT::lab.WorkshopSample TO [mcp_workshop_reader];
+DENY CONTROL ON OBJECT::lab.WorkshopSample TO [mcp_workshop_reader];
+DENY INSERT ON OBJECT::lab.WorkshopRequestSample TO [mcp_workshop_reader];
+DENY UPDATE ON OBJECT::lab.WorkshopRequestSample TO [mcp_workshop_reader];
+DENY DELETE ON OBJECT::lab.WorkshopRequestSample TO [mcp_workshop_reader];
+DENY ALTER ON OBJECT::lab.WorkshopRequestSample TO [mcp_workshop_reader];
+DENY CONTROL ON OBJECT::lab.WorkshopRequestSample TO [mcp_workshop_reader];
+DENY INSERT ON OBJECT::lab.ValidationRun TO [mcp_workshop_reader];
+DENY UPDATE ON OBJECT::lab.ValidationRun TO [mcp_workshop_reader];
+DENY DELETE ON OBJECT::lab.ValidationRun TO [mcp_workshop_reader];
+DENY ALTER ON OBJECT::lab.ValidationRun TO [mcp_workshop_reader];
+DENY CONTROL ON OBJECT::lab.ValidationRun TO [mcp_workshop_reader];
 DENY TAKE OWNERSHIP ON SCHEMA::lab TO [mcp_workshop_reader];
 DENY VIEW DEFINITION ON SCHEMA::lab TO [mcp_workshop_reader];
 DENY ALTER ON DATABASE::[AdventureWorks2022] TO [mcp_workshop_reader];
@@ -1176,12 +1462,28 @@ INSERT @ExpectedReaderPermissions VALUES
     (0, 0, 0, N'TAKE OWNERSHIP', N'D'),
     (0, 0, 0, N'VIEW DEFINITION', N'D'),
     (0, 0, 0, N'IMPERSONATE ANY USER', N'D'),
-    (3, SCHEMA_ID(N'lab'), 0, N'INSERT', N'D'),
-    (3, SCHEMA_ID(N'lab'), 0, N'UPDATE', N'D'),
-    (3, SCHEMA_ID(N'lab'), 0, N'DELETE', N'D'),
-    (3, SCHEMA_ID(N'lab'), 0, N'ALTER', N'D'),
     (3, SCHEMA_ID(N'lab'), 0, N'TAKE OWNERSHIP', N'D'),
     (3, SCHEMA_ID(N'lab'), 0, N'VIEW DEFINITION', N'D'),
+    (1, OBJECT_ID(N'lab.WorkshopRun'), 0, N'INSERT', N'D'),
+    (1, OBJECT_ID(N'lab.WorkshopRun'), 0, N'UPDATE', N'D'),
+    (1, OBJECT_ID(N'lab.WorkshopRun'), 0, N'DELETE', N'D'),
+    (1, OBJECT_ID(N'lab.WorkshopRun'), 0, N'ALTER', N'D'),
+    (1, OBJECT_ID(N'lab.WorkshopRun'), 0, N'CONTROL', N'D'),
+    (1, OBJECT_ID(N'lab.WorkshopSample'), 0, N'INSERT', N'D'),
+    (1, OBJECT_ID(N'lab.WorkshopSample'), 0, N'UPDATE', N'D'),
+    (1, OBJECT_ID(N'lab.WorkshopSample'), 0, N'DELETE', N'D'),
+    (1, OBJECT_ID(N'lab.WorkshopSample'), 0, N'ALTER', N'D'),
+    (1, OBJECT_ID(N'lab.WorkshopSample'), 0, N'CONTROL', N'D'),
+    (1, OBJECT_ID(N'lab.WorkshopRequestSample'), 0, N'INSERT', N'D'),
+    (1, OBJECT_ID(N'lab.WorkshopRequestSample'), 0, N'UPDATE', N'D'),
+    (1, OBJECT_ID(N'lab.WorkshopRequestSample'), 0, N'DELETE', N'D'),
+    (1, OBJECT_ID(N'lab.WorkshopRequestSample'), 0, N'ALTER', N'D'),
+    (1, OBJECT_ID(N'lab.WorkshopRequestSample'), 0, N'CONTROL', N'D'),
+    (1, OBJECT_ID(N'lab.ValidationRun'), 0, N'INSERT', N'D'),
+    (1, OBJECT_ID(N'lab.ValidationRun'), 0, N'UPDATE', N'D'),
+    (1, OBJECT_ID(N'lab.ValidationRun'), 0, N'DELETE', N'D'),
+    (1, OBJECT_ID(N'lab.ValidationRun'), 0, N'ALTER', N'D'),
+    (1, OBJECT_ID(N'lab.ValidationRun'), 0, N'CONTROL', N'D'),
     (1, OBJECT_ID(N'lab.usp_GetMemorySnapshot'), 0, N'EXECUTE', N'G'),
     (1, OBJECT_ID(N'lab.usp_GetActiveWorkshopGrants'), 0, N'EXECUTE', N'G'),
     (1, OBJECT_ID(N'lab.usp_GetQueryStoreTopQueries'), 0, N'EXECUTE', N'G'),
@@ -1210,24 +1512,97 @@ OR EXISTS
 )
     THROW 51682, 'The reader direct database permission set is not exact.', 1;
 
+DECLARE @LabObjectTargets table
+(
+    securable_name nvarchar(517) NOT NULL,
+    object_name nvarchar(517) NOT NULL,
+    object_type char(2) NOT NULL
+);
+INSERT @LabObjectTargets (securable_name, object_name, object_type)
+SELECT QUOTENAME(schema_object.name) + N'.' + QUOTENAME(object_object.name),
+       schema_object.name + N'.' + object_object.name,
+       object_object.type
+FROM sys.objects AS object_object
+INNER JOIN sys.schemas AS schema_object ON schema_object.schema_id = object_object.schema_id
+WHERE schema_object.name = N'lab'
+  AND object_object.is_ms_shipped = 0;
+
+DECLARE @EffectiveReaderPermissions table
+(
+    securable_name nvarchar(517) NOT NULL,
+    object_name nvarchar(517) NULL,
+    object_type char(2) NULL,
+    securable_class nvarchar(60) NOT NULL,
+    permission_name nvarchar(128) NOT NULL
+);
+
+IF EXISTS
+(
+    SELECT 1
+    FROM sys.database_permissions AS public_permission
+    LEFT JOIN sys.objects AS public_object
+      ON public_permission.class = 1 AND public_object.object_id = public_permission.major_id
+    WHERE public_permission.grantee_principal_id = USER_ID(N'public')
+      AND public_permission.state IN (N'G', N'W')
+      AND
+      (
+          (public_permission.class = 0
+           AND public_permission.permission_name IN
+               (N'ALTER', N'CONTROL', N'TAKE OWNERSHIP', N'IMPERSONATE ANY USER', N'VIEW DEFINITION'))
+          OR (public_permission.class = 3
+              AND public_permission.major_id = SCHEMA_ID(N'lab')
+              AND public_permission.permission_name IN
+                  (N'SELECT', N'EXECUTE', N'ALTER', N'CONTROL', N'TAKE OWNERSHIP', N'VIEW DEFINITION'))
+          OR (public_permission.class = 1
+              AND public_object.schema_id = SCHEMA_ID(N'lab')
+              AND public_permission.permission_name IN
+                  (N'SELECT', N'EXECUTE', N'ALTER', N'CONTROL', N'TAKE OWNERSHIP', N'VIEW DEFINITION',
+                   N'INSERT', N'UPDATE', N'DELETE'))
+      )
+)
+    THROW 51683, 'The public role grants permissions outside the lab reader allowlist.', 1;
+
 DECLARE @PermissionFailure nvarchar(2048) = N'';
 DECLARE @Impersonated bit = 0;
 BEGIN TRY
     EXECUTE AS USER = N'mcp_workshop_reader';
     SET @Impersonated = 1;
+
+    INSERT @EffectiveReaderPermissions
+        (securable_name, object_name, object_type, securable_class, permission_name)
+    SELECT DB_NAME(), NULL, NULL, N'DATABASE', permission.permission_name
+    FROM sys.fn_my_permissions(DB_NAME(), N'DATABASE') AS permission;
+    INSERT @EffectiveReaderPermissions
+        (securable_name, object_name, object_type, securable_class, permission_name)
+    SELECT N'lab', NULL, NULL, N'SCHEMA', permission.permission_name
+    FROM sys.fn_my_permissions(N'lab', N'SCHEMA') AS permission;
+    INSERT @EffectiveReaderPermissions
+        (securable_name, object_name, object_type, securable_class, permission_name)
+    SELECT target.securable_name, target.object_name, target.object_type, N'OBJECT', permission.permission_name
+    FROM @LabObjectTargets AS target
+    CROSS APPLY sys.fn_my_permissions(target.securable_name, N'OBJECT') AS permission;
+
     IF HAS_PERMS_BY_NAME(DB_NAME(), N'DATABASE', N'CONNECT') <> 1
        OR HAS_PERMS_BY_NAME(N'lab.WorkshopRun', N'OBJECT', N'INSERT') <> 0
        OR HAS_PERMS_BY_NAME(N'lab.WorkshopRun', N'OBJECT', N'UPDATE') <> 0
        OR HAS_PERMS_BY_NAME(N'lab.WorkshopRun', N'OBJECT', N'DELETE') <> 0
+    OR HAS_PERMS_BY_NAME(N'lab.WorkshopRun', N'OBJECT', N'ALTER') <> 0
+    OR HAS_PERMS_BY_NAME(N'lab.WorkshopRun', N'OBJECT', N'CONTROL') <> 0
        OR HAS_PERMS_BY_NAME(N'lab.WorkshopSample', N'OBJECT', N'INSERT') <> 0
        OR HAS_PERMS_BY_NAME(N'lab.WorkshopSample', N'OBJECT', N'UPDATE') <> 0
        OR HAS_PERMS_BY_NAME(N'lab.WorkshopSample', N'OBJECT', N'DELETE') <> 0
+    OR HAS_PERMS_BY_NAME(N'lab.WorkshopSample', N'OBJECT', N'ALTER') <> 0
+    OR HAS_PERMS_BY_NAME(N'lab.WorkshopSample', N'OBJECT', N'CONTROL') <> 0
        OR HAS_PERMS_BY_NAME(N'lab.WorkshopRequestSample', N'OBJECT', N'INSERT') <> 0
        OR HAS_PERMS_BY_NAME(N'lab.WorkshopRequestSample', N'OBJECT', N'UPDATE') <> 0
        OR HAS_PERMS_BY_NAME(N'lab.WorkshopRequestSample', N'OBJECT', N'DELETE') <> 0
+    OR HAS_PERMS_BY_NAME(N'lab.WorkshopRequestSample', N'OBJECT', N'ALTER') <> 0
+    OR HAS_PERMS_BY_NAME(N'lab.WorkshopRequestSample', N'OBJECT', N'CONTROL') <> 0
        OR HAS_PERMS_BY_NAME(N'lab.ValidationRun', N'OBJECT', N'INSERT') <> 0
        OR HAS_PERMS_BY_NAME(N'lab.ValidationRun', N'OBJECT', N'UPDATE') <> 0
        OR HAS_PERMS_BY_NAME(N'lab.ValidationRun', N'OBJECT', N'DELETE') <> 0
+    OR HAS_PERMS_BY_NAME(N'lab.ValidationRun', N'OBJECT', N'ALTER') <> 0
+    OR HAS_PERMS_BY_NAME(N'lab.ValidationRun', N'OBJECT', N'CONTROL') <> 0
        OR HAS_PERMS_BY_NAME(N'lab', N'SCHEMA', N'ALTER') <> 0
        OR HAS_PERMS_BY_NAME(N'lab', N'SCHEMA', N'CONTROL') <> 0
        OR HAS_PERMS_BY_NAME(N'lab', N'SCHEMA', N'TAKE OWNERSHIP') <> 0
@@ -1246,6 +1621,30 @@ BEGIN TRY
        OR HAS_PERMS_BY_NAME(N'lab.usp_GetProcedurePlanSummary', N'OBJECT', N'EXECUTE') <> 1
        OR HAS_PERMS_BY_NAME(N'lab.usp_CompareWorkshopRuns', N'OBJECT', N'EXECUTE') <> 1
         SET @PermissionFailure = N'Least-privilege verification failed for mcp_workshop_reader.';
+
+    IF EXISTS
+    (
+        SELECT 1
+        FROM @EffectiveReaderPermissions AS effective
+        WHERE (effective.securable_class = N'DATABASE'
+               AND effective.permission_name IN
+                   (N'ALTER', N'CONTROL', N'TAKE OWNERSHIP', N'IMPERSONATE ANY USER', N'VIEW DEFINITION'))
+           OR (effective.securable_class IN (N'SCHEMA', N'OBJECT')
+               AND effective.permission_name IN
+                   (N'ALTER', N'CONTROL', N'TAKE OWNERSHIP', N'VIEW DEFINITION', N'IMPERSONATE'))
+           OR (effective.object_type = N'U' AND effective.permission_name IN
+                   (N'SELECT', N'INSERT', N'UPDATE', N'DELETE'))
+           OR (effective.permission_name = N'EXECUTE'
+               AND COALESCE(effective.object_name, N'') NOT IN
+                   (N'lab.usp_GetMemorySnapshot', N'lab.usp_GetActiveWorkshopGrants',
+                    N'lab.usp_GetQueryStoreTopQueries', N'lab.usp_GetQueryStoreWaits',
+                    N'lab.usp_GetProcedurePlanSummary', N'lab.usp_CompareWorkshopRuns'))
+           OR (effective.permission_name = N'SELECT'
+               AND effective.object_type IS NOT NULL
+               AND COALESCE(effective.object_name, N'') NOT IN
+                   (N'lab.vw_WorkshopRunSummary', N'lab.vw_WorkshopSampleSummary'))
+    )
+        SET @PermissionFailure = N'Effective permissions exceed the lab reader allowlist.';
     REVERT;
     SET @Impersonated = 0;
 END TRY
