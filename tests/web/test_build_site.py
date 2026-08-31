@@ -426,6 +426,35 @@ def test_build_rejects_protected_source_destination_before_deletion(
     assert marker.read_text(encoding="utf-8") == "DO-NOT-DELETE"
 
 
+def test_build_rejects_git_destination_before_deletion(tmp_path: Path) -> None:
+    root = make_site_root(tmp_path)
+    destination = root / ".git"
+    destination.mkdir()
+    marker = destination / "HEAD"
+    marker.write_text("protected metadata", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="destination"):
+        build_site(root, destination)
+
+    assert marker.read_text(encoding="utf-8") == "protected metadata"
+
+
+@pytest.mark.parametrize("relative_destination", ["output", "arbitrary-folder"])
+def test_build_rejects_arbitrary_in_repository_destination_before_deletion(
+    tmp_path: Path, relative_destination: str,
+) -> None:
+    root = make_site_root(tmp_path)
+    destination = root / relative_destination
+    destination.mkdir()
+    marker = destination / "keep.txt"
+    marker.write_text("DO-NOT-DELETE", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="destination"):
+        build_site(root, destination)
+
+    assert marker.read_text(encoding="utf-8") == "DO-NOT-DELETE"
+
+
 def test_build_allows_ignored_site_directory_inside_repository(tmp_path: Path) -> None:
     root = make_site_root(tmp_path)
     destination = root / "site"
@@ -436,6 +465,23 @@ def test_build_allows_ignored_site_directory_inside_repository(tmp_path: Path) -
 
     assert (destination / "index.html").is_file()
     assert not (destination / "obsolete.html").exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows junction regression")
+def test_build_rejects_reparse_point_at_permitted_site_destination(
+    tmp_path: Path,
+) -> None:
+    root = make_site_root(tmp_path)
+    external = tmp_path / "external-site"
+    external.mkdir()
+    marker = external / "keep.txt"
+    marker.write_text("DO-NOT-DELETE", encoding="utf-8")
+    make_directory_link(root / "site", external, junction=True)
+
+    with pytest.raises(ValueError, match="destination"):
+        build_site(root, root / "site")
+
+    assert marker.read_text(encoding="utf-8") == "DO-NOT-DELETE"
 
 
 def test_cli_returns_nonzero_for_invalid_input(tmp_path: Path) -> None:

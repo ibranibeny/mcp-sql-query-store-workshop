@@ -299,6 +299,8 @@ def build_site(root: Path, destination: Path) -> None:
     ).resolve(strict=False)
     if destination == root or root.is_relative_to(destination):
         raise ValueError("Site destination must not contain the repository root")
+    if destination.is_relative_to(root) and destination != root / "site":
+        raise ValueError("Site destination inside the repository must be root/site")
     manifest_path = root / "web" / "site-manifest.json"
     manifest = load_manifest(manifest_path, root=root)
     content_sources = [
