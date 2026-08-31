@@ -466,6 +466,189 @@ def test_official_microsoft_learn_sources_are_cited() -> None:
     assert "https://learn.microsoft.com/sql/relational-databases/resource-governor/resource-governor" in combined
 
 
+def test_restore_uses_session_context_and_strict_input_guards() -> None:
+    text = sql("02-RestoreAndConfigureDatabase.sql")
+    upper = normalized("02-RestoreAndConfigureDatabase.sql")
+    assert ":on error exit" in text.lower()
+    assert not re.search(r"\$\(\w+\)", text)
+    for key in ("BackupPath", "DataPath", "LogPath", "DatabaseName"):
+        assert f"SESSION_CONTEXT(N'{key}')" in text
+        assert re.search(rf"@{key.upper()}\s+IS\s+NULL.*?THROW", upper)
+    assert "N'ADVENTUREWORKS2022'" in upper
+    assert re.search(r"@DATABASENAME\s*<>\s*N'ADVENTUREWORKS2022'.*?THROW", upper)
+    assert "QUOTENAME(@DATABASENAME)" in upper
+    assert "SP_EXECUTESQL" in upper
+    assert not re.search(r"N?'\$\([^)]*\)'", text, re.IGNORECASE)
+
+
+def test_restore_validates_safe_local_windows_paths_and_extensions() -> None:
+    text = normalized("02-RestoreAndConfigureDatabase.sql")
+    for variable, extension in (("BACKUPPATH", ".BAK"), ("DATAPATH", ".MDF"), ("LOGPATH", ".LDF")):
+        assert f"@{variable}" in text
+        assert extension in text
+    assert "SUBSTRING(@BACKUPPATH, 2, 2) <> N':\\'" in text
+    assert "SUBSTRING(@DATAPATH, 2, 2) <> N':\\'" in text
+    assert "SUBSTRING(@LOGPATH, 2, 2) <> N':\\'" in text
+    for unsafe in ("N'%..%'", "N'%[%]%'", "N'%[_]%'", "N'%;%'", "NCHAR(0)"):
+        assert unsafe in text
+    assert "QUOTENAME(@BACKUPPATH, N'''')" in text
+    assert "QUOTENAME(@DATAPATH, N'''')" in text
+    assert "QUOTENAME(@LOGPATH, N'''')" in text
+
+
+def test_restore_verifies_backup_and_filelist_before_restore() -> None:
+    text = normalized("02-RestoreAndConfigureDatabase.sql")
+    verify = text.index("RESTORE VERIFYONLY")
+    filelist = text.index("RESTORE FILELISTONLY")
+    restore = text.index("RESTORE DATABASE")
+    assert verify < filelist < restore
+    assert "INSERT @FILELIST" in text
+    assert re.search(r"COUNT\(\*\).*?TYPE\]\s*=\s*'D'.*?<>\s*1.*?THROW", text)
+    assert re.search(r"COUNT\(\*\).*?TYPE\]\s*=\s*'L'.*?<>\s*1.*?THROW", text)
+    assert "WITH MOVE" in text
+    assert text.count("MOVE") >= 2
+    assert "RECOVERY" in text and "STATS = 5" in text
+
+
+def test_restore_never_overwrites_and_existing_database_requires_exact_marker() -> None:
+    text = normalized("02-RestoreAndConfigureDatabase.sql")
+    assert "DROP DATABASE" not in text
+    assert "REPLACE" not in text
+    assert re.search(r"IF DB_ID\(@DATABASENAME\) IS NULL.*?RESTORE DATABASE", text)
+    existing = text[text.index("IF DB_ID(@DATABASENAME) IS NOT NULL"):text.index("IF DB_ID(@DATABASENAME) IS NULL")]
+    assert "LAB.WORKSHOPMARKER" in existing
+    assert "MARKERID" in existing and "SCHEMAVERSION" in existing
+    assert "THROW" in existing
+    fresh = text[text.index("IF DB_ID(@DATABASENAME) IS NULL"):]
+    assert "CREATE SCHEMA LAB AUTHORIZATION DBO" in fresh
+    assert "CREATE TABLE LAB.WORKSHOPMARKER" in fresh
+    assert "@MARKERID" in fresh and "@WORKSHOPMARKER" in text
+
+
+def test_restore_configures_and_verifies_exact_query_store_state() -> None:
+    text = normalized("02-RestoreAndConfigureDatabase.sql")
+    assert "COMPATIBILITY_LEVEL = 160" in text
+    for setting in (
+        "MAX_STORAGE_SIZE_MB = 2048",
+        "STALE_QUERY_THRESHOLD_DAYS = 7",
+        "DATA_FLUSH_INTERVAL_SECONDS = 60",
+        "INTERVAL_LENGTH_MINUTES = 5",
+        "QUERY_CAPTURE_MODE = AUTO",
+        "SIZE_BASED_CLEANUP_MODE = AUTO",
+        "WAIT_STATS_CAPTURE_MODE = ON",
+    ):
+        assert setting in text
+    assert "SYS.DATABASE_QUERY_STORE_OPTIONS" in text
+    assert re.search(r"ACTUAL_STATE_DESC\s*=\s*N''?READ_WRITE''?", text)
+    assert re.search(r"DESIRED_STATE_DESC\s*=\s*N''?READ_WRITE''?", text)
+    assert "QUERY_STORE_SETUP" in text and "HASHBYTES('SHA2_256'" in text
+    assert "SYSUTCDATETIME()" in text
+
+
+def test_generator_has_bounded_defaults_and_validated_session_overrides() -> None:
+    text = sql("03-CreateScaledLabData.sql")
+    upper = normalized("03-CreateScaledLabData.sql")
+    assert ":on error exit" in text.lower()
+    assert not re.search(r"\$\(\w+\)", text)
+    defaults = {
+        "TargetRows": "8000000",
+        "BatchSize": "100000",
+        "MinimumFreeSpaceMB": "65536",
+        "MaximumDataFileSizeMB": "65536",
+    }
+    for key, default in defaults.items():
+        assert f"SESSION_CONTEXT(N'{key}')" in text
+        assert re.search(rf"DECLARE @{key.upper()} .*?= COALESCE\(.*?, {default}\)", upper)
+    assert re.search(r"@TARGETROWS NOT BETWEEN 100000 AND 8000000.*?THROW", upper)
+    assert re.search(r"@BATCHSIZE NOT BETWEEN 10000 AND 100000.*?THROW", upper)
+    assert re.search(r"@MINIMUMFREESPACEMB < 16384.*?THROW", upper)
+    assert re.search(r"@MAXIMUMDATAFILESIZEMB.*?> 65536.*?THROW", upper)
+    assert "TRY_CONVERT(INT" in upper
+
+
+def test_generator_requires_marker_database_and_query_store_before_changes() -> None:
+    text = normalized("03-CreateScaledLabData.sql")
+    first_create = text.index("CREATE SCHEMA LAB")
+    guards = text[:first_create]
+    assert "DB_NAME() <> N'ADVENTUREWORKS2022'" in guards
+    assert "LAB.WORKSHOPMARKER" in guards
+    assert "68A70D6E-62D8-4A77-8F0A-9DA7934DBA7C" in guards
+    assert "SCHEMAVERSION = 1" in guards
+    assert "SYS.DATABASE_QUERY_STORE_OPTIONS" in guards
+    assert "ACTUAL_STATE_DESC <> N'READ_WRITE'" in guards
+    assert guards.count("THROW") >= 3
+
+
+def test_numbers_generation_uses_bounded_top_cross_joins() -> None:
+    text = normalized("03-CreateScaledLabData.sql")
+    assert "CREATE TABLE LAB.NUMBERS" in text
+    assert "PRIMARY KEY" in text
+    assert "TOP (@NEEDED)" in text
+    assert "CROSS JOIN" in text
+    assert "@NEEDED <= 8000000" in text
+    assert "MAXRECURSION" not in text
+    assert not re.search(r"INSERT\s+.*?LAB\.NUMBERS.*?SELECT(?!\s+TOP).*?CROSS JOIN", text)
+
+
+def test_fact_sales_schema_and_generation_are_deterministic() -> None:
+    text = normalized("03-CreateScaledLabData.sql")
+    for contract in (
+        "SYNTHETICSALESID BIGINT NOT NULL",
+        "ORDERDATE DATETIME2",
+        "TERRITORYID INT NULL",
+        "CUSTOMERID INT NOT NULL",
+        "PRODUCTID INT NOT NULL",
+        "ORDERQTY SMALLINT NOT NULL",
+        "UNITPRICE DECIMAL(19,4) NOT NULL",
+        "SALESAMOUNT DECIMAL(19,4) NOT NULL",
+        "WIDEPAYLOAD CHAR(400) NOT NULL",
+        "SOURCECUSTOMERID INT NOT NULL",
+        "SOURCEPRODUCTID INT NOT NULL",
+        "SOURCECHECKSUM INT NOT NULL",
+    ):
+        assert contract in text
+    assert "PRIMARY KEY CLUSTERED" in text
+    assert "ROW_NUMBER()" in text and "% @CUSTOMERCOUNT" in text and "% @PRODUCTCOUNT" in text
+    assert "CHECKSUM(" in text
+    assert "RAND(" not in text and "NEWID(" not in text
+
+
+def test_generator_batches_resume_and_log_idempotently() -> None:
+    text = normalized("03-CreateScaledLabData.sql")
+    assert "MAX(SYNTHETICSALESID)" in text
+    assert "WHILE @NEXTID <= @TARGETROWS" in text
+    assert "TOP (@THISBATCHSIZE)" in text
+    assert "BEGIN TRANSACTION" in text and "COMMIT TRANSACTION" in text
+    assert "CREATE TABLE LAB.DATAGENERATIONLOG" in text
+    assert "ROWSINSERTED" in text and "COMPLETEDATUTC" in text
+    assert "NOT EXISTS" in text
+    assert re.search(r"COUNT_BIG\(\*\).*?>\s*@TARGETROWS.*?THROW", text)
+    assert "ACTUALROWCOUNT" in text and "GENERATEDTHROUGHSYNTHETICSALESID" in text
+
+
+def test_generator_checks_estimated_and_per_batch_capacity() -> None:
+    text = normalized("03-CreateScaledLabData.sql")
+    loop = text[text.index("WHILE @NEXTID <= @TARGETROWS"):]
+    assert "SYS.DM_OS_VOLUME_STATS" in text
+    assert "AVAILABLE_BYTES" in text
+    assert "SIZE * 8.0 / 1024" in text
+    assert "@ESTIMATEDREQUIREDMB" in text
+    assert "@MINIMUMFREESPACEMB" in text and "@MAXIMUMDATAFILESIZEMB" in text
+    assert "SYS.DM_OS_VOLUME_STATS" in loop
+    assert loop.index("SYS.DM_OS_VOLUME_STATS") < loop.index("BEGIN TRANSACTION")
+    assert "FILEGROWTH" in text and "MAXSIZE" in text
+
+
+def test_generator_defers_optimized_index_and_avoids_destructive_commands() -> None:
+    raw = sql("03-CreateScaledLabData.sql")
+    text = normalized("03-CreateScaledLabData.sql")
+    assert re.search(r"optimized index (?:is )?deferred to task 9", raw, re.IGNORECASE)
+    assert not re.search(r"CREATE\s+(?:UNIQUE\s+)?(?:NONCLUSTERED\s+)?INDEX\s+.*?(ORDERDATE|TERRITORYID)", text)
+    assert "DBCC DROPCLEANBUFFERS" not in text
+    assert "DBCC FREEPROCCACHE" not in text
+    assert "WHILE 1 = 1" not in text
+
+
 def test_all_sql_is_bounded_and_avoids_destructive_or_public_network_commands() -> None:
     combined = "\n".join(normalized(path.name) for path in SQL_DIR.glob("*.sql"))
     forbidden = (
@@ -483,7 +666,15 @@ def test_all_sql_is_bounded_and_avoids_destructive_or_public_network_commands() 
     assert not any(re.search(pattern, combined) for pattern in forbidden)
 
 
-@pytest.mark.parametrize("name", ["00-Preflight.sql", "01-ConfigureInstance.sql"])
+@pytest.mark.parametrize(
+    "name",
+    [
+        "00-Preflight.sql",
+        "01-ConfigureInstance.sql",
+        "02-RestoreAndConfigureDatabase.sql",
+        "03-CreateScaledLabData.sql",
+    ],
+)
 def test_scripts_use_explicit_throw_numbers_and_no_raiserror(name: str) -> None:
     text = normalized(name)
     assert "RAISERROR" not in text
