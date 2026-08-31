@@ -573,26 +573,6 @@ git commit -m "feat: add query-plan workbench experience"
 - Create: `deploy/Test-WorkshopPrerequisites.ps1`
 - Create: `tests/powershell/Workshop.Azure.Tests.ps1`
 
-### Compliance follow-up research (2026-08-31)
-
-- Verified baseline: commit `60d4e99` has 45 focused Pester tests passing and a clean worktree.
-- Affected units are `deploy/Workshop.Azure.psm1`, `deploy/Test-WorkshopPrerequisites.ps1`, the module manifest, and `tests/powershell/Workshop.Azure.Tests.ps1`; there is no entry-script test file yet.
-- Provider resource-type location metadata currently passes independently but explicitly does not validate the required Standard network SKUs. The preflight operation set therefore needs a required injectable `TestNetworkSkuDeployment` scriptblock.
-- The default operation will build an in-memory subscription-scope ARM template using the `2018-05-01/subscriptionDeploymentTemplate.json#` schema. It will contain a temporary resource group plus a nested incremental resource-group deployment whose in-memory template contains exactly a Standard, Static, IPv4 public IP and a Standard NAT Gateway in the approved region. It will invoke only `Test-AzSubscriptionDeployment`; no template file or resource is created.
-- Mocked operation results must independently drive `Network SKU Standard public IP` and `Network SKU Standard NAT Gateway`. Null, malformed, thrown, or error-bearing results fail closed with sanitized aggregate details; provider location checks remain separate.
-- `BillableResourcesAcknowledged` is a mandatory Boolean through plan, preflight, and entry-script boundaries. The plan/card will enumerate Windows client compute/license responsibility, admin and SQL VM compute, SQL Enterprise PAYG, managed OS/data/log disks, two Standard public IPs, NAT hourly/data processing, and outbound transfer while stating that pricing was not queried.
-- Decomposition verdict: atomic preflight compliance follow-up. Both findings change the same operation-set contract, plan object, plan card, entry point, and focused test suite. No modernization scenario skill root or breakdown-hint file was supplied for this task.
-- Validation sequence: write focused failing Pester tests and capture RED; implement minimally; rerun focused Pester; run PSScriptAnalyzer; run the strict aggregate repository validation; verify static AST safety and commit only after all gates pass.
-
-### Compliance follow-up progress details (append-only)
-
-- Modified the preflight module, preflight entry script, focused Pester suite, and this execution reference; no Azure resource operation was run.
-- Initial RED: 24 passed / 27 failed because the billable parameter and exact-SKU operation did not exist. Initial GREEN: 51 passed / 0 failed.
-- Review regression RED: 51 passed / 1 failed for an error-bearing validation result that incorrectly passed. GREEN after fail-closed handling: 52 passed / 0 failed.
-- Billable completeness RED: 50 passed / 2 failed until Private DNS zone/query charges were included alongside all user-specified categories.
-- The default exact-SKU operation keeps the subscription and nested resource-group templates in memory and invokes validation only. Static tests reject mutating Az commands and constrain dynamic command invocation to the injected read-operation runner and the analyzer-compatible `Test-AzSubscriptionDeployment` resolution.
-- Tenant ID remains optional and its existing omission test remains part of the focused suite. No deviations from the requested non-mutating Azure boundary were introduced.
-
 - [ ] **Step 1: Write failing Pester tests for approved defaults and boundaries**
 
 Create tests that import the module and assert:
