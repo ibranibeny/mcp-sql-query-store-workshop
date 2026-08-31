@@ -3,7 +3,7 @@ from pathlib import Path
 import subprocess
 
 ROOT = Path(__file__).resolve().parents[2]
-VALIDATION_SCRIPT = ROOT / "build" / "Test-Repository.ps1"
+VALIDATION_MODULE = ROOT / "build" / "RepositoryValidation.psm1"
 
 
 def run_powershell(command: str, *, environment: dict[str, str]) -> subprocess.CompletedProcess[str]:
@@ -16,20 +16,14 @@ def run_powershell(command: str, *, environment: dict[str, str]) -> subprocess.C
     )
 
 
-def validation_function_definitions() -> str:
+def validation_module_import() -> str:
     return """
-$source = Get-Content -LiteralPath $env:REPOSITORY_VALIDATION_SCRIPT -Raw
-$entryPoint = $source.IndexOf('Push-Location $script:RepositoryRoot')
-if ($entryPoint -lt 0) { throw 'Could not locate the validation entry point.' }
-$definitionsPath = Join-Path ([System.IO.Path]::GetTempPath()) "repository-validation-$([guid]::NewGuid()).ps1"
-try {
-    Set-Content -LiteralPath $definitionsPath -Value $source.Substring(0, $entryPoint)
-    . $definitionsPath
-}
-finally {
-    Remove-Item -LiteralPath $definitionsPath -ErrorAction SilentlyContinue
-}
+Import-Module $env:REPOSITORY_VALIDATION_MODULE -Force
 """
+
+
+def initialize_git_repository(path: Path) -> None:
+    subprocess.run(["git", "-C", str(path), "init", "--quiet"], check=True)
 
 
 def test_sensitive_and_generated_files_are_ignored() -> None:
@@ -63,38 +57,37 @@ def test_sensitive_and_generated_files_are_ignored() -> None:
 
 
 def test_missing_psscriptanalyzer_skips_the_optional_gate() -> None:
-    command = validation_function_definitions() + """
-function Get-Module { return $null }
-$output = @(Invoke-OptionalValidationGate -Name 'PSScriptAnalyzer' -Validation { Test-PowerShellAnalysis } 6>&1)
-$text = $output -join [Environment]::NewLine
-if ($text -notmatch 'SKIP: PSScriptAnalyzer.*not installed') {
-    throw "Expected a clear skip message, got: $text"
-}
-if ($script:GateFailures.Count -ne 0) {
-    throw 'Skipping the optional analyzer gate recorded a validation failure.'
+    command = validation_module_import() + """
+$result = Get-PSScriptAnalyzerGateResult -AnalyzerAvailable:$false
+if ($result.Failed -or -not $result.Skipped) { throw 'Expected a non-failing skip.' }
+if ($result.Message -ne 'SKIP: PSScriptAnalyzer (not installed; run build/Install-DevDependencies.ps1)') {
+    throw "Unexpected skip message: $($result.Message)"
 }
 """
     result = run_powershell(
         command,
-        environment={"REPOSITORY_VALIDATION_SCRIPT": str(VALIDATION_SCRIPT)},
+        environment={"REPOSITORY_VALIDATION_MODULE": str(VALIDATION_MODULE)},
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_json_validation_skips_node_modules(tmp_path: Path) -> None:
+    initialize_git_repository(tmp_path)
+    (tmp_path / ".gitignore").write_text("node_modules/\n", encoding="utf-8")
     vendor_directory = tmp_path / "node_modules" / "dependency"
     vendor_directory.mkdir(parents=True)
     (vendor_directory / "generated.json").write_text("not json", encoding="utf-8")
     (tmp_path / "project.json").write_text('{"tracked": true}', encoding="utf-8")
-    command = validation_function_definitions() + """
-$script:RepositoryRoot = $env:JSON_TEST_ROOT
-Test-JsonFile
+    command = validation_module_import() + """
+$files = @(Get-RepositoryJsonFile -RepositoryRoot $env:JSON_TEST_ROOT)
+if ($files -contains 'node_modules/dependency/generated.json') { throw 'Ignored JSON was enumerated.' }
+if ($files -notcontains 'project.json') { throw 'Project JSON was not enumerated.' }
 """
     result = run_powershell(
         command,
         environment={
-            "REPOSITORY_VALIDATION_SCRIPT": str(VALIDATION_SCRIPT),
+            "REPOSITORY_VALIDATION_MODULE": str(VALIDATION_MODULE),
             "JSON_TEST_ROOT": str(tmp_path),
         },
     )
@@ -103,15 +96,18 @@ Test-JsonFile
 
 
 def test_json_validation_checks_project_json(tmp_path: Path) -> None:
+    initialize_git_repository(tmp_path)
     (tmp_path / "project.json").write_text("not json", encoding="utf-8")
-    command = validation_function_definitions() + """
-$script:RepositoryRoot = $env:JSON_TEST_ROOT
-Test-JsonFile
+    command = validation_module_import() + """
+foreach ($relativePath in Get-RepositoryJsonFile -RepositoryRoot $env:JSON_TEST_ROOT) {
+    Get-Content -LiteralPath (Join-Path $env:JSON_TEST_ROOT $relativePath) -Raw |
+        ConvertFrom-Json -ErrorAction Stop | Out-Null
+}
 """
     result = run_powershell(
         command,
         environment={
-            "REPOSITORY_VALIDATION_SCRIPT": str(VALIDATION_SCRIPT),
+            "REPOSITORY_VALIDATION_MODULE": str(VALIDATION_MODULE),
             "JSON_TEST_ROOT": str(tmp_path),
         },
     )

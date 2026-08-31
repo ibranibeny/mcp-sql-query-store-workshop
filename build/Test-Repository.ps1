@@ -1,11 +1,22 @@
 [CmdletBinding()]
-param()
+param(
+    [Parameter()]
+    [string] $BaseRef,
+
+    [Parameter()]
+    [switch] $RequirePSScriptAnalyzer
+)
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 $script:RepositoryRoot = Split-Path -Parent $PSScriptRoot
 $script:GateFailures = [System.Collections.Generic.List[string]]::new()
+$script:OptionalGateSkips = 0
+$script:RequestedBaseRef = $BaseRef
+$script:AnalyzerIsRequired = [bool] $RequirePSScriptAnalyzer
+
+Import-Module (Join-Path $PSScriptRoot 'RepositoryValidation.psm1') -Force
 
 function Invoke-NativeCommand {
     param(
@@ -28,19 +39,11 @@ function Get-GitFile {
         [string[]] $ArgumentList
     )
 
-    $output = & git -C $script:RepositoryRoot @ArgumentList 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        throw "git failed while enumerating repository files (exit code $LASTEXITCODE)."
-    }
-
-    return @($output | ForEach-Object { $_.ToString() } | Where-Object { $_ })
+    return @(Get-RepositoryFile -RepositoryRoot $script:RepositoryRoot -PathSpec $ArgumentList)
 }
 
 function Get-PowerShellFile {
-    $relativePaths = Get-GitFile -ArgumentList @(
-        'ls-files', '--cached', '--others', '--exclude-standard', '--',
-        '*.ps1', '*.psm1', '*.psd1'
-    )
+    $relativePaths = Get-GitFile -ArgumentList @('*.ps1', '*.psm1', '*.psd1')
 
     return @($relativePaths | ForEach-Object { Join-Path $script:RepositoryRoot $_ })
 }
@@ -86,10 +89,6 @@ function Test-PowerShellAnalysis {
     $analyzer = Get-Module -ListAvailable -Name PSScriptAnalyzer |
         Sort-Object Version -Descending |
         Select-Object -First 1
-    if (-not $analyzer) {
-        return $false
-    }
-
     Import-Module $analyzer.Path -Force
     $settings = Join-Path $script:RepositoryRoot 'PSScriptAnalyzerSettings.psd1'
     $findings = @(
@@ -105,21 +104,15 @@ function Test-PowerShellAnalysis {
         throw "PSScriptAnalyzer findings:`n$($summary -join [Environment]::NewLine)"
     }
 
-    return $true
 }
 
 function Test-JsonFile {
-    $excludedDirectoryPattern = '(^|/)(\.git|\.worktrees|\.venv|node_modules|site)(/|$)'
     $errors = [System.Collections.Generic.List[string]]::new()
 
-    foreach ($path in Get-ChildItem -LiteralPath $script:RepositoryRoot -Filter '*.json' -File -Recurse) {
-        $relativePath = [System.IO.Path]::GetRelativePath($script:RepositoryRoot, $path.FullName).Replace('\', '/')
-        if ($relativePath -match $excludedDirectoryPattern) {
-            continue
-        }
-
+    foreach ($relativePath in Get-RepositoryJsonFile -RepositoryRoot $script:RepositoryRoot) {
+        $path = Join-Path $script:RepositoryRoot $relativePath
         try {
-            [void] (Get-Content -LiteralPath $path.FullName -Raw | ConvertFrom-Json -ErrorAction Stop)
+            [void] (Get-Content -LiteralPath $path -Raw | ConvertFrom-Json -ErrorAction Stop)
         }
         catch {
             $errors.Add("$relativePath is invalid JSON: $($_.Exception.Message)")
@@ -132,9 +125,7 @@ function Test-JsonFile {
 }
 
 function Test-TrackedFileForSecret {
-    $trackedFiles = Get-GitFile -ArgumentList @('ls-files')
-    $privateKeyPattern = '-----BEGIN (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----'
-    $passwordPattern = '(?i)(?:password|pwd)\s*=\s*(?!(?:WORKSHOP-PLACEHOLDER|SET_LOCALLY_ON_ADMIN_VM)(?:[;\r\n]|$))[^;\r\n\s][^;\r\n]*'
+    $trackedFiles = Get-RepositoryFile -RepositoryRoot $script:RepositoryRoot
     $findings = [System.Collections.Generic.List[string]]::new()
 
     foreach ($relativePath in $trackedFiles) {
@@ -150,11 +141,8 @@ function Test-TrackedFileForSecret {
             continue
         }
 
-        if ($content -match $privateKeyPattern) {
-            $findings.Add("$relativePath contains a private-key marker")
-        }
-        if ($content -match $passwordPattern) {
-            $findings.Add("$relativePath contains a likely password-bearing connection string")
+        foreach ($finding in Find-RepositorySecret -Path $relativePath -Content $content) {
+            $findings.Add("$($finding.Path):$($finding.Line): $($finding.Type)")
         }
     }
 
@@ -180,12 +168,7 @@ function Test-SiteBuild {
 }
 
 function Test-GitDiff {
-    Invoke-NativeCommand -FilePath 'git' -ArgumentList @(
-        '-C', $script:RepositoryRoot, 'diff', '--check'
-    )
-    Invoke-NativeCommand -FilePath 'git' -ArgumentList @(
-        '-C', $script:RepositoryRoot, 'diff', '--cached', '--check'
-    )
+    Test-RepositoryWhitespace -RepositoryRoot $script:RepositoryRoot -BaseRef $script:RequestedBaseRef
 }
 
 function Invoke-ValidationGate {
@@ -207,27 +190,23 @@ function Invoke-ValidationGate {
     }
 }
 
-function Invoke-OptionalValidationGate {
-    param(
-        [Parameter(Mandatory)]
-        [string] $Name,
+function Invoke-PowerShellAnalyzerGate {
+    $available = $null -ne (Get-Module -ListAvailable -Name PSScriptAnalyzer |
+        Sort-Object Version -Descending |
+        Select-Object -First 1)
+    $gateResult = Get-PSScriptAnalyzerGateResult -AnalyzerAvailable $available `
+        -Required:$script:AnalyzerIsRequired
 
-        [Parameter(Mandatory)]
-        [scriptblock] $Validation
-    )
-
-    try {
-        $wasRun = & $Validation
-        if ($wasRun) {
-            Write-Host "PASS: $Name"
-        }
-        else {
-            Write-Host "SKIP: $Name is not installed; optional analyzer checks were not run."
-        }
+    if ($gateResult.Failed) {
+        $script:GateFailures.Add("PSScriptAnalyzer: $($gateResult.Message)")
+        Write-Warning 'FAIL: PSScriptAnalyzer'
     }
-    catch {
-        $script:GateFailures.Add("${Name}: $($_.Exception.Message)")
-        Write-Warning "FAIL: $Name"
+    elseif ($gateResult.Skipped) {
+        $script:OptionalGateSkips++
+        Write-Host $gateResult.Message
+    }
+    else {
+        Invoke-ValidationGate -Name 'PSScriptAnalyzer' -Validation { Test-PowerShellAnalysis }
     }
 }
 
@@ -235,7 +214,7 @@ Push-Location $script:RepositoryRoot
 try {
     Invoke-ValidationGate -Name 'Python tests' -Validation { Test-Python }
     Invoke-ValidationGate -Name 'PowerShell syntax' -Validation { Test-PowerShellSyntax }
-    Invoke-OptionalValidationGate -Name 'PSScriptAnalyzer' -Validation { Test-PowerShellAnalysis }
+    Invoke-PowerShellAnalyzerGate
     Invoke-ValidationGate -Name 'JSON parsing' -Validation { Test-JsonFile }
     Invoke-ValidationGate -Name 'Tracked-file secret scan' -Validation { Test-TrackedFileForSecret }
     Invoke-ValidationGate -Name 'Static site build' -Validation { Test-SiteBuild }
@@ -250,4 +229,9 @@ if ($script:GateFailures.Count -gt 0) {
     throw "Repository validation failed:`n$failureReport"
 }
 
-Write-Host 'Repository validation passed.'
+if ($script:OptionalGateSkips -gt 0) {
+    Write-Host 'Repository validation passed with an optional gate skipped.'
+}
+else {
+    Write-Host 'Repository validation passed.'
+}
