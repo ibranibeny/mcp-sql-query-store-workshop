@@ -527,17 +527,6 @@ OR EXISTS
 )
     THROW 51604, 'Existing evidence table CHECK contract is incompatible.', 1;
 
-IF NOT EXISTS (SELECT 1 FROM sys.certificates WHERE name = N'mcp_workshop_diagnostics_certificate')
-    CREATE CERTIFICATE [mcp_workshop_diagnostics_certificate]
-        WITH SUBJECT = N'MCP workshop server DMV module signing', EXPIRY_DATE = '2099-12-31';
-IF NOT EXISTS
-(
-    SELECT 1 FROM sys.certificates
-    WHERE name = N'mcp_workshop_diagnostics_certificate'
-      AND subject = N'MCP workshop server DMV module signing'
-      AND pvt_key_encryption_type_desc = N'ENCRYPTED_BY_MASTER_KEY'
-)
-    THROW 51607, 'The diagnostics signing certificate contract is invalid.', 1;
 GO
 
 CREATE OR ALTER VIEW lab.vw_WorkshopRunSummary
@@ -1158,6 +1147,36 @@ BEGIN
 END;
 GO
 
+DECLARE @ReaderLoginName sysname = N'mcp_workshop_reader';
+DECLARE @McpReaderPassword nvarchar(4000) =
+    TRY_CONVERT(nvarchar(4000), SESSION_CONTEXT(N'McpReaderPassword'));
+
+BEGIN TRY
+    EXEC sys.sp_set_session_context @key = N'McpReaderPassword', @value = NULL;
+END TRY
+BEGIN CATCH
+    SET @McpReaderPassword = NULL;
+    THROW 51679, 'Unable to clear the MCP reader password session context; identity setup was not changed.', 1;
+END CATCH;
+
+IF SESSION_CONTEXT(N'McpReaderPassword') IS NOT NULL
+BEGIN
+    SET @McpReaderPassword = NULL;
+    THROW 51680, 'The MCP reader password session context remained set; identity setup was not changed.', 1;
+END;
+
+IF NOT EXISTS (SELECT 1 FROM sys.certificates WHERE name = N'mcp_workshop_diagnostics_certificate')
+    CREATE CERTIFICATE [mcp_workshop_diagnostics_certificate]
+        WITH SUBJECT = N'MCP workshop server DMV module signing', EXPIRY_DATE = '2099-12-31';
+IF NOT EXISTS
+(
+    SELECT 1 FROM sys.certificates
+    WHERE name = N'mcp_workshop_diagnostics_certificate'
+      AND subject = N'MCP workshop server DMV module signing'
+      AND pvt_key_encryption_type_desc = N'ENCRYPTED_BY_MASTER_KEY'
+)
+    THROW 51607, 'The diagnostics signing certificate contract is invalid.', 1;
+
 DECLARE @DatabaseCertificateThumbprint varbinary(32) =
 (
     SELECT thumbprint FROM sys.certificates WHERE name = N'mcp_workshop_diagnostics_certificate'
@@ -1213,10 +1232,6 @@ IF NOT EXISTS
 )
     THROW 51678, 'The diagnostics certificate login mapping is invalid.', 1;
 
-DECLARE @ReaderLoginName sysname = N'mcp_workshop_reader';
-DECLARE @McpReaderPassword nvarchar(4000) =
-    TRY_CONVERT(nvarchar(4000), SESSION_CONTEXT(N'McpReaderPassword'));
-
 IF SUSER_ID(N'mcp_workshop_reader') IS NULL
 BEGIN
     IF @McpReaderPassword IS NULL
@@ -1233,11 +1248,6 @@ BEGIN
             @McpReaderPassword COLLATE Latin1_General_100_BIN2) > 0
        OR CHARINDEX(LOWER(@ReaderLoginName), LOWER(@McpReaderPassword)) > 0
     BEGIN
-        BEGIN TRY
-            EXEC sys.sp_set_session_context @key = N'McpReaderPassword', @value = NULL;
-        END TRY
-        BEGIN CATCH
-        END CATCH;
         SET @McpReaderPassword = NULL;
         THROW 51667, 'McpReaderPassword does not satisfy the workshop secret policy.', 1;
     END;
@@ -1250,35 +1260,20 @@ BEGIN
         + N''', CHECK_POLICY = ON, CHECK_EXPIRATION = OFF, DEFAULT_DATABASE = [AdventureWorks2022];';
     BEGIN TRY
         EXEC master.sys.sp_executesql @CreateReaderLoginSql;
+        SET @McpReaderPassword = NULL;
+        SET @EscapedMcpReaderPassword = NULL;
+        SET @CreateReaderLoginSql = NULL;
     END TRY
     BEGIN CATCH
-        BEGIN TRY
-            EXEC sys.sp_set_session_context @key = N'McpReaderPassword', @value = NULL;
-        END TRY
-        BEGIN CATCH
-        END CATCH;
         SET @McpReaderPassword = NULL;
+        SET @EscapedMcpReaderPassword = NULL;
         SET @CreateReaderLoginSql = NULL;
         THROW;
     END CATCH;
-
-    BEGIN TRY
-        EXEC sys.sp_set_session_context @key = N'McpReaderPassword', @value = NULL;
-    END TRY
-    BEGIN CATCH
-    END CATCH;
-    SET @McpReaderPassword = NULL;
-    SET @EscapedMcpReaderPassword = NULL;
-    SET @CreateReaderLoginSql = NULL;
 END
 ELSE
 BEGIN
-    /* Never consume or retain a supplied secret when the login already exists. */
-    BEGIN TRY
-        EXEC sys.sp_set_session_context @key = N'McpReaderPassword', @value = NULL;
-    END TRY
-    BEGIN CATCH
-    END CATCH;
+    /* The session value was already cleared before any identity mutation. */
     SET @McpReaderPassword = NULL;
 END;
 

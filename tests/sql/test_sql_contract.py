@@ -1516,6 +1516,81 @@ def test_reader_login_secret_is_validated_cleared_and_never_embedded_in_source()
     assert not re.search(r"(?i)PASSWORD\s*=\s*N?'[^']+'", raw)
 
 
+def test_reader_secret_is_captured_and_cleared_before_identity_mutation() -> None:
+    text = normalized("05-CreateDiagnostics.sql")
+    capture = text.index("DECLARE @MCPREADERPASSWORD NVARCHAR(4000)")
+    clear = text.index(
+        "EXEC SYS.SP_SET_SESSION_CONTEXT @KEY = N'MCPREADERPASSWORD', @VALUE = NULL",
+        capture,
+    )
+    identity_mutations = tuple(
+        match.start()
+        for pattern in (
+            r"\bCREATE\s+CERTIFICATE\b",
+            r"\bCREATE\s+LOGIN\b",
+            r"\bCREATE\s+USER\b",
+            r"\bADD\s+SIGNATURE\b",
+            r"\bGRANT\s+(?:CONNECT|EXECUTE|SELECT|VIEW)\b",
+            r"\bREVOKE\s+VIEW\b",
+            r"\bDENY\s+(?:INSERT|UPDATE|DELETE|ALTER|CONTROL|TAKE|VIEW|IMPERSONATE)\b",
+        )
+        for match in re.finditer(pattern, text)
+    )
+    first_identity_mutation = min(identity_mutations)
+
+    assert capture < clear < first_identity_mutation
+    assert "SUSER_ID" not in text[capture:clear]
+    assert clear < text.index("IF SUSER_ID(N'MCP_WORKSHOP_READER') IS NULL")
+
+
+def test_reader_secret_clear_is_verified_and_fails_closed_without_swallowing_errors() -> None:
+    text = normalized("05-CreateDiagnostics.sql")
+    lifecycle = text[
+        text.index("DECLARE @MCPREADERPASSWORD NVARCHAR(4000)"):
+        text.index("DECLARE @DATABASECERTIFICATETHUMBPRINT VARBINARY(32)")
+    ]
+
+    assert re.search(
+        r"BEGIN TRY EXEC SYS\.SP_SET_SESSION_CONTEXT "
+        r"@KEY = N'MCPREADERPASSWORD', @VALUE = NULL; END TRY "
+        r"BEGIN CATCH SET @MCPREADERPASSWORD = NULL; THROW \d+, N?'[^']+', 1; END CATCH",
+        lifecycle,
+    )
+    assert re.search(
+        r"IF SESSION_CONTEXT\(N'MCPREADERPASSWORD'\) IS NOT NULL "
+        r"BEGIN SET @MCPREADERPASSWORD = NULL; THROW \d+, N?'[^']+', 1; END",
+        lifecycle,
+    )
+    assert not re.search(r"BEGIN CATCH\s+END CATCH", lifecycle)
+
+
+def test_reader_login_creation_zeroes_secret_and_dynamic_sql_on_success_and_failure() -> None:
+    text = normalized("05-CreateDiagnostics.sql")
+    creation_start = text.index("DECLARE @CREATEREADERLOGINSQL NVARCHAR(MAX)")
+    login_creation = text[
+        creation_start:
+        text.index("IF NOT EXISTS ( SELECT 1 FROM MASTER.SYS.SERVER_PRINCIPALS", creation_start)
+    ]
+    cleanup = (
+        r"SET @MCPREADERPASSWORD = NULL; "
+        r"SET @ESCAPEDMCPREADERPASSWORD = NULL; "
+        r"SET @CREATEREADERLOGINSQL = NULL;"
+    )
+
+    assert re.search(
+        r"BEGIN TRY EXEC MASTER\.SYS\.SP_EXECUTESQL @CREATEREADERLOGINSQL; "
+        + cleanup
+        + r" END TRY BEGIN CATCH "
+        + cleanup
+        + r" THROW; END CATCH",
+        login_creation,
+    )
+    for statement in re.findall(r"\b(?:PRINT|THROW)\b[^;]*;", text):
+        assert "@MCPREADERPASSWORD" not in statement
+        assert "@ESCAPEDMCPREADERPASSWORD" not in statement
+        assert "@CREATEREADERLOGINSQL" not in statement
+
+
 def test_all_sql_is_bounded_and_avoids_destructive_or_public_network_commands() -> None:
     combined = "\n".join(normalized(path.name) for path in SQL_DIR.glob("*.sql"))
     forbidden = (
