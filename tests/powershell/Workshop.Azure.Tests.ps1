@@ -44,12 +44,15 @@ BeforeAll {
                     [pscustomobject]@{
                         ProviderNamespace = 'Microsoft.Network'
                         RegistrationState = 'Registered'
-                        ResourceTypes = @(
+                        ResourceTypes = @(@(
                             'publicIPAddresses', 'natGateways', 'virtualNetworks',
-                            'networkSecurityGroups', 'applicationSecurityGroups', 'privateDnsZones'
+                            'networkSecurityGroups', 'applicationSecurityGroups'
                         ) | ForEach-Object {
                             [pscustomobject]@{ ResourceTypeName = $_; Locations = @('Indonesia Central') }
-                        }
+                        }) + @([pscustomobject]@{
+                            ResourceTypeName = 'privateDnsZones'
+                            Locations = @('global')
+                        })
                     }
                     [pscustomobject]@{ ProviderNamespace = 'Microsoft.Resources'; RegistrationState = 'Registered'; ResourceTypes = @() }
                     [pscustomobject]@{ ProviderNamespace = 'Microsoft.SqlVirtualMachine'; RegistrationState = 'Registered'; ResourceTypes = @() }
@@ -79,6 +82,7 @@ BeforeAll {
             }
             GetVmUsages = {
                 @(
+                    [pscustomobject]@{ Name = [pscustomobject]@{ Value = 'cores'; LocalizedValue = 'Total Regional vCPUs' }; CurrentValue = 6; Limit = 100 }
                     [pscustomobject]@{ Name = [pscustomobject]@{ Value = 'standardDSv5Family'; LocalizedValue = 'Standard DSv5 Family vCPUs' }; CurrentValue = 2; Limit = 20 }
                     [pscustomobject]@{ Name = [pscustomobject]@{ Value = 'standardESv5Family'; LocalizedValue = 'Standard ESv5 Family vCPUs' }; CurrentValue = 4; Limit = 20 }
                 )
@@ -92,17 +96,24 @@ BeforeAll {
                     Errors = @()
                 }
             }
-            FindResourceGroup = { param($Name) $null = $Name; return $null }
+            FindResourceGroup = {
+                param($Name)
+                $null = $Name
+                [pscustomobject]@{ VerifiedAbsent = $true; ResourceGroup = $null }
+            }
             FindResources = { param($Names, $ResourceGroupName) $null = $Names, $ResourceGroupName; return @() }
         }
     }
 
     function Invoke-PassingPreflight {
-        param([hashtable]$Operations = (Get-PassingOperationSet))
-        Test-WorkshopPrerequisites -Config $script:Config `
+        param(
+            [hashtable]$Operations = (Get-PassingOperationSet),
+            [hashtable]$Config = $script:Config
+        )
+        Test-WorkshopPrerequisites -Config $Config `
             -SubscriptionId '11111111-1111-1111-1111-111111111111' `
             -TenantId '22222222-2222-2222-2222-222222222222' `
-            -FacilitatorCidr '203.0.113.8/32' `
+            -FacilitatorCidr '8.8.8.8/32' `
             -WindowsClientLicenseAttested $true `
             -SqlEnterpriseCostAcknowledged $true `
             -BillableResourcesAcknowledged $true `
@@ -151,22 +162,60 @@ Describe 'Workshop configuration defaults' {
 
 Describe 'Assert-WorkshopHostCidr' {
     It 'returns a canonical public IPv4 host CIDR' {
-        Assert-WorkshopHostCidr '198.51.100.22/32' | Should -Be '198.51.100.22/32'
+        Assert-WorkshopHostCidr '8.8.8.8/32' | Should -Be '8.8.8.8/32'
     }
 
-    It 'rejects unsafe, private, noncanonical, IPv6, and broad values' -ForEach @(
+    It 'rejects non-global, special-use, noncanonical, IPv6, and broad values' -ForEach @(
         '0.0.0.0/32', '127.0.0.1/32', '169.254.10.1/32', '224.0.0.1/32',
-        '10.1.2.3/32', '172.16.2.3/32', '192.168.2.3/32', '198.51.100.22/31',
-        '100.64.0.1/32', '192.0.0.1/32', '198.18.0.1/32', '198.51.100.22/0',
-        '198.51.100.022/32', '2001:db8::1/128', 'not-a-cidr'
+        '10.1.2.3/32', '172.16.2.3/32', '192.168.2.3/32', '8.8.8.8/31',
+        '100.64.0.1/32', '192.0.0.1/32', '192.0.2.8/32', '198.18.0.1/32',
+        '198.51.100.22/32', '203.0.113.8/32', '192.88.99.1/32', '240.0.0.1/32',
+        '255.255.255.255/32', '8.8.8.8/0', '008.8.8.8/32', '2001:db8::1/128',
+        'not-a-cidr'
     ) {
         { Assert-WorkshopHostCidr $_ } | Should -Throw
     }
 }
 
+Describe 'Workshop configuration shape validation' {
+    It 'rejects invalid network, address, outbound, sizing, and naming configuration before reads' -ForEach @(
+        @{ Case = 'noncanonical VNet'; Change = { param($c) $c.VNet.AddressPrefix = '10.20.1.1/16' } }
+        @{ Case = 'non-IPv4 VNet'; Change = { param($c) $c.VNet.AddressPrefix = '2001:db8::/64' } }
+        @{ Case = 'admin subnet outside VNet'; Change = { param($c) $c.AdminSubnet.Prefix = '10.21.1.0/24' } }
+        @{ Case = 'overlapping subnets'; Change = { param($c) $c.SqlSubnet.Prefix = '10.20.1.128/25' } }
+        @{ Case = 'SQL IP outside subnet'; Change = { param($c) $c.SqlPrivateIp = '10.20.3.10' } }
+        @{ Case = 'SQL IP is network'; Change = { param($c) $c.SqlPrivateIp = '10.20.2.0' } }
+        @{ Case = 'SQL IP is reserved gateway'; Change = { param($c) $c.SqlPrivateIp = '10.20.2.1' } }
+        @{ Case = 'SQL IP is reserved DNS'; Change = { param($c) $c.SqlPrivateIp = '10.20.2.3' } }
+        @{ Case = 'SQL IP is broadcast'; Change = { param($c) $c.SqlPrivateIp = '10.20.2.255' } }
+        @{ Case = 'admin outbound is true'; Change = { param($c) $c.AdminSubnet.DefaultOutboundAccess = $true } }
+        @{ Case = 'SQL outbound is not Boolean false'; Change = { param($c) $c.SqlSubnet.DefaultOutboundAccess = 'false' } }
+        @{ Case = 'empty required name'; Change = { param($c) $c.AdminVm.Name = ' ' } }
+        @{ Case = 'empty VM size'; Change = { param($c) $c.SqlVm.Size = '' } }
+        @{ Case = 'zero disk'; Change = { param($c) $c.SqlVm.DataDiskGiB = 0 } }
+        @{ Case = 'negative disk'; Change = { param($c) $c.AdminVm.OsDiskGiB = -1 } }
+    ) {
+        $config = Import-PowerShellDataFile $script:ConfigPath
+        & $Change $config
+        { New-WorkshopNetworkModel -Config $config -FacilitatorCidr '8.8.8.8/32' } |
+            Should -Throw -Because $Case
+    }
+
+    It 'throws for invalid configuration before invoking any external read' {
+        $config = Import-PowerShellDataFile $script:ConfigPath
+        $config.SqlSubnet.Prefix = '10.99.0.0/24'
+        $script:ReadInvoked = $false
+        $ops = Get-PassingOperationSet
+        $ops.GetPowerShellVersion = { $script:ReadInvoked = $true; [version]'7.4' }
+
+        { Invoke-PassingPreflight -Operations $ops -Config $config } | Should -Throw
+        $script:ReadInvoked | Should -BeFalse
+    }
+}
+
 Describe 'Workshop network model' {
     BeforeAll {
-        $script:Network = New-WorkshopNetworkModel -Config $script:Config -FacilitatorCidr '203.0.113.8/32'
+        $script:Network = New-WorkshopNetworkModel -Config $script:Config -FacilitatorCidr '8.8.8.8/32'
     }
 
     It 'assigns a public IP only to the administration VM' {
@@ -189,7 +238,7 @@ Describe 'Workshop network model' {
 
     It 'allows public RDP only from the facilitator host CIDR' {
         $rule = $Network.Admin.Rules | Where-Object Name -EQ 'Allow-Facilitator-Rdp'
-        $rule.SourcePrefix | Should -Be '203.0.113.8/32'
+        $rule.SourcePrefix | Should -Be '8.8.8.8/32'
         $rule.DestinationPort | Should -Be 3389
         $rule.Protocol | Should -Be 'Tcp'
         $rule.Access | Should -Be 'Allow'
@@ -221,7 +270,7 @@ Describe 'Workshop plan and card' {
         $before = $script:Config | ConvertTo-Json -Depth 20 -Compress
         $parameters = @{
             Config = $script:Config
-            FacilitatorCidr = '203.0.113.8/32'
+            FacilitatorCidr = '8.8.8.8/32'
             ExpiresOn = [datetime]'2026-09-02T00:00:00Z'
             WindowsClientLicenseAttested = $true
             SqlEnterpriseCostAcknowledged = $true
@@ -242,7 +291,7 @@ Describe 'Workshop plan and card' {
     }
 
     It 'returns a deep copy independent of configuration' {
-        $plan = Get-WorkshopPlan -Config $script:Config -FacilitatorCidr '203.0.113.8/32' -ExpiresOn ([datetime]'2026-09-02') -WindowsClientLicenseAttested $true -SqlEnterpriseCostAcknowledged $true -BillableResourcesAcknowledged $true
+        $plan = Get-WorkshopPlan -Config $script:Config -FacilitatorCidr '8.8.8.8/32' -ExpiresOn ([datetime]'2026-09-02') -WindowsClientLicenseAttested $true -SqlEnterpriseCostAcknowledged $true -BillableResourcesAcknowledged $true
         $plan.Tags.environment = 'changed'
         $plan.AdminVm.Image.Sku = 'changed'
         $script:Config.Tags.environment | Should -Be 'workshop'
@@ -250,17 +299,17 @@ Describe 'Workshop plan and card' {
     }
 
     It 'preserves date-only expiration semantics regardless of local time zone' {
-        $plan = Get-WorkshopPlan -Config $script:Config -FacilitatorCidr '203.0.113.8/32' -ExpiresOn ([datetime]'2026-09-02') -WindowsClientLicenseAttested $true -SqlEnterpriseCostAcknowledged $true -BillableResourcesAcknowledged $true
+        $plan = Get-WorkshopPlan -Config $script:Config -FacilitatorCidr '8.8.8.8/32' -ExpiresOn ([datetime]'2026-09-02') -WindowsClientLicenseAttested $true -SqlEnterpriseCostAcknowledged $true -BillableResourcesAcknowledged $true
         $plan.Tags.expiresOn | Should -Be '2026-09-02'
     }
 
     It 'formats a deterministic plan card with boundaries, costs, and attestations' {
-        $plan = Get-WorkshopPlan -Config $script:Config -FacilitatorCidr '203.0.113.8/32' -ExpiresOn ([datetime]'2026-09-02') -WindowsClientLicenseAttested $true -SqlEnterpriseCostAcknowledged $true -BillableResourcesAcknowledged $true
+        $plan = Get-WorkshopPlan -Config $script:Config -FacilitatorCidr '8.8.8.8/32' -ExpiresOn ([datetime]'2026-09-02') -WindowsClientLicenseAttested $true -SqlEnterpriseCostAcknowledged $true -BillableResourcesAcknowledged $true
         $first = Format-WorkshopPlanCard -Plan $plan
         $second = Format-WorkshopPlanCard -Plan $plan
         $first | Should -BeExactly $second
         $first | Should -Match 'SQL public IP: none'
-        $first | Should -Match 'Public ingress: Windows 11 RDP from 203\.0\.113\.8/32 only'
+        $first | Should -Match 'Public ingress: Windows 11 RDP from 8\.8\.8\.8/32 only'
         $first | Should -Match 'SQL ingress: Admin ASG to SQL ASG TCP 1433'
         $first | Should -Match 'Windows client license attested: True'
         $first | Should -Match 'SQL Enterprise PAYG acknowledged: True'
@@ -331,7 +380,7 @@ Describe 'Non-destructive workshop preflight' {
         $ops = Get-PassingOperationSet
         $result = Test-WorkshopPrerequisites -Config $script:Config `
             -SubscriptionId '11111111-1111-1111-1111-111111111111' `
-            -FacilitatorCidr '203.0.113.8/32' `
+            -FacilitatorCidr '8.8.8.8/32' `
             -WindowsClientLicenseAttested $true `
             -SqlEnterpriseCostAcknowledged $true `
             -BillableResourcesAcknowledged $true `
@@ -417,6 +466,8 @@ Describe 'Non-destructive workshop preflight' {
             Should -Be "Provider metadata confirms location 'indonesiacentral'; deployment requires SKU 'Standard', whose exact regional listing is not asserted by this metadata."
         ($result.Checks | Where-Object Name -EQ 'Resource type Microsoft.Network/natGateways').Detail |
             Should -Be "Provider metadata confirms location 'indonesiacentral'; deployment requires SKU 'Standard', whose exact regional listing is not asserted by this metadata."
+        ($result.Checks | Where-Object Name -EQ 'Resource type Microsoft.Network/privateDnsZones').Detail |
+            Should -Be "Provider metadata confirms resource-type support in location 'global'."
     }
 
     It 'requires exact Standard network SKU validation separately from provider location metadata' {
@@ -529,7 +580,7 @@ Describe 'Non-destructive workshop preflight' {
     It 'aggregates a false all-billable-categories acknowledgement without hiding other failures' {
         $result = Test-WorkshopPrerequisites -Config $script:Config `
             -SubscriptionId '11111111-1111-1111-1111-111111111111' `
-            -FacilitatorCidr '203.0.113.8/32' `
+            -FacilitatorCidr '8.8.8.8/32' `
             -WindowsClientLicenseAttested $false `
             -SqlEnterpriseCostAcknowledged $false `
             -BillableResourcesAcknowledged $false `
@@ -628,6 +679,53 @@ Describe 'Non-destructive workshop preflight' {
             Should -Be 'Required vCPUs: 12; available vCPUs: 11; missing vCPUs: 1.'
     }
 
+    It 'fails total regional quota when both family quotas pass' {
+        $ops = Get-PassingOperationSet
+        $ops.GetVmUsages = {
+            @(
+                [pscustomobject]@{ Name = [pscustomobject]@{ Value = 'cores'; LocalizedValue = 'Total Regional vCPUs' }; CurrentValue = 9; Limit = 20 }
+                [pscustomobject]@{ Name = [pscustomobject]@{ Value = 'standardDSv5Family'; LocalizedValue = 'DSv5' }; CurrentValue = 0; Limit = 20 }
+                [pscustomobject]@{ Name = [pscustomobject]@{ Value = 'standardESv5Family'; LocalizedValue = 'ESv5' }; CurrentValue = 0; Limit = 20 }
+            )
+        }
+
+        $result = Invoke-PassingPreflight -Operations $ops
+        ($result.Checks | Where-Object Name -EQ 'Quota standardDSv5Family').Status | Should -Be 'Passed'
+        ($result.Checks | Where-Object Name -EQ 'Quota standardESv5Family').Status | Should -Be 'Passed'
+        $total = $result.Checks | Where-Object Name -EQ 'Quota Total Regional vCPUs'
+        $total.Status | Should -Be 'Failed'
+        $total.Detail | Should -Be 'Required vCPUs: 12; available vCPUs: 11; missing vCPUs: 1.'
+    }
+
+    It 'fails total regional quota when its usage record is missing' {
+        $ops = Get-PassingOperationSet
+        $ops.GetVmUsages = {
+            @(
+                [pscustomobject]@{ Name = [pscustomobject]@{ Value = 'standardDSv5Family' }; CurrentValue = 0; Limit = 20 }
+                [pscustomobject]@{ Name = [pscustomobject]@{ Value = 'standardESv5Family' }; CurrentValue = 0; Limit = 20 }
+            )
+        }
+        $result = Invoke-PassingPreflight -Operations $ops
+        ($result.Checks | Where-Object Name -EQ 'Quota Total Regional vCPUs').Status | Should -Be 'Failed'
+        ($result.Checks | Where-Object Name -EQ 'Quota Total Regional vCPUs').Detail |
+            Should -Be 'Required vCPUs: 12; available vCPUs: unknown; missing vCPUs: unknown.'
+    }
+
+    It 'fails malformed total regional quota as unverifiable without throwing' {
+        $ops = Get-PassingOperationSet
+        $ops.GetVmUsages = {
+            @(
+                [pscustomobject]@{ Name = [pscustomobject]@{ Value = 'cores'; LocalizedValue = "Total`nRegional vCPUs" }; CurrentValue = 'not-a-count'; Limit = 'also-not-a-count' }
+                [pscustomobject]@{ Name = [pscustomobject]@{ Value = 'standardDSv5Family' }; CurrentValue = 0; Limit = 20 }
+                [pscustomobject]@{ Name = [pscustomobject]@{ Value = 'standardESv5Family' }; CurrentValue = 0; Limit = 20 }
+            )
+        }
+        { $script:Result = Invoke-PassingPreflight -Operations $ops } | Should -Not -Throw
+        $total = $script:Result.Checks | Where-Object Name -EQ 'Quota Total Regional vCPUs'
+        $total.Status | Should -Be 'Failed'
+        $total.Detail | Should -Be 'Required vCPUs: 12; available vCPUs: unknown; missing vCPUs: unknown.'
+    }
+
     It 'reports missing and outdated required Az modules without throwing' {
         $ops = Get-PassingOperationSet
         $ops.GetModules = { @([pscustomobject]@{ Name = 'Az.Accounts'; Version = [version]'1.0.0' }) }
@@ -693,6 +791,7 @@ Describe 'Non-destructive workshop preflight' {
     It 'scopes resource-name collision reads to the target resource group' {
         $script:CollisionScope = $null
         $ops = Get-PassingOperationSet
+        $ops.FindResourceGroup = { param($Name) [pscustomobject]@{ ResourceGroupName = $Name } }
         $ops.FindResources = {
             param($Names, $ResourceGroupName)
             $null = $Names
@@ -700,12 +799,118 @@ Describe 'Non-destructive workshop preflight' {
             @()
         }
         $result = Invoke-PassingPreflight -Operations $ops
-        $result.Passed | Should -BeTrue
+        $result.Passed | Should -BeFalse
         $script:CollisionScope | Should -Be 'rg-mcp-sql-workshop'
+    }
+
+    It 'does not read scoped resources when resource-group absence is verified' {
+        $script:ScopedReadInvoked = $false
+        $ops = Get-PassingOperationSet
+        $ops.FindResources = { $script:ScopedReadInvoked = $true; @() }
+        $result = Invoke-PassingPreflight -Operations $ops
+        $result.Passed | Should -BeTrue
+        $script:ScopedReadInvoked | Should -BeFalse
+        ($result.Checks | Where-Object Name -EQ 'Resource name collisions').Detail |
+            Should -Match 'verified absent'
+    }
+
+    It 'fails closed when resource-group absence is returned as an ambiguous null' {
+        $ops = Get-PassingOperationSet
+        $ops.FindResourceGroup = { return $null }
+        $result = Invoke-PassingPreflight -Operations $ops
+        ($result.Checks | Where-Object Name -EQ 'Resource group collision').Status | Should -Be 'Failed'
+        ($result.Checks | Where-Object Name -EQ 'Resource name collisions').Status | Should -Be 'Failed'
+    }
+
+    It 'turns terminating and nonterminating collision-read errors into failures without swallowing auth' -ForEach @(
+        @{ Kind = 'terminating'; Operation = { throw 'AuthorizationFailed: denied' } }
+        @{ Kind = 'nonterminating'; Operation = { Write-Error 'network read failed'; return $null } }
+    ) {
+        $ops = Get-PassingOperationSet
+        $ops.FindResourceGroup = $Operation
+        { $script:Result = Invoke-PassingPreflight -Operations $ops } | Should -Not -Throw -Because $Kind
+        ($script:Result.Checks | Where-Object Name -EQ 'Resource group collision').Status | Should -Be 'Failed'
+        ($script:Result.Checks | Where-Object Name -EQ 'Resource name collisions').Status | Should -Be 'Failed'
+    }
+
+    It 'fails scoped resource collisions when an existing group read errors' {
+        $ops = Get-PassingOperationSet
+        $ops.FindResourceGroup = { [pscustomobject]@{ ResourceGroupName = 'rg-mcp-sql-workshop' } }
+        $ops.FindResources = { Write-Error 'AuthorizationFailed'; @() }
+        $result = Invoke-PassingPreflight -Operations $ops
+        ($result.Checks | Where-Object Name -EQ 'Resource name collisions').Status | Should -Be 'Failed'
+    }
+
+    It 'sanitizes and bounds all external-derived check details' {
+        $ops = Get-PassingOperationSet
+        $payload = "malicious`r`n`t$([char]0)$('x' * 2000)"
+        $ops.GetContext = { throw $payload }
+        $ops.GetProviders = { throw $payload }
+        $ops.GetComputeSkus = { throw $payload }
+        $ops.GetVmUsages = { throw $payload }
+        $ops.FindResourceGroup = { throw $payload }
+        $result = Invoke-PassingPreflight -Operations $ops
+
+        foreach ($check in $result.Checks) {
+            $check.Name | Should -Not -Match '[\x00-\x1F\x7F]'
+            $check.Detail | Should -Not -Match '[\x00-\x1F\x7F]'
+            $check.Remediation | Should -Not -Match '[\x00-\x1F\x7F]'
+            $check.Name.Length | Should -BeLessOrEqual 512
+            $check.Detail.Length | Should -BeLessOrEqual 512
+            $check.Remediation.Length | Should -BeLessOrEqual 512
+        }
     }
 }
 
 Describe 'Static safety and module contract' {
+    It 'uses terminating errors for every default Azure collision read and recognizes only explicit not-found' {
+        InModuleScope Workshop.Azure {
+            Mock Get-AzResourceGroup { [pscustomobject]@{ ResourceGroupName = $Name } }
+            Mock Get-AzResource { @() }
+            $operations = Get-DefaultWorkshopOperationSet
+            $null = & $operations.FindResourceGroup 'rg-test'
+            $null = & $operations.FindResources @('one') 'rg-test'
+            Should -Invoke Get-AzResourceGroup -Times 1 -ParameterFilter { $ErrorAction -eq 'Stop' }
+            Should -Invoke Get-AzResource -Times 1 -ParameterFilter { $ErrorAction -eq 'Stop' }
+        }
+    }
+
+    It 'returns VerifiedAbsent only for an explicit Azure resource-group not-found code' {
+        InModuleScope Workshop.Azure {
+            Mock Get-AzResourceGroup {
+                $exception = [System.Exception]::new('resource group is absent')
+                $record = [System.Management.Automation.ErrorRecord]::new(
+                    $exception,
+                    'ResourceGroupNotFound',
+                    [System.Management.Automation.ErrorCategory]::ObjectNotFound,
+                    $Name
+                )
+                throw $record
+            }
+            $operations = Get-DefaultWorkshopOperationSet
+            $result = & $operations.FindResourceGroup 'rg-test'
+            $result.VerifiedAbsent | Should -BeTrue
+            $result.ResourceGroup | Should -BeNullOrEmpty
+        }
+    }
+
+    It 'does not convert Azure authorization failures into verified absence' {
+        InModuleScope Workshop.Azure {
+            Mock Get-AzResourceGroup {
+                $exception = [System.Exception]::new('denied')
+                $record = [System.Management.Automation.ErrorRecord]::new(
+                    $exception,
+                    'AuthorizationFailed',
+                    [System.Management.Automation.ErrorCategory]::PermissionDenied,
+                    $Name
+                )
+                throw $record
+            }
+            $operations = Get-DefaultWorkshopOperationSet
+            { & $operations.FindResourceGroup 'rg-test' } | Should -Throw
+        }
+    }
+
     It 'exports only the intended functions and requires PowerShell 7.4' {
         $manifest = Test-ModuleManifest $script:ModulePath
         $manifest.PowerShellVersion | Should -Be ([version]'7.4')
@@ -742,7 +947,7 @@ Describe 'Static safety and module contract' {
                 [string]::IsNullOrWhiteSpace($node.GetCommandName())
         }, $true) | ForEach-Object { $_.Extent.Text })
         $dynamicCommands.Count | Should -Be 2
-        $dynamicCommands | Should -Contain '& $Operation @Arguments'
+        $dynamicCommands | Should -Contain '& $Operation @Arguments 2>&1'
         @($dynamicCommands | Where-Object { $_ -match '^& \$validationCommand -Name' }).Count | Should -Be 1
         (Get-Content -LiteralPath $modulePath -Raw) | Should -Match "\`$validationCommand = 'Test-Az' \+ 'SubscriptionDeployment'"
     }

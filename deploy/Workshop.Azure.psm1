@@ -18,6 +18,58 @@ $script:KnownVmFamilies = @{
     'Standard_E8s_v5' = 'standardESv5Family'
 }
 
+function ConvertTo-WorkshopIpv4Value {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string] $Address)
+
+    $parsed = $null
+    if ($Address -notmatch '^\d{1,3}(\.\d{1,3}){3}$' -or
+        -not [System.Net.IPAddress]::TryParse($Address, [ref] $parsed) -or
+        $parsed.AddressFamily -ne [System.Net.Sockets.AddressFamily]::InterNetwork -or
+        $parsed.IPAddressToString -cne $Address) {
+        throw "'$Address' is not a canonical IPv4 address."
+    }
+    $bytes = $parsed.GetAddressBytes()
+    return [uint64] $bytes[0] * 16777216 + [uint64] $bytes[1] * 65536 +
+        [uint64] $bytes[2] * 256 + [uint64] $bytes[3]
+}
+
+function ConvertTo-WorkshopIpv4Network {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string] $Cidr)
+
+    if ($Cidr -notmatch '^([^/]+)/(\d{1,2})$') {
+        throw "'$Cidr' is not an IPv4 CIDR."
+    }
+    $addressText = $Matches[1]
+    $prefix = [int] $Matches[2]
+    if ($prefix -lt 0 -or $prefix -gt 32) {
+        throw "'$Cidr' has an invalid IPv4 prefix length."
+    }
+    $address = ConvertTo-WorkshopIpv4Value -Address $addressText
+    $hostCount = [uint64] [math]::Pow(2, 32 - $prefix)
+    $network = $address - ($address % $hostCount)
+    if ($address -ne $network) {
+        throw "'$Cidr' is not a canonical IPv4 network CIDR."
+    }
+    [pscustomobject]@{
+        Address = $address
+        Prefix = $prefix
+        Network = $network
+        Broadcast = $network + $hostCount - 1
+    }
+}
+
+function Test-WorkshopIpv4InNetwork {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][uint64] $Address,
+        [Parameter(Mandatory)][psobject] $Network
+    )
+
+    return $Address -ge $Network.Network -and $Address -le $Network.Broadcast
+}
+
 function Assert-WorkshopConfigShape {
     [CmdletBinding()]
     param([Parameter(Mandatory)][hashtable] $Config)
@@ -60,6 +112,70 @@ function Assert-WorkshopConfigShape {
             throw "Workshop configuration Tags is missing required key '$key'."
         }
     }
+
+    $requiredStrings = @(
+        @{ Label = 'Location'; Value = $Config.Location }
+        @{ Label = 'ResourceGroupName'; Value = $Config.ResourceGroupName }
+        @{ Label = 'VNet.Name'; Value = $Config.VNet.Name }
+        @{ Label = 'AdminSubnet.Name'; Value = $Config.AdminSubnet.Name }
+        @{ Label = 'SqlSubnet.Name'; Value = $Config.SqlSubnet.Name }
+        @{ Label = 'AdminAsg'; Value = $Config.AdminAsg }
+        @{ Label = 'SqlAsg'; Value = $Config.SqlAsg }
+        @{ Label = 'PrivateDnsZone'; Value = $Config.PrivateDnsZone }
+        @{ Label = 'AdminVm.Name'; Value = $Config.AdminVm.Name }
+        @{ Label = 'AdminVm.Size'; Value = $Config.AdminVm.Size }
+        @{ Label = 'AdminVm.Publisher'; Value = $Config.AdminVm.Publisher }
+        @{ Label = 'AdminVm.Offer'; Value = $Config.AdminVm.Offer }
+        @{ Label = 'AdminVm.Sku'; Value = $Config.AdminVm.Sku }
+        @{ Label = 'SqlVm.Name'; Value = $Config.SqlVm.Name }
+        @{ Label = 'SqlVm.Size'; Value = $Config.SqlVm.Size }
+        @{ Label = 'SqlVm.Publisher'; Value = $Config.SqlVm.Publisher }
+        @{ Label = 'SqlVm.Offer'; Value = $Config.SqlVm.Offer }
+        @{ Label = 'SqlVm.Sku'; Value = $Config.SqlVm.Sku }
+        @{ Label = 'SqlVm.LicenseType'; Value = $Config.SqlVm.LicenseType }
+    )
+    foreach ($item in $requiredStrings) {
+        if ($item.Value -isnot [string] -or [string]::IsNullOrWhiteSpace($item.Value)) {
+            throw "Workshop configuration $($item.Label) must be a nonempty string."
+        }
+    }
+
+    foreach ($subnetName in @('AdminSubnet', 'SqlSubnet')) {
+        if ($Config[$subnetName].DefaultOutboundAccess -isnot [bool] -or
+            $Config[$subnetName].DefaultOutboundAccess -ne $false) {
+            throw "Workshop configuration $subnetName.DefaultOutboundAccess must be exactly Boolean false."
+        }
+    }
+    foreach ($disk in @(
+        @{ Label = 'AdminVm.OsDiskGiB'; Value = $Config.AdminVm.OsDiskGiB }
+        @{ Label = 'SqlVm.OsDiskGiB'; Value = $Config.SqlVm.OsDiskGiB }
+        @{ Label = 'SqlVm.DataDiskGiB'; Value = $Config.SqlVm.DataDiskGiB }
+        @{ Label = 'SqlVm.LogDiskGiB'; Value = $Config.SqlVm.LogDiskGiB }
+    )) {
+        if ($disk.Value -isnot [ValueType] -or [decimal] $disk.Value -le 0) {
+            throw "Workshop configuration $($disk.Label) must be positive."
+        }
+    }
+
+    $vnet = ConvertTo-WorkshopIpv4Network -Cidr ([string] $Config.VNet.AddressPrefix)
+    $adminSubnet = ConvertTo-WorkshopIpv4Network -Cidr ([string] $Config.AdminSubnet.Prefix)
+    $sqlSubnet = ConvertTo-WorkshopIpv4Network -Cidr ([string] $Config.SqlSubnet.Prefix)
+    foreach ($subnet in @($adminSubnet, $sqlSubnet)) {
+        if ($subnet.Network -lt $vnet.Network -or $subnet.Broadcast -gt $vnet.Broadcast -or
+            $subnet.Prefix -le $vnet.Prefix) {
+            throw 'Workshop configuration subnets must be fully contained in the VNet.'
+        }
+    }
+    if ($adminSubnet.Network -le $sqlSubnet.Broadcast -and $sqlSubnet.Network -le $adminSubnet.Broadcast) {
+        throw 'Workshop configuration subnets must not overlap.'
+    }
+    $sqlIp = ConvertTo-WorkshopIpv4Value -Address ([string] $Config.SqlPrivateIp)
+    if (-not (Test-WorkshopIpv4InNetwork -Address $sqlIp -Network $sqlSubnet)) {
+        throw 'Workshop configuration SqlPrivateIp must be contained in the SQL subnet.'
+    }
+    if ($sqlIp -lt ($sqlSubnet.Network + 4) -or $sqlIp -ge $sqlSubnet.Broadcast) {
+        throw 'Workshop configuration SqlPrivateIp must not use network, broadcast, or Azure-reserved addresses.'
+    }
 }
 
 function Assert-WorkshopHostCidr {
@@ -86,21 +202,22 @@ function Assert-WorkshopHostCidr {
         throw "Facilitator CIDR is not canonical; use '$normalized'."
     }
 
-    $octets = $address.GetAddressBytes()
-    $isUnspecified = $octets[0] -eq 0
-    $isLoopback = $octets[0] -eq 127
-    $isLinkLocal = $octets[0] -eq 169 -and $octets[1] -eq 254
-    $isPrivate = $octets[0] -eq 10 -or
-        ($octets[0] -eq 172 -and $octets[1] -ge 16 -and $octets[1] -le 31) -or
-        ($octets[0] -eq 192 -and $octets[1] -eq 168)
-    $isSharedAddressSpace = $octets[0] -eq 100 -and $octets[1] -ge 64 -and $octets[1] -le 127
-    $isProtocolAssignment = $octets[0] -eq 192 -and $octets[1] -eq 0 -and $octets[2] -eq 0
-    $isBenchmarking = $octets[0] -eq 198 -and ($octets[1] -eq 18 -or $octets[1] -eq 19)
-    $isMulticastOrReserved = $octets[0] -ge 224
-
-    if ($isUnspecified -or $isLoopback -or $isLinkLocal -or $isPrivate -or
-        $isSharedAddressSpace -or $isProtocolAssignment -or $isBenchmarking -or
-        $isMulticastOrReserved) {
+    $addressValue = ConvertTo-WorkshopIpv4Value -Address $addressText
+    $nonGlobalNetworks = @(
+        '0.0.0.0/8', '10.0.0.0/8', '100.64.0.0/10', '127.0.0.0/8',
+        '169.254.0.0/16', '172.16.0.0/12', '192.0.0.0/24', '192.0.2.0/24',
+        '192.88.99.0/24', '192.168.0.0/16', '198.18.0.0/15', '198.51.100.0/24',
+        '203.0.113.0/24', '224.0.0.0/4', '240.0.0.0/4'
+    )
+    $isNonGlobal = $false
+    foreach ($networkText in $nonGlobalNetworks) {
+        $network = ConvertTo-WorkshopIpv4Network -Cidr $networkText
+        if (Test-WorkshopIpv4InNetwork -Address $addressValue -Network $network) {
+            $isNonGlobal = $true
+            break
+        }
+    }
+    if ($isNonGlobal) {
         throw 'Facilitator CIDR must identify a public unicast IPv4 host.'
     }
 
@@ -231,10 +348,10 @@ function Get-WorkshopPlan {
     $sqlVersion = 'unresolved (latest requested)'
     if ($null -ne $ResolvedImages) {
         if ($ResolvedImages.ContainsKey('Admin') -and $null -ne $ResolvedImages.Admin) {
-            $adminVersion = [string] $ResolvedImages.Admin.Version
+            $adminVersion = ConvertTo-WorkshopSafeDetail -Value $ResolvedImages.Admin.Version
         }
         if ($ResolvedImages.ContainsKey('Sql') -and $null -ne $ResolvedImages.Sql) {
-            $sqlVersion = [string] $ResolvedImages.Sql.Version
+            $sqlVersion = ConvertTo-WorkshopSafeDetail -Value $ResolvedImages.Sql.Version
         }
     }
 
@@ -342,7 +459,9 @@ function Format-WorkshopPlanCard {
         }
         $lines.Add("Auto-shutdown: $($Plan.AutoShutdownTime)")
         $lines.Add("Tags: environment=$($Plan.Tags.environment); workload=$($Plan.Tags.workload); managedBy=$($Plan.Tags.managedBy); expiresOn=$($Plan.Tags.expiresOn)")
-        return $lines -join [Environment]::NewLine
+        return @($lines | ForEach-Object {
+            ConvertTo-WorkshopSafeDetail -Value $_
+        }) -join [Environment]::NewLine
     }
 }
 
@@ -357,10 +476,10 @@ function Add-WorkshopCheck {
     )
 
     $Checks.Add([pscustomobject][ordered]@{
-        Name = $Name
+        Name = ConvertTo-WorkshopSafeDetail -Value $Name
         Status = if ($Passed) { 'Passed' } else { 'Failed' }
-        Detail = $Detail
-        Remediation = if ($Passed) { '' } else { $Remediation }
+        Detail = ConvertTo-WorkshopSafeDetail -Value $Detail
+        Remediation = if ($Passed) { '' } else { ConvertTo-WorkshopSafeDetail -Value $Remediation }
     })
 }
 
@@ -372,10 +491,26 @@ function Invoke-WorkshopReadOperation {
     )
 
     try {
-        [pscustomobject]@{ Succeeded = $true; Value = @(& $Operation @Arguments); Error = $null }
+        $ErrorActionPreference = 'Stop'
+        $operationOutput = @(& $Operation @Arguments 2>&1)
+        $operationErrors = @($operationOutput | Where-Object {
+            $_ -is [System.Management.Automation.ErrorRecord]
+        })
+        if ($operationErrors.Count -gt 0) {
+            throw ($operationErrors | ForEach-Object Exception | ForEach-Object Message) -join '; '
+        }
+        [pscustomobject]@{
+            Succeeded = $true
+            Value = @($operationOutput)
+            Error = $null
+        }
     }
     catch {
-        [pscustomobject]@{ Succeeded = $false; Value = @(); Error = $_.Exception.Message }
+        [pscustomobject]@{
+            Succeeded = $false
+            Value = @()
+            Error = ConvertTo-WorkshopSafeDetail -Value $_.Exception.Message
+        }
     }
 }
 
@@ -413,6 +548,28 @@ function Test-WorkshopLocationMatch {
     } | Select-Object -First 1)
 }
 
+function Get-WorkshopQuotaAvailability {
+    [CmdletBinding()]
+    param([AllowNull()][object] $Usage)
+
+    $current = 0L
+    $limit = 0L
+    $shapeValid = $null -ne $Usage -and
+        $Usage.PSObject.Properties.Name -contains 'CurrentValue' -and
+        $Usage.PSObject.Properties.Name -contains 'Limit'
+    $valuesValid = $shapeValid -and
+        [long]::TryParse([string] $Usage.CurrentValue, [ref] $current) -and
+        [long]::TryParse([string] $Usage.Limit, [ref] $limit) -and
+        $current -ge 0 -and $limit -ge 0
+    if (-not $valuesValid) {
+        return [pscustomobject]@{ Verified = $false; Available = $null }
+    }
+    return [pscustomobject]@{
+        Verified = $true
+        Available = [Math]::Max(0L, $limit - $current)
+    }
+}
+
 function ConvertTo-WorkshopSafeDetail {
     [CmdletBinding()]
     param(
@@ -426,14 +583,47 @@ function ConvertTo-WorkshopSafeDetail {
         return $Fallback
     }
     $text = [string] $Value
-    $text = [regex]::Replace($text, '[\x00-\x1F\x7F]+', ' ').Trim()
+    $text = [regex]::Replace($text, '[\x00-\x1F\x7F]+', ' ')
+    $text = [regex]::Replace($text, '\s+', ' ').Trim()
     if ([string]::IsNullOrWhiteSpace($text)) {
         return $Fallback
     }
-    if ($text.Length -gt 1000) {
-        return $text.Substring(0, 1000) + '...'
+    if ($text.Length -gt 512) {
+        return $text.Substring(0, 509) + '...'
     }
     return $text
+}
+
+function Test-WorkshopAzureNotFound {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][System.Management.Automation.ErrorRecord] $ErrorRecord)
+
+    $codes = [System.Collections.Generic.List[string]]::new()
+    if (-not [string]::IsNullOrWhiteSpace($ErrorRecord.FullyQualifiedErrorId)) {
+        $codes.Add($ErrorRecord.FullyQualifiedErrorId)
+    }
+    $exception = $ErrorRecord.Exception
+    foreach ($propertyName in @('Code', 'ErrorCode')) {
+        if ($null -ne $exception -and $exception.PSObject.Properties.Name -contains $propertyName) {
+            $codes.Add([string] $exception.$propertyName)
+        }
+    }
+    if ($null -ne $exception -and $exception.PSObject.Properties.Name -contains 'Error' -and
+        $null -ne $exception.Error -and $exception.Error.PSObject.Properties.Name -contains 'Code') {
+        $codes.Add([string] $exception.Error.Code)
+    }
+    foreach ($code in $codes) {
+        if ($code -match '(^|,|\.)Resource(Group)?NotFound($|,|\.)') {
+            return $true
+        }
+    }
+    foreach ($candidate in @($exception, $exception.Response)) {
+        if ($null -ne $candidate -and $candidate.PSObject.Properties.Name -contains 'StatusCode' -and
+            [int] $candidate.StatusCode -eq 404) {
+            return $true
+        }
+    }
+    return $false
 }
 
 function Get-WorkshopNetworkSkuValidationTemplate {
@@ -502,16 +692,16 @@ function Get-DefaultWorkshopOperationSet {
 
     @{
         GetPowerShellVersion = { $PSVersionTable.PSVersion }
-        GetModules = { Get-Module -ListAvailable -Name $script:RequiredAzModules.Keys }
-        GetContext = { Get-AzContext }
-        GetProviders = { Get-AzResourceProvider }
-        GetLocations = { Get-AzLocation }
-        GetComputeSkus = { Get-AzComputeResourceSku }
+        GetModules = { Get-Module -ListAvailable -Name $script:RequiredAzModules.Keys -ErrorAction Stop }
+        GetContext = { Get-AzContext -ErrorAction Stop }
+        GetProviders = { Get-AzResourceProvider -ErrorAction Stop }
+        GetLocations = { Get-AzLocation -ErrorAction Stop }
+        GetComputeSkus = { Get-AzComputeResourceSku -ErrorAction Stop }
         GetImages = {
             param($Publisher, $Offer, $Sku, $Location)
-            Get-AzVMImage -PublisherName $Publisher -Offer $Offer -Skus $Sku -Location $Location
+            Get-AzVMImage -PublisherName $Publisher -Offer $Offer -Skus $Sku -Location $Location -ErrorAction Stop
         }
-        GetVmUsages = { param($Location) Get-AzVMUsage -Location $Location }
+        GetVmUsages = { param($Location) Get-AzVMUsage -Location $Location -ErrorAction Stop }
         TestNetworkSkuDeployment = {
             param($Location)
             $suffix = [guid]::NewGuid().ToString('N').Substring(0, 12)
@@ -544,10 +734,24 @@ function Get-DefaultWorkshopOperationSet {
                 Errors = $validationErrors
             }
         }
-        FindResourceGroup = { param($Name) Get-AzResourceGroup -Name $Name -ErrorAction SilentlyContinue }
+        FindResourceGroup = {
+            param($Name)
+            try {
+                [pscustomobject]@{
+                    VerifiedAbsent = $false
+                    ResourceGroup = Get-AzResourceGroup -Name $Name -ErrorAction Stop
+                }
+            }
+            catch {
+                if (-not (Test-WorkshopAzureNotFound -ErrorRecord $_)) {
+                    throw
+                }
+                [pscustomobject]@{ VerifiedAbsent = $true; ResourceGroup = $null }
+            }
+        }
         FindResources = {
             param($Names, $ResourceGroupName)
-            Get-AzResource -ResourceGroupName $ResourceGroupName -ErrorAction SilentlyContinue |
+            Get-AzResource -ResourceGroupName $ResourceGroupName -ErrorAction Stop |
                 Where-Object { $_.Name -in $Names }
         }
     }
@@ -693,7 +897,7 @@ ${function:Test-WorkshopPrerequisites} = {
         @{ Provider = 'Microsoft.Network'; Type = 'virtualNetworks'; RequiredSku = ''; ExactSkuValidated = $false }
         @{ Provider = 'Microsoft.Network'; Type = 'networkSecurityGroups'; RequiredSku = ''; ExactSkuValidated = $false }
         @{ Provider = 'Microsoft.Network'; Type = 'applicationSecurityGroups'; RequiredSku = ''; ExactSkuValidated = $false }
-        @{ Provider = 'Microsoft.Network'; Type = 'privateDnsZones'; RequiredSku = ''; ExactSkuValidated = $false }
+        @{ Provider = 'Microsoft.Network'; Type = 'privateDnsZones'; RequiredSku = ''; ExactSkuValidated = $false; RequiredLocation = 'global' }
     )
     foreach ($requirement in $requiredResourceTypes) {
         $provider = $providerResult.Value | Where-Object ProviderNamespace -EQ $requirement.Provider | Select-Object -First 1
@@ -712,26 +916,32 @@ ${function:Test-WorkshopPrerequisites} = {
         else {
             @()
         }
+        $requiredLocation = if ($requirement.ContainsKey('RequiredLocation')) {
+            [string] $requirement.RequiredLocation
+        }
+        else {
+            [string] $Config.Location
+        }
         $resourceTypePassed = $providerResult.Succeeded -and $null -ne $resourceType -and
-            (Test-WorkshopLocationMatch -Locations $locations -RequiredLocation $Config.Location)
+            (Test-WorkshopLocationMatch -Locations $locations -RequiredLocation $requiredLocation)
         if (-not $resourceTypePassed) {
-            $detail = "Provider metadata does not confirm resource-type support in location '$($Config.Location)'."
+            $detail = "Provider metadata does not confirm resource-type support in location '$requiredLocation'."
             if (-not [string]::IsNullOrWhiteSpace([string] $requirement.RequiredSku) -and -not $requirement.ExactSkuValidated) {
                 $detail += " Deployment still requires SKU '$($requirement.RequiredSku)', whose exact regional listing is not asserted by this metadata."
             }
         }
         elseif (-not [string]::IsNullOrWhiteSpace([string] $requirement.RequiredSku) -and -not $requirement.ExactSkuValidated) {
-            $detail = "Provider metadata confirms location '$($Config.Location)'; deployment requires SKU '$($requirement.RequiredSku)', whose exact regional listing is not asserted by this metadata."
+            $detail = "Provider metadata confirms location '$requiredLocation'; deployment requires SKU '$($requirement.RequiredSku)', whose exact regional listing is not asserted by this metadata."
         }
         elseif ($requirement.ExactSkuValidated) {
-            $detail = "Provider metadata confirms location '$($Config.Location)'; exact deployment SKU '$($requirement.RequiredSku)' is validated separately by the managed disk SKU check."
+            $detail = "Provider metadata confirms location '$requiredLocation'; exact deployment SKU '$($requirement.RequiredSku)' is validated separately by the managed disk SKU check."
         }
         else {
-            $detail = "Provider metadata confirms resource-type support in location '$($Config.Location)'."
+            $detail = "Provider metadata confirms resource-type support in location '$requiredLocation'."
         }
         Add-WorkshopCheck -Checks $checks -Name "Resource type $($requirement.Provider)/$($requirement.Type)" -Passed $resourceTypePassed `
             -Detail $detail `
-            -Remediation "Confirm $($requirement.Provider)/$($requirement.Type) supports $($Config.Location), then rerun preflight."
+            -Remediation "Confirm $($requirement.Provider)/$($requirement.Type) supports $requiredLocation, then rerun preflight."
     }
 
     $networkSkuResult = Invoke-WorkshopReadOperation -Operation $Operations.TestNetworkSkuDeployment -Arguments @($Config.Location)
@@ -826,8 +1036,9 @@ ${function:Test-WorkshopPrerequisites} = {
     foreach ($family in @($familyRequirements.Keys | Sort-Object)) {
         $usage = $usageResult.Value | Where-Object { $_.Name.Value -eq $family } | Select-Object -First 1
         $required = [int] $familyRequirements[$family]
-        $usageAvailable = $usageResult.Succeeded -and $null -ne $usage
-        $available = if ($usageAvailable) { [int] $usage.Limit - [int] $usage.CurrentValue } else { $null }
+        $availability = Get-WorkshopQuotaAvailability -Usage $usage
+        $usageAvailable = $usageResult.Succeeded -and $availability.Verified
+        $available = if ($usageAvailable) { $availability.Available } else { $null }
         $missing = if ($usageAvailable) { [Math]::Max(0, $required - $available) } else { $null }
         $quotaPassed = $usageAvailable -and $available -ge $required
         $quotaDetail = if ($usageAvailable) {
@@ -841,10 +1052,63 @@ ${function:Test-WorkshopPrerequisites} = {
             -Remediation "Request at least $required available vCPUs for $family in $($Config.Location)."
     }
 
+    $totalRequired = 12
+    $totalUsage = $usageResult.Value | Where-Object {
+        $_.Name.Value -eq 'cores' -or
+        ($_.Name.PSObject.Properties.Name -contains 'LocalizedValue' -and
+            $_.Name.LocalizedValue -eq 'Total Regional vCPUs')
+    } | Select-Object -First 1
+    $totalAvailability = Get-WorkshopQuotaAvailability -Usage $totalUsage
+    $totalUsageAvailable = $usageResult.Succeeded -and $totalAvailability.Verified
+    $totalAvailable = if ($totalUsageAvailable) { $totalAvailability.Available } else { $null }
+    $totalMissing = if ($totalUsageAvailable) {
+        [Math]::Max(0, $totalRequired - $totalAvailable)
+    }
+    else {
+        $null
+    }
+    $totalDetail = if ($totalUsageAvailable) {
+        "Required vCPUs: $totalRequired; available vCPUs: $totalAvailable; missing vCPUs: $totalMissing."
+    }
+    else {
+        "Required vCPUs: $totalRequired; available vCPUs: unknown; missing vCPUs: unknown."
+    }
+    Add-WorkshopCheck -Checks $checks -Name 'Quota Total Regional vCPUs' `
+        -Passed ($totalUsageAvailable -and $totalAvailable -ge $totalRequired) `
+        -Detail $totalDetail `
+        -Remediation "Request at least $totalRequired available Total Regional vCPUs in $($Config.Location)."
+
     $resourceGroupResult = Invoke-WorkshopReadOperation -Operation $Operations.FindResourceGroup -Arguments @($Config.ResourceGroupName)
-    $resourceGroupExists = $resourceGroupResult.Value.Count -gt 0 -and $null -ne $resourceGroupResult.Value[0]
-    Add-WorkshopCheck -Checks $checks -Name 'Resource group collision' -Passed ($resourceGroupResult.Succeeded -and -not $resourceGroupExists) `
-        -Detail "Resource group '$($Config.ResourceGroupName)' must not already exist." `
+    $resourceGroupValue = if ($resourceGroupResult.Value.Count -eq 1) { $resourceGroupResult.Value[0] } else { $null }
+    $verifiedAbsent = $resourceGroupResult.Succeeded -and $null -ne $resourceGroupValue -and
+        $resourceGroupValue.PSObject.Properties.Name -contains 'VerifiedAbsent' -and
+        $resourceGroupValue.VerifiedAbsent -is [bool] -and $resourceGroupValue.VerifiedAbsent
+    $resourceGroup = if ($null -ne $resourceGroupValue -and
+        $resourceGroupValue.PSObject.Properties.Name -contains 'ResourceGroup') {
+        $resourceGroupValue.ResourceGroup
+    }
+    elseif ($null -ne $resourceGroupValue -and
+        $resourceGroupValue.PSObject.Properties.Name -notcontains 'VerifiedAbsent') {
+        $resourceGroupValue
+    }
+    else {
+        $null
+    }
+    $resourceGroupExists = $resourceGroupResult.Succeeded -and $null -ne $resourceGroup
+    $resourceGroupDetail = if (-not $resourceGroupResult.Succeeded) {
+        "Resource group collision read failed: $($resourceGroupResult.Error)"
+    }
+    elseif ($verifiedAbsent) {
+        "Resource group '$($Config.ResourceGroupName)' is verified absent."
+    }
+    elseif ($resourceGroupExists) {
+        "Resource group '$($Config.ResourceGroupName)' already exists."
+    }
+    else {
+        "Resource group '$($Config.ResourceGroupName)' absence was not explicitly verified."
+    }
+    Add-WorkshopCheck -Checks $checks -Name 'Resource group collision' -Passed $verifiedAbsent `
+        -Detail $resourceGroupDetail `
         -Remediation 'Choose a clean subscription scope or remove the old workshop through its verified teardown process.'
 
     $plannedNames = @(
@@ -852,10 +1116,27 @@ ${function:Test-WorkshopPrerequisites} = {
         $Config.SqlVm.Name, $Config.PrivateDnsZone, 'pip-mcpsql-admin',
         'pip-mcpsql-nat', 'nat-mcpsql-workshop', 'nsg-mcpsql-admin', 'nsg-mcpsql-sql'
     )
-    $resourceResult = Invoke-WorkshopReadOperation -Operation $Operations.FindResources -Arguments @(, $plannedNames, $Config.ResourceGroupName)
-    $collisions = @($resourceResult.Value | Where-Object { $null -ne $_ })
-    Add-WorkshopCheck -Checks $checks -Name 'Resource name collisions' -Passed ($resourceResult.Succeeded -and $collisions.Count -eq 0) `
-        -Detail "Found $($collisions.Count) existing resource(s) with planned names." `
+    if ($verifiedAbsent) {
+        $resourceNamesPassed = $true
+        $resourceNameDetail = 'Scoped resource collision set is verified empty because the resource group is verified absent.'
+    }
+    elseif ($resourceGroupExists) {
+        $resourceResult = Invoke-WorkshopReadOperation -Operation $Operations.FindResources -Arguments @(, $plannedNames, $Config.ResourceGroupName)
+        $collisions = @($resourceResult.Value | Where-Object { $null -ne $_ })
+        $resourceNamesPassed = $resourceResult.Succeeded -and $collisions.Count -eq 0
+        $resourceNameDetail = if ($resourceResult.Succeeded) {
+            "Found $($collisions.Count) existing resource(s) with planned names."
+        }
+        else {
+            "Scoped resource collision read failed: $($resourceResult.Error)"
+        }
+    }
+    else {
+        $resourceNamesPassed = $false
+        $resourceNameDetail = 'Scoped resource collisions cannot be verified until the resource-group read succeeds.'
+    }
+    Add-WorkshopCheck -Checks $checks -Name 'Resource name collisions' -Passed $resourceNamesPassed `
+        -Detail $resourceNameDetail `
         -Remediation 'Remove or rename colliding workshop resources before deployment.'
 
     $validCidr = $false
