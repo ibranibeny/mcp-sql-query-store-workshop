@@ -139,6 +139,7 @@ function Find-RepositorySecret {
     $lineNumber = 0
     foreach ($line in ($Content -split '\r?\n')) {
         $lineNumber++
+        $reportedAssignments = [System.Collections.Generic.HashSet[int]]::new()
         if ($fixtureBypassIsAllowed -and
             $line -match 'repository-secret-scan:\s*allow-test-fixture') {
             continue
@@ -152,14 +153,27 @@ function Find-RepositorySecret {
         }
 
         foreach ($pattern in $patterns) {
-            $match = [regex]::Match($line, $pattern)
-            if ($match.Success -and -not (Test-ApprovedPasswordValue -Value $match.Groups['value'].Value)) {
+            foreach ($match in [regex]::Matches($line, $pattern)) {
+                if (Test-ApprovedPasswordValue -Value $match.Groups['value'].Value) {
+                    continue
+                }
+
+                $passwordToken = [regex]::Match($match.Value, '(?i)(?:password|pwd)')
+                $assignmentIndex = if ($passwordToken.Success) {
+                    $match.Index + $passwordToken.Index
+                }
+                else {
+                    $match.Groups['value'].Index
+                }
+                if (-not $reportedAssignments.Add($assignmentIndex)) {
+                    continue
+                }
+
                 [pscustomobject]@{
                     Path = $Path
                     Type = 'Password assignment'
                     Line = $lineNumber
                 }
-                break
             }
         }
     }

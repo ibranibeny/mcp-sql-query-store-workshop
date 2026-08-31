@@ -95,6 +95,28 @@ Describe 'Find-RepositorySecret' {
         ($findings | Out-String) | Should -Not -Match 'inline-secret-789'
     }
 
+    It 'detects a later literal after a safe password assignment without returning values' -ForEach @(
+        @{
+            Name = 'JSON-ish'
+            Content = '{"password":"${FIRST_PASSWORD}","password":"second-json-secret"}' # repository-secret-scan: allow-test-fixture
+            Secret = 'second-json-secret'
+        },
+        @{
+            Name = 'inline YAML'
+            Content = '{ password: @env(FIRST_PASSWORD), password: second-yaml-secret }' # repository-secret-scan: allow-test-fixture
+            Secret = 'second-yaml-secret'
+        }
+    ) {
+        $findings = @(Find-RepositorySecret -Path "fixture-$Name.txt" -Content $Content)
+
+        $findings.Count | Should -Be 1
+        $findings[0].Path | Should -Be "fixture-$Name.txt"
+        $findings[0].Type | Should -Be 'Password assignment'
+        $findings[0].Line | Should -Be 1
+        $findings[0].PSObject.Properties.Name | Should -Be @('Path', 'Type', 'Line')
+        ($findings | Out-String) | Should -Not -Match ([regex]::Escape($Secret))
+    }
+
     It 'allows approved placeholders and non-literal PowerShell password handling' -ForEach @(
         '{"password": "SET_LOCALLY_ON_ADMIN_VM"}', # repository-secret-scan: allow-test-fixture
         'Password=<password>', # repository-secret-scan: allow-test-fixture
