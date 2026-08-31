@@ -30,6 +30,9 @@ param(
     [ValidateNotNullOrEmpty()]
     [string] $ConfirmationPhrase,
 
+    [ValidateNotNullOrEmpty()]
+    [string] $TimeZoneId = 'UTC',
+
     [hashtable] $Operations
 )
 
@@ -97,9 +100,32 @@ if ($null -eq $Operations) {
             param($Parameters)
             Test-WorkshopNetworkBoundary @Parameters
         }
+        NewAdminVm = {
+            param($Parameters)
+            New-WorkshopAdminVm @Parameters
+        }
+        NewSqlVm = {
+            param($Parameters)
+            New-WorkshopSqlVm @Parameters
+        }
+        RegisterSqlIaas = {
+            param($Parameters)
+            Register-WorkshopSqlIaas @Parameters
+        }
+        SetAutoShutdown = {
+            param($Parameters)
+            Set-WorkshopAutoShutdown @Parameters
+        }
+        TestVmBoundary = {
+            param($Parameters)
+            Test-WorkshopVmBoundary @Parameters
+        }
     }
 }
-foreach ($operationName in @('SetContext', 'TestPrerequisites', 'NewNetwork', 'TestBoundary')) {
+foreach ($operationName in @(
+    'SetContext', 'TestPrerequisites', 'NewNetwork', 'TestBoundary', 'NewAdminVm',
+    'NewSqlVm', 'RegisterSqlIaas', 'SetAutoShutdown', 'TestVmBoundary'
+)) {
     if (-not $Operations.ContainsKey($operationName) -or $Operations[$operationName] -isnot [scriptblock]) {
         throw "Operations must provide scriptblock '$operationName'."
     }
@@ -164,15 +190,88 @@ if ($Operations.ContainsKey('NetworkOperations')) {
 }
 try {
     $network = & $Operations.NewNetwork $networkParameters
+    if ($null -eq $network -or $network.PSObject.Properties.Name -notcontains 'Completed' -or
+        $network.Completed -isnot [bool] -or -not $network.Completed) {
+        throw 'Network deployment stage did not complete.'
+    }
     $boundary = & $Operations.TestBoundary $networkParameters
     if (-not $boundary.Passed) {
         $failedChecks = @($boundary.Checks | Where-Object Status -EQ 'Failed' | ForEach-Object Name)
         throw "Network boundary verification failed: $($failedChecks -join ', ')."
     }
+    if ($null -eq $preflight.ResolvedImages -or $null -eq $preflight.ResolvedImages.Admin -or
+        $null -eq $preflight.ResolvedImages.Sql -or
+        [string]::IsNullOrWhiteSpace([string] $preflight.ResolvedImages.Admin.Version) -or
+        [string]::IsNullOrWhiteSpace([string] $preflight.ResolvedImages.Sql.Version)) {
+        throw 'Preflight did not return both approved immutable image versions.'
+    }
+    $adminParameters = @{
+        Config = $config
+        ImageVersion = [string] $preflight.ResolvedImages.Admin.Version
+        Credential = $Credential
+        WindowsClientLicenseAttested = $WindowsClientLicenseAttested.IsPresent
+    }
+    if ($Operations.ContainsKey('VmOperations')) { $adminParameters.Operations = $Operations.VmOperations }
+    $adminVm = & $Operations.NewAdminVm $adminParameters
+    if ($null -eq $adminVm -or $adminVm.PSObject.Properties.Name -notcontains 'Completed' -or
+        $adminVm.Completed -isnot [bool] -or -not $adminVm.Completed) {
+        throw 'Administration VM deployment stage did not complete.'
+    }
+
+    $sqlParameters = @{
+        Config = $config
+        ImageVersion = [string] $preflight.ResolvedImages.Sql.Version
+        Credential = $Credential
+    }
+    if ($Operations.ContainsKey('VmOperations')) { $sqlParameters.Operations = $Operations.VmOperations }
+    $sqlVm = & $Operations.NewSqlVm $sqlParameters
+    if ($null -eq $sqlVm -or $sqlVm.PSObject.Properties.Name -notcontains 'Completed' -or
+        $sqlVm.Completed -isnot [bool] -or -not $sqlVm.Completed) {
+        throw 'SQL VM deployment stage did not complete.'
+    }
+
+    $sqlIaasParameters = @{ Config = $config }
+    $shutdownParameters = @{ Config = $config; TimeZoneId = $TimeZoneId }
+    if ($Operations.ContainsKey('ServiceOperations')) {
+        $sqlIaasParameters.Operations = $Operations.ServiceOperations
+        $shutdownParameters.Operations = $Operations.ServiceOperations
+    }
+    $sqlIaas = & $Operations.RegisterSqlIaas $sqlIaasParameters
+    if ($null -eq $sqlIaas -or $sqlIaas.PSObject.Properties.Name -notcontains 'Completed' -or
+        $sqlIaas.Completed -isnot [bool] -or -not $sqlIaas.Completed) {
+        throw 'SQL IaaS registration stage did not complete.'
+    }
+    $shutdown = & $Operations.SetAutoShutdown $shutdownParameters
+    if ($null -eq $shutdown -or $shutdown.PSObject.Properties.Name -notcontains 'Completed' -or
+        $shutdown.Completed -isnot [bool] -or -not $shutdown.Completed) {
+        throw 'Auto-shutdown configuration stage did not complete.'
+    }
+
+    $vmBoundaryParameters = @{
+        Config = $config
+        ResolvedImages = @{
+            Admin = $preflight.ResolvedImages.Admin
+            Sql = $preflight.ResolvedImages.Sql
+        }
+    }
+    if ($Operations.ContainsKey('VmOperations')) { $vmBoundaryParameters.Operations = $Operations.VmOperations }
+    $vmBoundary = & $Operations.TestVmBoundary $vmBoundaryParameters
+    if (-not $vmBoundary.Passed) {
+        $failedChecks = @($vmBoundary.Checks | Where-Object Status -EQ 'Failed' | ForEach-Object Name)
+        throw "VM boundary verification failed: $($failedChecks -join ', ')."
+    }
+    $checkpoint = @(
+        @($network.Checkpoint)
+        @($adminVm.Checkpoint)
+        @($sqlVm.Checkpoint)
+        @($sqlIaas.Checkpoint)
+        @($shutdown.Checkpoint)
+    )
     [pscustomobject][ordered]@{
         Completed = $true
-        Checkpoint = $network.Checkpoint
+        Checkpoint = $checkpoint
         Boundary = $boundary
+        VmBoundary = $vmBoundary
     }
 }
 catch {

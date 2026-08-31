@@ -995,8 +995,10 @@ Describe 'Static safety and module contract' {
         $manifest.PowerShellVersion | Should -Be ([version]'7.4')
         @($manifest.ExportedFunctions.Keys | Sort-Object) | Should -Be @(
             'Assert-WorkshopHostCidr', 'Format-WorkshopPlanCard', 'Get-WorkshopPlan',
-            'New-WorkshopNetwork', 'New-WorkshopNetworkModel',
-            'Test-WorkshopNetworkBoundary', 'Test-WorkshopPrerequisites'
+            'New-WorkshopAdminVm', 'New-WorkshopNetwork', 'New-WorkshopNetworkModel',
+            'New-WorkshopSqlVm', 'Register-WorkshopSqlIaas', 'Remove-WorkshopEnvironment',
+            'Resolve-WorkshopImageVersion', 'Set-WorkshopAutoShutdown', 'Stop-WorkshopEnvironment',
+            'Test-WorkshopNetworkBoundary', 'Test-WorkshopPrerequisites', 'Test-WorkshopVmBoundary'
         )
     }
 
@@ -1430,6 +1432,591 @@ Describe 'Default workshop network operation shape' {
             Should -Invoke Get-AzPublicIpAddress -Times 1 -Exactly -ParameterFilter {
                 $ResourceGroupName -eq 'rg-mcp-sql-workshop' -and
                 -not $PSBoundParameters.ContainsKey('Name') -and $ErrorAction -eq 'Stop'
+            }
+        }
+    }
+}
+
+Describe 'Immutable workshop image resolution' {
+    It 'queries exact coordinates and selects the highest valid immutable version' {
+        $script:ImageQuery = $null
+        $operations = @{
+            GetImages = {
+                param($Publisher, $Offer, $Sku, $Location)
+                $script:ImageQuery = @($Publisher, $Offer, $Sku, $Location)
+                @(
+                    [pscustomobject]@{ Version = '26100.9.1' }
+                    [pscustomobject]@{ Version = 'latest' }
+                    [pscustomobject]@{ Version = 'bad' }
+                    [pscustomobject]@{ Version = '26100.10.2' }
+                )
+            }
+        }
+
+        $result = Resolve-WorkshopImageVersion -Publisher 'MicrosoftWindowsDesktop' -Offer 'windows-11' `
+            -Sku 'win11-24h2-ent' -Location 'indonesiacentral' -Operations $operations
+
+        $result.Version | Should -Be '26100.10.2'
+        $script:ImageQuery | Should -Be @(
+            'MicrosoftWindowsDesktop', 'windows-11', 'win11-24h2-ent', 'indonesiacentral'
+        )
+    }
+
+    It 'rejects empty, latest-only, and malformed results' -ForEach @(
+        @{ Images = @() }
+        @{ Images = @([pscustomobject]@{ Version = 'latest' }) }
+        @{ Images = @([pscustomobject]@{ Version = '1.2' }, [pscustomobject]@{ Version = 'not-valid' }) }
+        @{ Images = @($null, [pscustomobject]@{ Other = '1.2.3' }) }
+    ) {
+        $returnedImages = $Images
+        $operations = @{ GetImages = { $returnedImages }.GetNewClosure() }
+        { Resolve-WorkshopImageVersion -Publisher 'p' -Offer 'o' -Sku 's' -Location 'l' -Operations $operations } |
+            Should -Throw '*immutable image version*'
+    }
+}
+
+Describe 'Exact workshop VM creation' {
+    BeforeEach {
+        $script:VmState = @{}
+        $script:DiskState = @{}
+        $script:VmCreates = [System.Collections.Generic.List[object]]::new()
+        $script:DiskCreates = [System.Collections.Generic.List[object]]::new()
+        $script:SkipVmReadBack = $false
+        $script:VmOperations = @{
+            GetSubscriptionId = { '11111111-1111-1111-1111-111111111111' }
+            GetVm = {
+                param($Name, $ResourceGroupName)
+                $null = $ResourceGroupName
+                if ($script:VmState.ContainsKey($Name)) { return $script:VmState[$Name] }
+                $null
+            }
+            GetDisk = {
+                param($Name, $ResourceGroupName)
+                $null = $ResourceGroupName
+                if ($script:DiskState.ContainsKey($Name)) { return $script:DiskState[$Name] }
+                $null
+            }
+            CreateVm = {
+                param($Spec, $Credential, $ResourceGroupName)
+                $null = $Credential, $ResourceGroupName
+                $script:VmCreates.Add($Spec)
+                if (-not $script:SkipVmReadBack) { $script:VmState[$Spec.Name] = $Spec }
+            }
+            CreateDisk = {
+                param($Spec, $ResourceGroupName)
+                $null = $ResourceGroupName
+                $script:DiskCreates.Add($Spec)
+                $script:DiskState[$Spec.Name] = $Spec
+            }
+        }
+        $secure = ConvertTo-SecureString 'test-only-password' -AsPlainText -Force
+        $script:VmCredential = [PSCredential]::new('workshop-admin', $secure)
+    }
+
+    It 'creates the attested Windows client VM with exact Trusted Launch, OS disk, image, and admin NIC' {
+        $result = New-WorkshopAdminVm -Config $script:Config -ImageVersion '26100.2033.1' `
+            -Credential $script:VmCredential -WindowsClientLicenseAttested $true -Operations $script:VmOperations
+
+        $result.Completed | Should -BeTrue
+        $script:VmCreates | Should -HaveCount 1
+        $vm = $script:VmCreates[0]
+        $vm.Name | Should -Be 'vm-mcpsql-admin'
+        $vm.VmSize | Should -Be 'Standard_D4s_v5'
+        $vm.Image.Publisher | Should -Be 'MicrosoftWindowsDesktop'
+        $vm.Image.Offer | Should -Be 'windows-11'
+        $vm.Image.Sku | Should -Be 'win11-24h2-ent'
+        $vm.Image.Version | Should -Be '26100.2033.1'
+        $vm.LicenseType | Should -Be 'Windows_Client'
+        $vm.SecurityType | Should -Be 'TrustedLaunch'
+        $vm.SecureBoot | Should -BeTrue
+        $vm.VTpm | Should -BeTrue
+        $vm.OsDisk.Name | Should -Be 'osdisk-mcpsql-admin'
+        $vm.OsDisk.SizeGiB | Should -Be 128
+        $vm.OsDisk.Sku | Should -Be 'Premium_LRS'
+        $vm.OsDisk.Caching | Should -Be 'ReadWrite'
+        $vm.NetworkInterfaceIds | Should -Be @('/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/rg-mcp-sql-workshop/providers/Microsoft.Network/networkInterfaces/nic-mcpsql-admin')
+    }
+
+    It 'refuses the Windows client VM before any read or mutation without licensing attestation' {
+        $script:Reads = 0
+        $script:VmOperations.GetVm = { $script:Reads++; $null }
+        { New-WorkshopAdminVm -Config $script:Config -ImageVersion '26100.2033.1' `
+                -Credential $script:VmCredential -WindowsClientLicenseAttested $false -Operations $script:VmOperations } |
+            Should -Throw '*attestation*'
+        $script:Reads | Should -Be 0
+        $script:VmCreates | Should -HaveCount 0
+    }
+
+    It 'creates exact SQL data and log disks then the private SQL VM' {
+        $result = New-WorkshopSqlVm -Config $script:Config -ImageVersion '16.0.1135.2' `
+            -Credential $script:VmCredential -Operations $script:VmOperations
+
+        $result.Completed | Should -BeTrue
+        @($script:DiskCreates.Name) | Should -Be @('disk-mcpsql-sql-data', 'disk-mcpsql-sql-log')
+        $script:DiskCreates[0].SizeGiB | Should -Be 256
+        $script:DiskCreates[0].Lun | Should -Be 0
+        $script:DiskCreates[0].Caching | Should -Be 'ReadOnly'
+        $script:DiskCreates[1].SizeGiB | Should -Be 128
+        $script:DiskCreates[1].Lun | Should -Be 1
+        $script:DiskCreates[1].Caching | Should -Be 'None'
+        @($script:DiskCreates.Sku | Select-Object -Unique) | Should -Be @('Premium_LRS')
+        $vm = $script:VmCreates[0]
+        $vm.Name | Should -Be 'vm-mcpsql-sql'
+        $vm.VmSize | Should -Be 'Standard_E8s_v5'
+        $vm.OsType | Should -Be 'Windows'
+        $vm.Image.Publisher | Should -Be 'MicrosoftSQLServer'
+        $vm.Image.Offer | Should -Be 'SQL2022-WS2022'
+        $vm.Image.Sku | Should -Be 'enterprise-gen2'
+        $vm.Image.Version | Should -Be '16.0.1135.2'
+        $vm.OsDisk.SizeGiB | Should -Be 128
+        $vm.OsDisk.Sku | Should -Be 'Premium_LRS'
+        $vm.NetworkInterfaceIds | Should -Be @('/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/rg-mcp-sql-workshop/providers/Microsoft.Network/networkInterfaces/nic-mcpsql-sql')
+        @($vm.NetworkInterfaceIds | Where-Object { $_ -match 'publicIPAddresses' }) | Should -HaveCount 0
+        @($vm.DataDisks) | Should -HaveCount 2
+    }
+
+    It 'reuses exact existing VM and disks without mutation' {
+        $null = New-WorkshopSqlVm -Config $script:Config -ImageVersion '16.0.1135.2' `
+            -Credential $script:VmCredential -Operations $script:VmOperations
+        $script:DiskCreates.Clear()
+        $script:VmCreates.Clear()
+
+        $result = New-WorkshopSqlVm -Config $script:Config -ImageVersion '16.0.1135.2' `
+            -Credential $script:VmCredential -Operations $script:VmOperations
+
+        $result.Completed | Should -BeTrue
+        $script:DiskCreates | Should -HaveCount 0
+        $script:VmCreates | Should -HaveCount 0
+    }
+
+    It 'fails all known shape conflicts before any later mutation' -ForEach @(
+        @{ Target = 'VM'; Property = 'VmSize'; Value = 'Standard_E2s_v5' }
+        @{ Target = 'VM'; Property = 'NetworkInterfaceIds'; Value = @('/wrong/nic') }
+        @{ Target = 'VM'; Property = 'Image'; Value = [pscustomobject]@{ Publisher='MicrosoftSQLServer'; Offer='SQL2022-WS2022'; Sku='enterprise-gen2'; Version='latest' } }
+        @{ Target = 'Data'; Property = 'SizeGiB'; Value = 512 }
+        @{ Target = 'Log'; Property = 'Caching'; Value = 'ReadOnly' }
+    ) {
+        $null = New-WorkshopSqlVm -Config $script:Config -ImageVersion '16.0.1135.2' `
+            -Credential $script:VmCredential -Operations $script:VmOperations
+        $script:VmCreates.Clear(); $script:DiskCreates.Clear()
+        if ($Target -eq 'VM') { $script:VmState['vm-mcpsql-sql'].$Property = $Value }
+        elseif ($Target -eq 'Data') { $script:DiskState['disk-mcpsql-sql-data'].$Property = $Value }
+        else { $script:DiskState['disk-mcpsql-sql-log'].$Property = $Value }
+
+        { New-WorkshopSqlVm -Config $script:Config -ImageVersion '16.0.1135.2' `
+                -Credential $script:VmCredential -Operations $script:VmOperations } |
+            Should -Throw '*conflicts with the approved shape*'
+        $script:VmCreates | Should -HaveCount 0
+        $script:DiskCreates | Should -HaveCount 0
+    }
+
+    It 'requires positive exact VM readback after create' {
+        $script:SkipVmReadBack = $true
+        { New-WorkshopAdminVm -Config $script:Config -ImageVersion '26100.2033.1' `
+                -Credential $script:VmCredential -WindowsClientLicenseAttested $true -Operations $script:VmOperations } |
+            Should -Throw '*positive read-back*'
+    }
+
+    It 'positively verifies both approved VM boundaries' {
+        $null = New-WorkshopAdminVm -Config $script:Config -ImageVersion '26100.2033.1' `
+            -Credential $script:VmCredential -WindowsClientLicenseAttested $true -Operations $script:VmOperations
+        $null = New-WorkshopSqlVm -Config $script:Config -ImageVersion '16.0.1135.2' `
+            -Credential $script:VmCredential -Operations $script:VmOperations
+
+        $result = Test-WorkshopVmBoundary -Config $script:Config -ResolvedImages @{
+            Admin = [pscustomobject]@{ Version = '26100.2033.1' }
+            Sql = [pscustomobject]@{ Version = '16.0.1135.2' }
+        } -Operations $script:VmOperations
+
+        $result.Passed | Should -BeTrue
+        @($result.Checks | Where-Object Status -EQ 'Failed') | Should -HaveCount 0
+    }
+}
+
+Describe 'SQL IaaS and auto-shutdown exact resources' {
+    BeforeEach {
+        $script:Iaas = $null
+        $script:IaasCreates = 0
+        $script:Schedules = @{}
+        $script:ScheduleCreates = [System.Collections.Generic.List[object]]::new()
+        $script:ServiceOperations = @{
+            GetSubscriptionId = { '11111111-1111-1111-1111-111111111111' }
+            GetSqlIaas = { $script:Iaas }
+            CreateSqlIaas = { param($Spec) $script:IaasCreates++; $script:Iaas = $Spec }
+            GetSchedule = { param($Name) if ($script:Schedules.ContainsKey($Name)) { $script:Schedules[$Name] } }
+            CreateSchedule = { param($Spec) $script:ScheduleCreates.Add($Spec); $script:Schedules[$Spec.Name] = $Spec }
+        }
+    }
+
+    It 'registers SQL IaaS as PAYG only when absent and verifies exact readback' {
+        $first = Register-WorkshopSqlIaas -Config $script:Config -Operations $script:ServiceOperations
+        $second = Register-WorkshopSqlIaas -Config $script:Config -Operations $script:ServiceOperations
+
+        $first.Completed | Should -BeTrue
+        $second.Completed | Should -BeTrue
+        $script:IaasCreates | Should -Be 1
+        $script:Iaas.LicenseType | Should -Be 'PAYG'
+        $script:Iaas.VirtualMachineId | Should -Be '/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/rg-mcp-sql-workshop/providers/Microsoft.Compute/virtualMachines/vm-mcpsql-sql'
+    }
+
+    It 'refuses a conflicting SQL IaaS registration without mutation' {
+        $script:Iaas = [pscustomobject]@{ Name='vm-mcpsql-sql'; Id='/wrong'; LicenseType='AHUB'; VirtualMachineId='/wrong' }
+        { Register-WorkshopSqlIaas -Config $script:Config -Operations $script:ServiceOperations } |
+            Should -Throw '*conflicts with the approved shape*'
+        $script:IaasCreates | Should -Be 0
+    }
+
+    It 'creates exact daily 1900 shutdown schedules for both VMs and is idempotent' {
+        $first = Set-WorkshopAutoShutdown -Config $script:Config -TimeZoneId 'SE Asia Standard Time' `
+            -Operations $script:ServiceOperations
+        $second = Set-WorkshopAutoShutdown -Config $script:Config -TimeZoneId 'SE Asia Standard Time' `
+            -Operations $script:ServiceOperations
+
+        $first.Completed | Should -BeTrue
+        $second.Completed | Should -BeTrue
+        $script:ScheduleCreates | Should -HaveCount 2
+        @($script:ScheduleCreates.Name) | Should -Be @('shutdown-computevm-vm-mcpsql-admin', 'shutdown-computevm-vm-mcpsql-sql')
+        foreach ($schedule in $script:ScheduleCreates) {
+            $schedule.Status | Should -Be 'Enabled'
+            $schedule.TaskType | Should -Be 'ComputeVmShutdownTask'
+            $schedule.DailyRecurrenceTime | Should -Be '1900'
+            $schedule.TimeZoneId | Should -Be 'SE Asia Standard Time'
+            $schedule.TargetResourceId | Should -Match '/Microsoft\.Compute/virtualMachines/vm-mcpsql-(admin|sql)$'
+            $schedule.NotificationStatus | Should -Be 'Disabled'
+            $schedule.NotificationTimeInMinutes | Should -Be 30
+        }
+    }
+
+    It 'refuses a conflicting shutdown schedule before creating the other schedule' {
+        $script:Schedules['shutdown-computevm-vm-mcpsql-sql'] = [pscustomobject]@{
+            Name='shutdown-computevm-vm-mcpsql-sql'; Id='/wrong'; Status='Enabled'; TaskType='ComputeVmShutdownTask'
+            DailyRecurrenceTime='2000'; TimeZoneId='SE Asia Standard Time'; TargetResourceId='/wrong'
+        }
+        { Set-WorkshopAutoShutdown -Config $script:Config -TimeZoneId 'SE Asia Standard Time' `
+                -Operations $script:ServiceOperations } | Should -Throw '*conflicts with the approved shape*'
+        $script:ScheduleCreates | Should -HaveCount 0
+    }
+
+    It 'refuses notification drift in an otherwise matching shutdown schedule' {
+        $null = Set-WorkshopAutoShutdown -Config $script:Config -TimeZoneId 'UTC' `
+            -Operations $script:ServiceOperations
+        $script:ScheduleCreates.Clear()
+        $script:Schedules['shutdown-computevm-vm-mcpsql-admin'].NotificationStatus = 'Enabled'
+
+        { Set-WorkshopAutoShutdown -Config $script:Config -TimeZoneId 'UTC' `
+                -Operations $script:ServiceOperations } | Should -Throw '*conflicts with the approved shape*'
+        $script:ScheduleCreates | Should -HaveCount 0
+    }
+}
+
+Describe 'Workshop stop and guarded removal' {
+    BeforeEach {
+        $script:ContextCalls = 0
+        $script:Stopped = [System.Collections.Generic.List[string]]::new()
+        $script:Power = @{
+            'vm-mcpsql-admin' = 'PowerState/running'
+            'vm-mcpsql-sql' = 'PowerState/running'
+        }
+        $script:LifecycleOperations = @{
+            SetContext = { $script:ContextCalls++ }
+            GetVm = {
+                param($Name)
+                [pscustomobject]@{
+                    Name=$Name
+                    Id="/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/rg-mcp-sql-workshop/providers/Microsoft.Compute/virtualMachines/$Name"
+                }
+            }
+            StopVm = { param($Name) $script:Stopped.Add($Name); $script:Power[$Name] = 'PowerState/deallocated' }
+            GetPowerState = { param($Name) $script:Power[$Name] }
+        }
+        $script:RemoveCalls = 0
+        $script:GroupRemoved = $false
+        $script:RemoveOperations = @{
+            SetContext = { $script:ContextCalls++ }
+            GetResourceGroup = {
+                if ($script:GroupRemoved) { return [pscustomobject]@{ Status='NotFound'; ResourceGroup=$null } }
+                [pscustomobject]@{ Status='Found'; ResourceGroup=[pscustomobject]@{
+                    ResourceGroupName='rg-mcp-sql-workshop'
+                    ResourceId='/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/rg-mcp-sql-workshop'
+                    Tags=@{ environment='workshop'; workload='mcp-sql'; managedBy='PowerShell' }
+                } }
+            }
+            RemoveResourceGroup = { $script:RemoveCalls++; $script:GroupRemoved = $true }
+            WaitForRemoval = { $true }
+            GetTaggedResources = { @() }
+        }
+    }
+
+    It 'deallocates and verifies exactly both approved VMs' {
+        $result = Stop-WorkshopEnvironment -Config $script:Config `
+            -SubscriptionId '11111111-1111-1111-1111-111111111111' `
+            -TenantId '22222222-2222-2222-2222-222222222222' -Operations $script:LifecycleOperations -Confirm:$false
+
+        $result.Completed | Should -BeTrue
+        $script:Stopped | Should -Be @('vm-mcpsql-admin', 'vm-mcpsql-sql')
+        $script:Power.Values | Should -Be @('PowerState/deallocated', 'PowerState/deallocated')
+    }
+
+    It 'aggregates stop failures while still attempting exactly both approved VMs' {
+        $script:LifecycleOperations.StopVm = {
+            param($Name)
+            $script:Stopped.Add($Name)
+            if ($Name -eq 'vm-mcpsql-admin') { throw 'admin failed' }
+            $script:Power[$Name] = 'PowerState/deallocated'
+        }
+        { Stop-WorkshopEnvironment -Config $script:Config `
+                -SubscriptionId '11111111-1111-1111-1111-111111111111' `
+                -Operations $script:LifecycleOperations -Confirm:$false } | Should -Throw '*admin failed*'
+        $script:Stopped | Should -Be @('vm-mcpsql-admin', 'vm-mcpsql-sql')
+    }
+
+    It 'requires exact removal confirmation, tags, ID, and subscription context before deletion' -ForEach @(
+        @{ Case='phrase'; Phrase='delete rg-mcp-sql-workshop' }
+        @{ Case='environment tag'; Phrase='DELETE rg-mcp-sql-workshop' }
+        @{ Case='workload tag'; Phrase='DELETE rg-mcp-sql-workshop' }
+        @{ Case='ID'; Phrase='DELETE rg-mcp-sql-workshop' }
+    ) {
+        if ($Case -ne 'phrase') {
+            $environment = if ($Case -eq 'environment tag') { 'prod' } else { 'workshop' }
+            $workload = if ($Case -eq 'workload tag') { 'other' } else { 'mcp-sql' }
+            $resourceId = if ($Case -eq 'ID') {
+                '/subscriptions/other/resourceGroups/rg-mcp-sql-workshop'
+            }
+            else {
+                '/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/rg-mcp-sql-workshop'
+            }
+            $script:RemoveOperations.GetResourceGroup = {
+                [pscustomobject]@{
+                    Status = 'Found'
+                    ResourceGroup = [pscustomobject]@{
+                        ResourceGroupName = 'rg-mcp-sql-workshop'
+                        ResourceId = $resourceId
+                        Tags = @{ environment = $environment; workload = $workload }
+                    }
+                }
+            }.GetNewClosure()
+        }
+        { Remove-WorkshopEnvironment -Config $script:Config `
+                -SubscriptionId '11111111-1111-1111-1111-111111111111' `
+                -ConfirmationPhrase $Phrase -Operations $script:RemoveOperations -Confirm:$false } |
+            Should -Throw -Because $Case
+        $script:RemoveCalls | Should -Be 0
+    }
+
+    It 'removes, waits boundedly, verifies typed NotFound, and verifies no tagged resources remain' {
+        $result = Remove-WorkshopEnvironment -Config $script:Config `
+            -SubscriptionId '11111111-1111-1111-1111-111111111111' `
+            -ConfirmationPhrase 'DELETE rg-mcp-sql-workshop' -Operations $script:RemoveOperations -Confirm:$false
+
+        $result.Completed | Should -BeTrue
+        $script:RemoveCalls | Should -Be 1
+    }
+
+    It 'fails closed for auth/network reads and for remaining tagged resources' -ForEach @('read-error', 'remaining') {
+        if ($_ -eq 'read-error') { $script:RemoveOperations.GetResourceGroup = { throw 'AuthorizationFailed' } }
+        else {
+            $script:RemoveOperations.GetTaggedResources = { @([pscustomobject]@{ Id='/remaining' }) }
+        }
+        { Remove-WorkshopEnvironment -Config $script:Config `
+                -SubscriptionId '11111111-1111-1111-1111-111111111111' `
+                -ConfirmationPhrase 'DELETE rg-mcp-sql-workshop' -Operations $script:RemoveOperations -Confirm:$false } |
+            Should -Throw
+    }
+
+    It 'polls removal to typed NotFound with an injected non-sleeping waiter' {
+        InModuleScope Workshop.Azure {
+            $script:Reads = 0
+            $script:Waits = 0
+            $result = Wait-WorkshopResourceGroupRemoval -Name 'rg-mcp-sql-workshop' -MaximumAttempts 3 `
+                -ReadOperation {
+                    $script:Reads++
+                    if ($script:Reads -lt 3) { return 'Found' }
+                    'NotFound'
+                } -WaitOperation { $script:Waits++ }
+
+            $result | Should -BeTrue
+            $script:Reads | Should -Be 3
+            $script:Waits | Should -Be 2
+        }
+    }
+
+    It 'times out boundedly and does not treat authorization failure as absence' {
+        InModuleScope Workshop.Azure {
+            $script:Waits = 0
+            (Wait-WorkshopResourceGroupRemoval -Name 'rg' -MaximumAttempts 2 `
+                -ReadOperation { 'Found' } -WaitOperation { $script:Waits++ }) | Should -BeFalse
+            $script:Waits | Should -Be 1
+            { Wait-WorkshopResourceGroupRemoval -Name 'rg' -MaximumAttempts 2 `
+                    -ReadOperation { throw 'AuthorizationFailed' } -WaitOperation { throw 'must not wait' } } |
+                Should -Throw '*AuthorizationFailed*'
+        }
+    }
+}
+
+Describe 'Default Task 6 Az command contracts' {
+    It 'builds the administration VM with an immutable image, Windows client license, Trusted Launch, UEFI, OS disk, and exact NIC' {
+        InModuleScope Workshop.Azure -Parameters @{ Config = $script:Config } {
+            param($Config)
+            $secure = ConvertTo-SecureString 'not-output' -AsPlainText -Force
+            $credential = [PSCredential]::new('workshop-admin', $secure)
+            $spec = Get-WorkshopVmSpecification -Role Admin -Config $Config `
+                -ImageVersion '26100.2033.1' -SubscriptionId 'sub'
+            Mock New-AzVMConfig { [pscustomobject]@{ Name=$VMName } }
+            Mock Set-AzVMOperatingSystem { $VM }
+            Mock Set-AzVMSourceImage { $VM }
+            Mock Set-AzVMOSDisk { $VM }
+            Mock Set-AzVMSecurityProfile { $VM }
+            Mock Set-AzVmUefi { $VM }
+            Mock Add-AzVMNetworkInterface { $VM }
+            Mock Add-AzVMDataDisk { $VM }
+            Mock New-AzVM { [pscustomobject]@{ Name=$VM.Name } }
+
+            $operations = Get-DefaultWorkshopVmOperationSet
+            $null = & $operations.CreateVm $spec $credential $Config.ResourceGroupName
+
+            Should -Invoke New-AzVMConfig -Times 1 -Exactly -ParameterFilter {
+                $VMName -eq 'vm-mcpsql-admin' -and $VMSize -eq 'Standard_D4s_v5' -and
+                $LicenseType -eq 'Windows_Client' -and $null -ne $Tags -and $ErrorAction -eq 'Stop'
+            }
+            Should -Invoke Set-AzVMOperatingSystem -Times 1 -Exactly -ParameterFilter {
+                $Windows -and $Credential -is [PSCredential] -and $ErrorAction -eq 'Stop'
+            }
+            Should -Invoke Set-AzVMSourceImage -Times 1 -Exactly -ParameterFilter {
+                $PublisherName -eq 'MicrosoftWindowsDesktop' -and $Offer -eq 'windows-11' -and
+                $Skus -eq 'win11-24h2-ent' -and $Version -eq '26100.2033.1' -and
+                $Version -ne 'latest' -and $ErrorAction -eq 'Stop'
+            }
+            Should -Invoke Set-AzVMSecurityProfile -Times 1 -Exactly -ParameterFilter {
+                $SecurityType -eq 'TrustedLaunch' -and $ErrorAction -eq 'Stop'
+            }
+            Should -Invoke Set-AzVmUefi -Times 1 -Exactly -ParameterFilter {
+                $EnableVtpm -and $EnableSecureBoot -and $ErrorAction -eq 'Stop'
+            }
+            Should -Invoke Set-AzVMOSDisk -Times 1 -Exactly -ParameterFilter {
+                $Name -eq 'osdisk-mcpsql-admin' -and $DiskSizeInGB -eq 128 -and
+                $StorageAccountType -eq 'Premium_LRS' -and $ErrorAction -eq 'Stop'
+            }
+            Should -Invoke Add-AzVMNetworkInterface -Times 1 -Exactly -ParameterFilter {
+                $Id -eq '/subscriptions/sub/resourceGroups/rg-mcp-sql-workshop/providers/Microsoft.Network/networkInterfaces/nic-mcpsql-admin' -and
+                $Primary -and $ErrorAction -eq 'Stop'
+            }
+            Should -Invoke New-AzVM -Times 1 -Exactly -ParameterFilter { $ErrorAction -eq 'Stop' }
+        }
+    }
+
+    It 'creates Premium SQL disks and attaches LUN zero ReadOnly and LUN one None without any public IP command' {
+        InModuleScope Workshop.Azure -Parameters @{ Config = $script:Config } {
+            param($Config)
+            $secure = ConvertTo-SecureString 'not-output' -AsPlainText -Force
+            $credential = [PSCredential]::new('workshop-admin', $secure)
+            $spec = Get-WorkshopVmSpecification -Role Sql -Config $Config `
+                -ImageVersion '16.0.1135.2' -SubscriptionId 'sub'
+            $diskSpecs = @(Get-WorkshopDiskSpecification -VmSpecification $spec)
+            Mock New-AzDiskConfig { [pscustomobject]@{} }
+            Mock New-AzDisk { [pscustomobject]@{ Name=$DiskName } }
+            Mock New-AzVMConfig { [pscustomobject]@{ Name=$VMName } }
+            Mock Set-AzVMOperatingSystem { $VM }
+            Mock Set-AzVMSourceImage { $VM }
+            Mock Set-AzVMOSDisk { $VM }
+            Mock Set-AzVMSecurityProfile { $VM }
+            Mock Set-AzVmUefi { $VM }
+            Mock Add-AzVMNetworkInterface { $VM }
+            Mock Add-AzVMDataDisk { $VM }
+            Mock New-AzVM { [pscustomobject]@{ Name=$VM.Name } }
+            Mock New-AzPublicIpAddress { throw 'Public IP must not be created by VM operations.' }
+
+            $operations = Get-DefaultWorkshopVmOperationSet
+            foreach ($disk in $diskSpecs) { $null = & $operations.CreateDisk $disk $Config.ResourceGroupName }
+            $null = & $operations.CreateVm $spec $credential $Config.ResourceGroupName
+
+            Should -Invoke New-AzDiskConfig -Times 2 -Exactly -ParameterFilter {
+                $SkuName -eq 'Premium_LRS' -and $CreateOption -eq 'Empty' -and $ErrorAction -eq 'Stop'
+            }
+            Should -Invoke Add-AzVMDataDisk -Times 1 -Exactly -ParameterFilter {
+                $Name -eq 'disk-mcpsql-sql-data' -and $Lun -eq 0 -and $Caching -eq 'ReadOnly' -and
+                $CreateOption -eq 'Attach' -and $ErrorAction -eq 'Stop'
+            }
+            Should -Invoke Add-AzVMDataDisk -Times 1 -Exactly -ParameterFilter {
+                $Name -eq 'disk-mcpsql-sql-log' -and $Lun -eq 1 -and $Caching -eq 'None' -and
+                $CreateOption -eq 'Attach' -and $ErrorAction -eq 'Stop'
+            }
+            Should -Invoke New-AzPublicIpAddress -Times 0 -Exactly
+        }
+    }
+
+    It 'uses terminating PAYG SQL IaaS and generic DevTest Labs schedule mutations' {
+        InModuleScope Workshop.Azure {
+            Set-Item -Path Function:New-AzSqlVM -Value {
+                [CmdletBinding()]
+                param($ResourceGroupName, $Name, $Location, $LicenseType)
+                $null = $ResourceGroupName, $Name, $Location, $LicenseType
+            }
+            Mock New-AzSqlVM { [pscustomobject]@{ Name=$Name } }
+            Mock New-AzResource { [pscustomobject]@{ ResourceId=$ResourceId } }
+            $operations = Get-DefaultWorkshopServiceOperationSet
+            $iaas = [pscustomobject]@{ Name='vm-mcpsql-sql'; Location='indonesiacentral' }
+            $schedule = [pscustomobject]@{
+                Id='/subscriptions/sub/resourceGroups/rg/providers/microsoft.devtestlab/schedules/shutdown-computevm-vm'
+                Status='Enabled'; TaskType='ComputeVmShutdownTask'; TimeZoneId='UTC'
+                DailyRecurrenceTime='1900'; TargetResourceId='/subscriptions/sub/resourceGroups/rg/providers/Microsoft.Compute/virtualMachines/vm'
+                NotificationStatus='Disabled'; NotificationTimeInMinutes=30
+            }
+
+            $null = & $operations.CreateSqlIaas $iaas 'rg-mcp-sql-workshop'
+            $null = & $operations.CreateSchedule $schedule 'rg-mcp-sql-workshop'
+
+            Should -Invoke New-AzSqlVM -Times 1 -Exactly -ParameterFilter {
+                $Name -eq 'vm-mcpsql-sql' -and $LicenseType -eq 'PAYG' -and $ErrorAction -eq 'Stop'
+            }
+            Should -Invoke New-AzResource -Times 1 -Exactly -ParameterFilter {
+                $ResourceId -match '/microsoft\.devtestlab/schedules/' -and $ApiVersion -eq '2018-09-15' -and
+                $Properties.status -eq 'Enabled' -and $Properties.dailyRecurrence.time -eq '1900' -and
+                $Force -and $ErrorAction -eq 'Stop'
+            }
+        }
+    }
+
+    It 'expands and exactly normalizes native shutdown schedule properties on readback' {
+        InModuleScope Workshop.Azure {
+            Mock Get-AzResource {
+                [pscustomobject]@{
+                    ResourceId = $ResourceId
+                    Properties = [pscustomobject]@{
+                        status='Enabled'; taskType='ComputeVmShutdownTask'; timeZoneId='UTC'
+                        targetResourceId='/subscriptions/sub/resourceGroups/rg/providers/Microsoft.Compute/virtualMachines/vm'
+                        dailyRecurrence=[pscustomobject]@{ time='1900' }
+                        notificationSettings=[pscustomobject]@{ status='Disabled'; timeInMinutes=30 }
+                    }
+                }
+            }
+            $spec = [pscustomobject]@{ Id='/subscriptions/sub/resourceGroups/rg/providers/microsoft.devtestlab/schedules/shutdown-computevm-vm' }
+            $operations = Get-DefaultWorkshopServiceOperationSet
+
+            $result = & $operations.GetSchedule 'shutdown-computevm-vm' 'rg' $spec
+
+            $result.NotificationStatus | Should -Be 'Disabled'
+            $result.NotificationTimeInMinutes | Should -Be 30
+            Should -Invoke Get-AzResource -Times 1 -Exactly -ParameterFilter {
+                $ResourceId -eq $spec.Id -and $ExpandProperties -and $ErrorAction -eq 'Stop'
+            }
+        }
+    }
+
+    It 'uses Force and terminating errors for exact VM deallocation and resource-group removal' {
+        InModuleScope Workshop.Azure {
+            Mock Stop-AzVM { [pscustomobject]@{ Status='Succeeded' } }
+            Mock Remove-AzResourceGroup { $true }
+            $stop = Get-DefaultWorkshopStopOperationSet
+            $remove = Get-DefaultWorkshopRemoveOperationSet
+
+            $null = & $stop.StopVm 'vm-mcpsql-admin' 'rg-mcp-sql-workshop'
+            $null = & $remove.RemoveResourceGroup 'rg-mcp-sql-workshop'
+
+            Should -Invoke Stop-AzVM -Times 1 -Exactly -ParameterFilter {
+                $Name -eq 'vm-mcpsql-admin' -and $Force -and $ErrorAction -eq 'Stop'
+            }
+            Should -Invoke Remove-AzResourceGroup -Times 1 -Exactly -ParameterFilter {
+                $Name -eq 'rg-mcp-sql-workshop' -and $Force -and $ErrorAction -eq 'Stop'
             }
         }
     }

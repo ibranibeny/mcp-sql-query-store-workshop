@@ -2,6 +2,8 @@ Set-StrictMode -Version Latest
 
 BeforeAll {
     $script:DeployPath = Join-Path $PSScriptRoot '../../deploy/Deploy-WorkshopEnvironment.ps1'
+    $script:StopPath = Join-Path $PSScriptRoot '../../deploy/Stop-WorkshopEnvironment.ps1'
+    $script:RemovePath = Join-Path $PSScriptRoot '../../deploy/Remove-WorkshopEnvironment.ps1'
 }
 
 Describe 'Workshop deployment entry script contract' {
@@ -88,35 +90,85 @@ Describe 'Workshop deployment entry script gates' {
             Preflight = 0
             Network = 0
             Boundary = 0
+            AdminVm = 0
+            SqlVm = 0
+            SqlIaas = 0
+            Shutdown = 0
+            VmBoundary = 0
             PreflightPassed = $true
         }
+        $script:Sequence = [System.Collections.Generic.List[string]]::new()
         $counters = $script:Counters
+        $sequence = $script:Sequence
         $script:EntryOperations = @{
             SetContext = ({
                 param($SubscriptionId, $TenantId)
                 $null = $SubscriptionId, $TenantId
                 $counters.SetContext++
+                $sequence.Add('context')
             }).GetNewClosure()
             TestPrerequisites = ({
                 param($Parameters)
                 $null = $Parameters
                 $counters.Preflight++
+                $sequence.Add('preflight')
                 [pscustomobject]@{
                     Passed = $counters.PreflightPassed
                     Checks = @()
                     Plan = $null
+                    ResolvedImages = [pscustomobject]@{
+                        Admin = [pscustomobject]@{ Version = '26100.2033.1' }
+                        Sql = [pscustomobject]@{ Version = '16.0.1135.2' }
+                    }
                 }
             }).GetNewClosure()
             NewNetwork = ({
                 param($Parameters)
                 $null = $Parameters
                 $counters.Network++
+                $sequence.Add('network')
                 [pscustomobject]@{ Completed = $true; Checkpoint = @('network complete') }
             }).GetNewClosure()
             TestBoundary = ({
                 param($Parameters)
                 $null = $Parameters
                 $counters.Boundary++
+                $sequence.Add('network-boundary')
+                [pscustomobject]@{ Passed = $true; Checks = @() }
+            }).GetNewClosure()
+            NewAdminVm = ({
+                param($Parameters)
+                $null = $Parameters
+                $counters.AdminVm++
+                $sequence.Add('admin-vm')
+                [pscustomobject]@{ Completed = $true; Checkpoint = @('admin VM complete') }
+            }).GetNewClosure()
+            NewSqlVm = ({
+                param($Parameters)
+                $null = $Parameters
+                $counters.SqlVm++
+                $sequence.Add('sql-vm')
+                [pscustomobject]@{ Completed = $true; Checkpoint = @('SQL VM complete') }
+            }).GetNewClosure()
+            RegisterSqlIaas = ({
+                param($Parameters)
+                $null = $Parameters
+                $counters.SqlIaas++
+                $sequence.Add('sql-iaas')
+                [pscustomobject]@{ Completed = $true; Checkpoint = @('SQL IaaS complete') }
+            }).GetNewClosure()
+            SetAutoShutdown = ({
+                param($Parameters)
+                $null = $Parameters
+                $counters.Shutdown++
+                $sequence.Add('shutdown')
+                [pscustomobject]@{ Completed = $true; Checkpoint = @('shutdown complete') }
+            }).GetNewClosure()
+            TestVmBoundary = ({
+                param($Parameters)
+                $null = $Parameters
+                $counters.VmBoundary++
+                $sequence.Add('vm-boundary')
                 [pscustomobject]@{ Passed = $true; Checks = @() }
             }).GetNewClosure()
         }
@@ -149,6 +201,18 @@ Describe 'Workshop deployment entry script gates' {
         $script:Counters.Preflight | Should -Be 1
         $script:Counters.Network | Should -Be 1
         $script:Counters.Boundary | Should -Be 1
+        $script:Counters.AdminVm | Should -Be 1
+        $script:Counters.SqlVm | Should -Be 1
+        $script:Counters.SqlIaas | Should -Be 1
+        $script:Counters.Shutdown | Should -Be 1
+        $script:Counters.VmBoundary | Should -Be 1
+        $script:Sequence | Should -Be @(
+            'context', 'preflight', 'network', 'network-boundary', 'admin-vm', 'sql-vm',
+            'sql-iaas', 'shutdown', 'vm-boundary'
+        )
+        $result[-1].Checkpoint | Should -Contain 'network complete'
+        $result[-1].Checkpoint | Should -Contain 'shutdown complete'
+        ($result | Out-String) | Should -Not -Match 'unit-test-only'
     }
 
     It 'creates nothing when preflight fails' {
@@ -156,6 +220,8 @@ Describe 'Workshop deployment entry script gates' {
         { & $script:DeployPath @script:EntryParameters } | Should -Throw '*prerequisite validation failed*'
         $script:Counters.Network | Should -Be 0
         $script:Counters.Boundary | Should -Be 0
+        $script:Counters.AdminVm | Should -Be 0
+        $script:Counters.SqlVm | Should -Be 0
     }
 
     It 'creates nothing when the exact phrase does not match' {
@@ -163,6 +229,8 @@ Describe 'Workshop deployment entry script gates' {
         { & $script:DeployPath @script:EntryParameters } | Should -Throw '*did not match exactly*'
         $script:Counters.Network | Should -Be 0
         $script:Counters.Boundary | Should -Be 0
+        $script:Counters.AdminVm | Should -Be 0
+        $script:Counters.SqlVm | Should -Be 0
     }
 
     It 'creates nothing when ShouldProcess is declined through WhatIf' {
@@ -172,6 +240,8 @@ Describe 'Workshop deployment entry script gates' {
         $result[-1].Completed | Should -BeFalse
         $script:Counters.Network | Should -Be 0
         $script:Counters.Boundary | Should -Be 0
+        $script:Counters.AdminVm | Should -Be 0
+        $script:Counters.SqlVm | Should -Be 0
     }
 
     It 'rejects an empty credential username before context, preflight, approval, or output' {
@@ -190,5 +260,70 @@ Describe 'Workshop deployment entry script gates' {
         $script:Counters.SetContext | Should -Be 0
         $script:Counters.Preflight | Should -Be 0
         $script:Counters.Network | Should -Be 0
+    }
+
+    It 'does not invoke any VM operation when network creation fails' {
+        $script:EntryOperations.NewNetwork = { throw 'network failed' }
+        { & $script:DeployPath @script:EntryParameters } | Should -Throw '*network failed*No automatic rollback*'
+        $script:Counters.AdminVm | Should -Be 0
+        $script:Counters.SqlVm | Should -Be 0
+        $script:Counters.SqlIaas | Should -Be 0
+        $script:Counters.Shutdown | Should -Be 0
+        $script:Counters.VmBoundary | Should -Be 0
+    }
+
+    It 'stops before later mutations when any completed stage declines or returns incomplete' -ForEach @(
+        @{ Stage='NewNetwork'; Later=@('AdminVm','SqlVm','SqlIaas','Shutdown','VmBoundary') }
+        @{ Stage='NewAdminVm'; Later=@('SqlVm','SqlIaas','Shutdown','VmBoundary') }
+        @{ Stage='NewSqlVm'; Later=@('SqlIaas','Shutdown','VmBoundary') }
+        @{ Stage='RegisterSqlIaas'; Later=@('Shutdown','VmBoundary') }
+        @{ Stage='SetAutoShutdown'; Later=@('VmBoundary') }
+    ) {
+        $stageName = $Stage
+        $script:EntryOperations[$stageName] = {
+            param($Parameters)
+            $null = $Parameters
+            [pscustomobject]@{ Completed = $false; Checkpoint = @("$stageName incomplete") }
+        }.GetNewClosure()
+
+        { & $script:DeployPath @script:EntryParameters } | Should -Throw '*did not complete*No automatic rollback*'
+        foreach ($counterName in $Later) {
+            $script:Counters.$counterName | Should -Be 0
+        }
+    }
+}
+
+Describe 'Workshop lifecycle entry script contracts' {
+    It 'provides strict ShouldProcess stop and remove entry scripts' -ForEach @(
+        @{ ScriptName = 'Stop-WorkshopEnvironment.ps1'; Required = @('SubscriptionId') }
+        @{ ScriptName = 'Remove-WorkshopEnvironment.ps1'; Required = @('SubscriptionId', 'ConfirmationPhrase') }
+    ) {
+        $Path = Join-Path $PSScriptRoot "../../deploy/$ScriptName"
+        Test-Path -LiteralPath $Path | Should -BeTrue
+        $tokens = $null
+        $errors = $null
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile($Path, [ref] $tokens, [ref] $errors)
+        $errors | Should -HaveCount 0
+        $ast.ParamBlock.Attributes.NamedArguments.ArgumentName | Should -Contain 'SupportsShouldProcess'
+        $text = Get-Content -LiteralPath $Path -Raw
+        $text | Should -Match 'Set-StrictMode\s+-Version\s+Latest'
+        foreach ($name in $Required) {
+            $parameter = $ast.ParamBlock.Parameters |
+                Where-Object { $_.Name.VariablePath.UserPath -eq $name }
+            @($parameter.Attributes | Where-Object { $_.Extent.Text -match 'Mandatory' }) | Should -HaveCount 1
+        }
+    }
+
+    It 'keeps lifecycle entry scripts thin and forwards operation injection' -ForEach @(
+        'Stop-WorkshopEnvironment.ps1', 'Remove-WorkshopEnvironment.ps1'
+    ) {
+        $path = Join-Path $PSScriptRoot "../../deploy/$_"
+        $text = Get-Content -LiteralPath $path -Raw
+        $text | Should -Match 'Operations\s*=\s*\$Operations'
+        $text | Should -Not -Match '(?m)^\s*(Stop-AzVM|Remove-AzResourceGroup|Get-AzResourceGroup)\b'
+    }
+
+    It 'requires the exact destructive phrase in the remove entry script' {
+        (Get-Content -LiteralPath $script:RemovePath -Raw) | Should -Match 'DELETE rg-mcp-sql-workshop'
     }
 }

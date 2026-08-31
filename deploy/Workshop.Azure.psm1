@@ -1399,7 +1399,10 @@ function Test-WorkshopNetworkResourceMatch {
         [Parameter(Mandatory)][psobject] $Actual
     )
 
-    if ($Expected.Kind -eq 'NetworkSecurityGroup' -and $Actual.Kind -eq 'NetworkSecurityGroup') {
+    $expectedHasKind = $Expected.PSObject.Properties.Name -contains 'Kind'
+    $actualHasKind = $Actual.PSObject.Properties.Name -contains 'Kind'
+    if ($expectedHasKind -and $actualHasKind -and
+        $Expected.Kind -eq 'NetworkSecurityGroup' -and $Actual.Kind -eq 'NetworkSecurityGroup') {
         $expectedBase = [pscustomobject][ordered]@{
             Kind = $Expected.Kind; Name = $Expected.Name; Location = $Expected.Location
             Id = $Expected.Id; Tags = $Expected.Tags
@@ -2213,12 +2216,812 @@ ${function:Test-WorkshopNetworkBoundary} = {
     }
 }
 
+function Get-WorkshopComputeResourceId {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string] $SubscriptionId,
+        [Parameter(Mandatory)][string] $ResourceGroupName,
+        [Parameter(Mandatory)][string] $ResourceType,
+        [Parameter(Mandatory)][string] $Name
+    )
+
+    "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroupName/providers/Microsoft.Compute/$ResourceType/$Name"
+}
+
+function Resolve-WorkshopImageVersion {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][ValidateNotNullOrEmpty()][string] $Publisher,
+        [Parameter(Mandatory)][ValidateNotNullOrEmpty()][string] $Offer,
+        [Parameter(Mandatory)][ValidateNotNullOrEmpty()][string] $Sku,
+        [Parameter(Mandatory)][ValidateNotNullOrEmpty()][string] $Location,
+        [hashtable] $Operations
+    )
+
+    if ($null -eq $Operations) {
+        $Operations = @{
+            GetImages = {
+                param($ImagePublisher, $ImageOffer, $ImageSku, $ImageLocation)
+                Get-AzVMImage -PublisherName $ImagePublisher -Offer $ImageOffer -Skus $ImageSku `
+                    -Location $ImageLocation -ErrorAction Stop
+            }
+        }
+    }
+    if (-not $Operations.ContainsKey('GetImages') -or $Operations.GetImages -isnot [scriptblock]) {
+        throw "Operations must provide scriptblock 'GetImages'."
+    }
+
+    $validVersions = @(& $Operations.GetImages $Publisher $Offer $Sku $Location | ForEach-Object {
+        $parsed = $null
+        $versionText = if ($null -ne $_ -and $_.PSObject.Properties.Name -contains 'Version') {
+            [string] $_.Version
+        }
+        else {
+            ''
+        }
+        if ($versionText -match '^\d+(\.\d+){2,3}$' -and
+            [version]::TryParse($versionText, [ref] $parsed)) {
+            [pscustomobject]@{ Text = $versionText; Parsed = $parsed }
+        }
+    })
+    $selected = $validVersions | Sort-Object Parsed -Descending | Select-Object -First 1
+    if ($null -eq $selected) {
+        throw "The exact image $Publisher`:$Offer`:$Sku in '$Location' returned no valid immutable image version."
+    }
+    [pscustomobject][ordered]@{
+        Publisher = $Publisher
+        Offer = $Offer
+        Sku = $Sku
+        Version = $selected.Text
+        Location = $Location
+    }
+}
+
+function Get-WorkshopVmSpecification {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][ValidateSet('Admin', 'Sql')][string] $Role,
+        [Parameter(Mandatory)][hashtable] $Config,
+        [Parameter(Mandatory)][string] $ImageVersion,
+        [Parameter(Mandatory)][string] $SubscriptionId
+    )
+
+    if ($ImageVersion -notmatch '^\d+(\.\d+){2,3}$' -or $ImageVersion -eq 'latest') {
+        throw "VM image version '$ImageVersion' is not immutable."
+    }
+    $vmConfig = if ($Role -eq 'Admin') { $Config.AdminVm } else { $Config.SqlVm }
+    $resourceGroupName = [string] $Config.ResourceGroupName
+    $vmId = Get-WorkshopComputeResourceId -SubscriptionId $SubscriptionId -ResourceGroupName $resourceGroupName `
+        -ResourceType 'virtualMachines' -Name $vmConfig.Name
+    $nicName = if ($Role -eq 'Admin') { 'nic-mcpsql-admin' } else { 'nic-mcpsql-sql' }
+    $nicId = Get-WorkshopNetworkResourceId -SubscriptionId $SubscriptionId -ResourceGroupName $resourceGroupName `
+        -ResourceType 'networkInterfaces' -Name $nicName
+    $osDiskName = if ($Role -eq 'Admin') { 'osdisk-mcpsql-admin' } else { 'osdisk-mcpsql-sql' }
+    $tags = [ordered]@{}
+    foreach ($key in @($Config.Tags.Keys | Sort-Object)) { $tags[$key] = [string] $Config.Tags[$key] }
+    $dataDisks = @()
+    if ($Role -eq 'Sql') {
+        $dataDisks = @(
+            [pscustomobject][ordered]@{
+                Name = 'disk-mcpsql-sql-data'; Id = (Get-WorkshopComputeResourceId -SubscriptionId $SubscriptionId `
+                    -ResourceGroupName $resourceGroupName -ResourceType 'disks' -Name 'disk-mcpsql-sql-data')
+                SizeGiB = [int] $Config.SqlVm.DataDiskGiB; Sku = 'Premium_LRS'; Lun = 0; Caching = 'ReadOnly'
+            }
+            [pscustomobject][ordered]@{
+                Name = 'disk-mcpsql-sql-log'; Id = (Get-WorkshopComputeResourceId -SubscriptionId $SubscriptionId `
+                    -ResourceGroupName $resourceGroupName -ResourceType 'disks' -Name 'disk-mcpsql-sql-log')
+                SizeGiB = [int] $Config.SqlVm.LogDiskGiB; Sku = 'Premium_LRS'; Lun = 1; Caching = 'None'
+            }
+        )
+    }
+    [pscustomobject][ordered]@{
+        Name = [string] $vmConfig.Name
+        Id = $vmId
+        Location = [string] $Config.Location
+        VmSize = [string] $vmConfig.Size
+        OsType = 'Windows'
+        LicenseType = if ($Role -eq 'Admin') { 'Windows_Client' } else { $null }
+        SecurityType = if ($Role -eq 'Admin') { 'TrustedLaunch' } else { $null }
+        SecureBoot = $Role -eq 'Admin'
+        VTpm = $Role -eq 'Admin'
+        Image = [pscustomobject][ordered]@{
+            Publisher = [string] $vmConfig.Publisher
+            Offer = [string] $vmConfig.Offer
+            Sku = [string] $vmConfig.Sku
+            Version = $ImageVersion
+        }
+        OsDisk = [pscustomobject][ordered]@{
+            Name = $osDiskName
+            SizeGiB = [int] $vmConfig.OsDiskGiB
+            Sku = 'Premium_LRS'
+            Caching = 'ReadWrite'
+        }
+        NetworkInterfaceIds = @($nicId)
+        DataDisks = $dataDisks
+        Tags = $tags
+    }
+}
+
+function Get-WorkshopDiskSpecification {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][psobject] $VmSpecification)
+
+    @($VmSpecification.DataDisks | ForEach-Object {
+        [pscustomobject][ordered]@{
+            Name = $_.Name; Id = $_.Id; Location = $VmSpecification.Location
+            SizeGiB = $_.SizeGiB; Sku = $_.Sku; Lun = $_.Lun; Caching = $_.Caching
+            Tags = $VmSpecification.Tags
+        }
+    })
+}
+
+function ConvertFrom-WorkshopAzVm {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][psobject] $Vm)
+
+    [pscustomobject][ordered]@{
+        Name = [string] $Vm.Name
+        Id = [string] $Vm.Id
+        Location = [string] $Vm.Location
+        VmSize = [string] $Vm.HardwareProfile.VmSize
+        OsType = [string] $Vm.StorageProfile.OsDisk.OsType
+        LicenseType = if ([string]::IsNullOrWhiteSpace([string] $Vm.LicenseType)) { $null } else { [string] $Vm.LicenseType }
+        SecurityType = if ($null -eq $Vm.SecurityProfile) { $null } else { [string] $Vm.SecurityProfile.SecurityType }
+        SecureBoot = $null -ne $Vm.SecurityProfile -and [bool] $Vm.SecurityProfile.UefiSettings.SecureBootEnabled
+        VTpm = $null -ne $Vm.SecurityProfile -and [bool] $Vm.SecurityProfile.UefiSettings.VTpmEnabled
+        Image = [pscustomobject][ordered]@{
+            Publisher = [string] $Vm.StorageProfile.ImageReference.Publisher
+            Offer = [string] $Vm.StorageProfile.ImageReference.Offer
+            Sku = [string] $Vm.StorageProfile.ImageReference.Sku
+            Version = [string] $Vm.StorageProfile.ImageReference.Version
+        }
+        OsDisk = [pscustomobject][ordered]@{
+            Name = [string] $Vm.StorageProfile.OsDisk.Name
+            SizeGiB = [int] $Vm.StorageProfile.OsDisk.DiskSizeGB
+            Sku = [string] $Vm.StorageProfile.OsDisk.ManagedDisk.StorageAccountType
+            Caching = [string] $Vm.StorageProfile.OsDisk.Caching
+        }
+        NetworkInterfaceIds = @($Vm.NetworkProfile.NetworkInterfaces | ForEach-Object { [string] $_.Id })
+        DataDisks = @($Vm.StorageProfile.DataDisks | Sort-Object Lun | ForEach-Object {
+            [pscustomobject][ordered]@{
+                Name = [string] $_.Name; Id = [string] $_.ManagedDisk.Id; SizeGiB = [int] $_.DiskSizeGB
+                Sku = [string] $_.ManagedDisk.StorageAccountType; Lun = [int] $_.Lun; Caching = [string] $_.Caching
+            }
+        })
+        Tags = if ($null -eq $Vm.Tags) { [ordered]@{} } else { $Vm.Tags }
+    }
+}
+
+function ConvertFrom-WorkshopAzDisk {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][psobject] $Disk,
+        [Parameter(Mandatory)][psobject] $Expected
+    )
+
+    [pscustomobject][ordered]@{
+        Name = [string] $Disk.Name; Id = [string] $Disk.Id; Location = [string] $Disk.Location
+        SizeGiB = [int] $Disk.DiskSizeGB; Sku = [string] $Disk.Sku.Name
+        Lun = [int] $Expected.Lun; Caching = [string] $Expected.Caching
+        Tags = if ($null -eq $Disk.Tags) { [ordered]@{} } else { $Disk.Tags }
+    }
+}
+
+function Get-DefaultWorkshopVmOperationSet {
+    [CmdletBinding()]
+    param()
+
+    @{
+        GetSubscriptionId = {
+            $context = Get-AzContext -ErrorAction Stop
+            $id = Get-WorkshopNestedIdentifier -InputObject $context -PropertyName 'Subscription'
+            if ([string]::IsNullOrWhiteSpace($id)) { throw 'The active Azure context did not return a subscription ID.' }
+            $id
+        }
+        GetVm = {
+            param($Name, $ResourceGroupName)
+            try {
+                ConvertFrom-WorkshopAzVm -Vm (Get-AzVM -ResourceGroupName $ResourceGroupName -Name $Name -ErrorAction Stop)
+            }
+            catch {
+                if (Test-WorkshopAzureNotFound -ErrorRecord $_) { return $null }
+                throw
+            }
+        }
+        GetDisk = {
+            param($Name, $ResourceGroupName, $Expected)
+            try {
+                $disk = Get-AzDisk -ResourceGroupName $ResourceGroupName -DiskName $Name -ErrorAction Stop
+                ConvertFrom-WorkshopAzDisk -Disk $disk -Expected $Expected
+            }
+            catch {
+                if (Test-WorkshopAzureNotFound -ErrorRecord $_) { return $null }
+                throw
+            }
+        }
+        CreateDisk = {
+            param($Spec, $ResourceGroupName)
+            $diskConfig = New-AzDiskConfig -Location $Spec.Location -SkuName $Spec.Sku `
+                -DiskSizeGB $Spec.SizeGiB -CreateOption Empty -Tag $Spec.Tags -ErrorAction Stop
+            New-AzDisk -ResourceGroupName $ResourceGroupName -DiskName $Spec.Name `
+                -Disk $diskConfig -ErrorAction Stop
+        }
+        CreateVm = {
+            param($Spec, [PSCredential] $Credential, $ResourceGroupName)
+            $vmConfigParameters = @{
+                VMName = $Spec.Name; VMSize = $Spec.VmSize; Tags = $Spec.Tags; ErrorAction = 'Stop'
+            }
+            if (-not [string]::IsNullOrWhiteSpace([string] $Spec.LicenseType)) {
+                $vmConfigParameters.LicenseType = $Spec.LicenseType
+            }
+            $vm = New-AzVMConfig @vmConfigParameters
+            $osParameters = @{
+                VM = $vm; Windows = $true; ComputerName = $Spec.Name; Credential = $Credential
+                ProvisionVMAgent = $true; EnableAutoUpdate = $true; ErrorAction = 'Stop'
+            }
+            $vm = Set-AzVMOperatingSystem @osParameters
+            $vm = Set-AzVMSourceImage -VM $vm -PublisherName $Spec.Image.Publisher -Offer $Spec.Image.Offer `
+                -Skus $Spec.Image.Sku -Version $Spec.Image.Version -ErrorAction Stop
+            $vm = Set-AzVMOSDisk -VM $vm -Name $Spec.OsDisk.Name -DiskSizeInGB $Spec.OsDisk.SizeGiB `
+                -StorageAccountType $Spec.OsDisk.Sku -Caching $Spec.OsDisk.Caching -CreateOption FromImage `
+                -ErrorAction Stop
+            if ($Spec.SecurityType -eq 'TrustedLaunch') {
+                $vm = Set-AzVMSecurityProfile -VM $vm -SecurityType TrustedLaunch -ErrorAction Stop
+                $vm = Set-AzVmUefi -VM $vm -EnableVtpm:$Spec.VTpm -EnableSecureBoot:$Spec.SecureBoot `
+                    -ErrorAction Stop
+            }
+            $vm = Add-AzVMNetworkInterface -VM $vm -Id $Spec.NetworkInterfaceIds[0] -Primary -ErrorAction Stop
+            foreach ($disk in @($Spec.DataDisks | Sort-Object Lun)) {
+                $vm = Add-AzVMDataDisk -VM $vm -Name $disk.Name -ManagedDiskId $disk.Id `
+                    -Lun $disk.Lun -Caching $disk.Caching -CreateOption Attach -ErrorAction Stop
+            }
+            New-AzVM -ResourceGroupName $ResourceGroupName -Location $Spec.Location -VM $vm -ErrorAction Stop
+        }
+    }
+}
+
+function Assert-WorkshopVmOperationSet {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][hashtable] $Operations, [switch] $ReadOnly)
+
+    $required = @('GetSubscriptionId', 'GetVm', 'GetDisk')
+    if (-not $ReadOnly) { $required += @('CreateVm', 'CreateDisk') }
+    foreach ($name in $required) {
+        if (-not $Operations.ContainsKey($name) -or $Operations[$name] -isnot [scriptblock]) {
+            throw "Operations must provide scriptblock '$name'."
+        }
+    }
+}
+
+function Invoke-WorkshopVmDeployment {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][ValidateSet('Admin', 'Sql')][string] $Role,
+        [Parameter(Mandatory)][hashtable] $Config,
+        [Parameter(Mandatory)][string] $ImageVersion,
+        [Parameter(Mandatory)][PSCredential] $Credential,
+        [Parameter(Mandatory)][hashtable] $Operations
+    )
+
+    Assert-WorkshopVmOperationSet -Operations $Operations
+    $subscriptionId = [string] (& $Operations.GetSubscriptionId)
+    if ([string]::IsNullOrWhiteSpace($subscriptionId)) { throw 'VM operations returned an empty subscription ID.' }
+    $vmSpec = Get-WorkshopVmSpecification -Role $Role -Config $Config -ImageVersion $ImageVersion `
+        -SubscriptionId $subscriptionId
+    $diskSpecs = @(Get-WorkshopDiskSpecification -VmSpecification $vmSpec)
+    $existingVm = & $Operations.GetVm $vmSpec.Name $Config.ResourceGroupName
+    $existingDisks = @{}
+    foreach ($diskSpec in $diskSpecs) {
+        $existingDisks[$diskSpec.Name] = & $Operations.GetDisk $diskSpec.Name $Config.ResourceGroupName $diskSpec
+    }
+
+    if ($null -ne $existingVm -and -not (Test-WorkshopNetworkResourceMatch -Expected $vmSpec -Actual $existingVm)) {
+        throw "VirtualMachine '$($vmSpec.Name)' conflicts with the approved shape."
+    }
+    foreach ($diskSpec in $diskSpecs) {
+        $existingDisk = $existingDisks[$diskSpec.Name]
+        if ($null -ne $existingDisk -and -not (Test-WorkshopNetworkResourceMatch -Expected $diskSpec -Actual $existingDisk)) {
+            throw "ManagedDisk '$($diskSpec.Name)' conflicts with the approved shape."
+        }
+    }
+
+    $checkpoint = [System.Collections.Generic.List[string]]::new()
+    foreach ($diskSpec in $diskSpecs) {
+        if ($null -eq $existingDisks[$diskSpec.Name]) {
+            $null = & $Operations.CreateDisk $diskSpec $Config.ResourceGroupName
+            $readBack = & $Operations.GetDisk $diskSpec.Name $Config.ResourceGroupName $diskSpec
+            if ($null -eq $readBack -or -not (Test-WorkshopNetworkResourceMatch -Expected $diskSpec -Actual $readBack)) {
+                throw "ManagedDisk '$($diskSpec.Name)' failed positive read-back. Checkpoint: $($checkpoint -join ', ')."
+            }
+            $checkpoint.Add("ManagedDisk/$($diskSpec.Name):created-and-verified")
+        }
+        else {
+            $checkpoint.Add("ManagedDisk/$($diskSpec.Name):matched")
+        }
+    }
+    if ($null -eq $existingVm) {
+        $null = & $Operations.CreateVm $vmSpec $Credential $Config.ResourceGroupName
+        $readBack = & $Operations.GetVm $vmSpec.Name $Config.ResourceGroupName
+        if ($null -eq $readBack -or -not (Test-WorkshopNetworkResourceMatch -Expected $vmSpec -Actual $readBack)) {
+            throw "VirtualMachine '$($vmSpec.Name)' failed positive read-back. Checkpoint: $($checkpoint -join ', ')."
+        }
+        $checkpoint.Add("VirtualMachine/$($vmSpec.Name):created-and-verified")
+    }
+    else {
+        $checkpoint.Add("VirtualMachine/$($vmSpec.Name):matched")
+    }
+    [pscustomobject][ordered]@{ Completed = $true; Checkpoint = $checkpoint.ToArray(); VirtualMachine = $vmSpec }
+}
+
+function New-WorkshopAdminVm {
+    [CmdletBinding(SupportsShouldProcess)]
+    param(
+        [Parameter(Mandatory)][hashtable] $Config,
+        [Parameter(Mandatory)][string] $ImageVersion,
+        [Parameter(Mandatory)][PSCredential] $Credential,
+        [Parameter(Mandatory)][bool] $WindowsClientLicenseAttested,
+        [hashtable] $Operations
+    )
+
+    if (-not $WindowsClientLicenseAttested) {
+        throw 'Windows client license attestation is required before creating the administration VM.'
+    }
+    if (-not $PSCmdlet.ShouldProcess($Config.AdminVm.Name, 'Create or exactly match the administration VM')) {
+        return [pscustomobject][ordered]@{ Completed = $false; Checkpoint = @('ShouldProcess declined') }
+    }
+    if ($null -eq $Operations) { $Operations = Get-DefaultWorkshopVmOperationSet }
+    Invoke-WorkshopVmDeployment -Role Admin -Config $Config -ImageVersion $ImageVersion `
+        -Credential $Credential -Operations $Operations
+}
+
+function New-WorkshopSqlVm {
+    [CmdletBinding(SupportsShouldProcess)]
+    param(
+        [Parameter(Mandatory)][hashtable] $Config,
+        [Parameter(Mandatory)][string] $ImageVersion,
+        [Parameter(Mandatory)][PSCredential] $Credential,
+        [hashtable] $Operations
+    )
+
+    if (-not $PSCmdlet.ShouldProcess($Config.SqlVm.Name, 'Create or exactly match the SQL VM and managed disks')) {
+        return [pscustomobject][ordered]@{ Completed = $false; Checkpoint = @('ShouldProcess declined') }
+    }
+    if ($null -eq $Operations) { $Operations = Get-DefaultWorkshopVmOperationSet }
+    Invoke-WorkshopVmDeployment -Role Sql -Config $Config -ImageVersion $ImageVersion `
+        -Credential $Credential -Operations $Operations
+}
+
+function Test-WorkshopVmBoundary {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][hashtable] $Config,
+        [Parameter(Mandatory)][hashtable] $ResolvedImages,
+        [hashtable] $Operations
+    )
+
+    if ($null -eq $Operations) { $Operations = Get-DefaultWorkshopVmOperationSet }
+    Assert-WorkshopVmOperationSet -Operations $Operations -ReadOnly
+    $checks = [System.Collections.Generic.List[object]]::new()
+    try {
+        $subscriptionId = [string] (& $Operations.GetSubscriptionId)
+        foreach ($role in @('Admin', 'Sql')) {
+            $version = [string] $ResolvedImages[$role].Version
+            $expectedVm = Get-WorkshopVmSpecification -Role $role -Config $Config -ImageVersion $version `
+                -SubscriptionId $subscriptionId
+            $actualVm = & $Operations.GetVm $expectedVm.Name $Config.ResourceGroupName
+            Add-WorkshopBoundaryCheck -Checks $checks -Name "$role VM exact shape" `
+                -Passed ($null -ne $actualVm -and (Test-WorkshopNetworkResourceMatch -Expected $expectedVm -Actual $actualVm)) `
+                -Detail 'VM identity, image, size, security, OS disk, NICs, and data disks must exactly match.'
+            foreach ($diskSpec in @(Get-WorkshopDiskSpecification -VmSpecification $expectedVm)) {
+                $actualDisk = & $Operations.GetDisk $diskSpec.Name $Config.ResourceGroupName $diskSpec
+                Add-WorkshopBoundaryCheck -Checks $checks -Name "Managed disk $($diskSpec.Name) exact shape" `
+                    -Passed ($null -ne $actualDisk -and (Test-WorkshopNetworkResourceMatch -Expected $diskSpec -Actual $actualDisk)) `
+                    -Detail 'Managed disk identity, size, SKU, LUN, and cache intent must exactly match.'
+            }
+        }
+    }
+    catch {
+        Add-WorkshopBoundaryCheck -Checks $checks -Name 'VM boundary read' -Passed $false `
+            -Detail (ConvertTo-WorkshopSafeDetail -Value $_.Exception.Message)
+    }
+    [pscustomobject][ordered]@{
+        Passed = @($checks | Where-Object Status -EQ 'Failed').Count -eq 0
+        Checks = $checks.ToArray()
+    }
+}
+
+function Get-WorkshopSqlIaasSpecification {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][hashtable] $Config, [Parameter(Mandatory)][string] $SubscriptionId)
+
+    $name = [string] $Config.SqlVm.Name
+    $resourceGroupName = [string] $Config.ResourceGroupName
+    [pscustomobject][ordered]@{
+        Name = $name
+        Id = "/subscriptions/$SubscriptionId/resourceGroups/$resourceGroupName/providers/Microsoft.SqlVirtualMachine/sqlVirtualMachines/$name"
+        Location = [string] $Config.Location
+        LicenseType = 'PAYG'
+        VirtualMachineId = Get-WorkshopComputeResourceId -SubscriptionId $SubscriptionId `
+            -ResourceGroupName $resourceGroupName -ResourceType 'virtualMachines' -Name $name
+    }
+}
+
+function Get-DefaultWorkshopServiceOperationSet {
+    [CmdletBinding()]
+    param()
+
+    @{
+        GetSubscriptionId = {
+            $context = Get-AzContext -ErrorAction Stop
+            Get-WorkshopNestedIdentifier -InputObject $context -PropertyName 'Subscription'
+        }
+        GetSqlIaas = {
+            param($Spec, $ResourceGroupName)
+            try {
+                $resource = Get-AzSqlVM -ResourceGroupName $ResourceGroupName -Name $Spec.Name -ErrorAction Stop
+                [pscustomobject][ordered]@{
+                    Name = [string] $resource.Name; Id = [string] $resource.Id; Location = [string] $resource.Location
+                    LicenseType = [string] $resource.LicenseType
+                    VirtualMachineId = [string] $resource.VirtualMachineResourceId
+                }
+            }
+            catch {
+                if (Test-WorkshopAzureNotFound -ErrorRecord $_) { return $null }
+                throw
+            }
+        }
+        CreateSqlIaas = {
+            param($Spec, $ResourceGroupName)
+            New-AzSqlVM -ResourceGroupName $ResourceGroupName -Name $Spec.Name -Location $Spec.Location `
+                -LicenseType PAYG -ErrorAction Stop
+        }
+        GetSchedule = {
+            param($Name, $ResourceGroupName, $Spec)
+            $null = $ResourceGroupName
+            try {
+                $resource = Get-AzResource -ResourceId $Spec.Id -ApiVersion '2018-09-15' `
+                    -ExpandProperties -ErrorAction Stop
+                [pscustomobject][ordered]@{
+                    Name = $Name; Id = [string] $resource.ResourceId
+                    Status = [string] $resource.Properties.status; TaskType = [string] $resource.Properties.taskType
+                    DailyRecurrenceTime = [string] $resource.Properties.dailyRecurrence.time
+                    TimeZoneId = [string] $resource.Properties.timeZoneId
+                    TargetResourceId = [string] $resource.Properties.targetResourceId
+                    NotificationStatus = [string] $resource.Properties.notificationSettings.status
+                    NotificationTimeInMinutes = [int] $resource.Properties.notificationSettings.timeInMinutes
+                }
+            }
+            catch {
+                if (Test-WorkshopAzureNotFound -ErrorRecord $_) { return $null }
+                throw
+            }
+        }
+        CreateSchedule = {
+            param($Spec, $ResourceGroupName)
+            $null = $ResourceGroupName
+            $properties = @{
+                status = $Spec.Status; taskType = $Spec.TaskType; timeZoneId = $Spec.TimeZoneId
+                dailyRecurrence = @{ time = $Spec.DailyRecurrenceTime }
+                targetResourceId = $Spec.TargetResourceId
+                notificationSettings = @{
+                    status = $Spec.NotificationStatus
+                    timeInMinutes = $Spec.NotificationTimeInMinutes
+                }
+            }
+            New-AzResource -ResourceId $Spec.Id -ApiVersion '2018-09-15' -Properties $properties `
+                -Force -ErrorAction Stop
+        }
+    }
+}
+
+${function:Register-WorkshopSqlIaas} = {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][hashtable] $Config, [hashtable] $Operations)
+
+    if ($null -eq $Operations) { $Operations = Get-DefaultWorkshopServiceOperationSet }
+    foreach ($name in @('GetSubscriptionId', 'GetSqlIaas', 'CreateSqlIaas')) {
+        if (-not $Operations.ContainsKey($name) -or $Operations[$name] -isnot [scriptblock]) {
+            throw "Operations must provide scriptblock '$name'."
+        }
+    }
+    $spec = Get-WorkshopSqlIaasSpecification -Config $Config -SubscriptionId ([string] (& $Operations.GetSubscriptionId))
+    $existing = & $Operations.GetSqlIaas $spec $Config.ResourceGroupName
+    if ($null -ne $existing -and -not (Test-WorkshopNetworkResourceMatch -Expected $spec -Actual $existing)) {
+        throw "SQL IaaS registration '$($spec.Name)' conflicts with the approved shape."
+    }
+    $status = 'matched'
+    if ($null -eq $existing) {
+        $null = & $Operations.CreateSqlIaas $spec $Config.ResourceGroupName
+        $readBack = & $Operations.GetSqlIaas $spec $Config.ResourceGroupName
+        if ($null -eq $readBack -or -not (Test-WorkshopNetworkResourceMatch -Expected $spec -Actual $readBack)) {
+            throw "SQL IaaS registration '$($spec.Name)' failed positive read-back."
+        }
+        $status = 'created-and-verified'
+    }
+    [pscustomobject][ordered]@{ Completed = $true; Checkpoint = @("SqlIaas/$($spec.Name):$status"); Resource = $spec }
+}
+
+function Get-WorkshopShutdownSpecification {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][hashtable] $Config,
+        [Parameter(Mandatory)][string] $SubscriptionId,
+        [Parameter(Mandatory)][string] $TimeZoneId
+    )
+
+    foreach ($vmName in @($Config.AdminVm.Name, $Config.SqlVm.Name)) {
+        $name = "shutdown-computevm-$vmName"
+        [pscustomobject][ordered]@{
+            Name = $name
+            Id = "/subscriptions/$SubscriptionId/resourceGroups/$($Config.ResourceGroupName)/providers/microsoft.devtestlab/schedules/$name"
+            Status = 'Enabled'
+            TaskType = 'ComputeVmShutdownTask'
+            DailyRecurrenceTime = [string] $Config.AutoShutdownTime
+            TimeZoneId = $TimeZoneId
+            TargetResourceId = Get-WorkshopComputeResourceId -SubscriptionId $SubscriptionId `
+                -ResourceGroupName $Config.ResourceGroupName -ResourceType 'virtualMachines' -Name $vmName
+            NotificationStatus = 'Disabled'
+            NotificationTimeInMinutes = 30
+        }
+    }
+}
+
+function Set-WorkshopAutoShutdown {
+    [CmdletBinding(SupportsShouldProcess)]
+    param(
+        [Parameter(Mandatory)][hashtable] $Config,
+        [ValidateNotNullOrEmpty()][string] $TimeZoneId = 'UTC',
+        [hashtable] $Operations
+    )
+
+    if (-not $PSCmdlet.ShouldProcess($Config.ResourceGroupName, 'Create or exactly match both VM auto-shutdown schedules')) {
+        return [pscustomobject][ordered]@{ Completed = $false; Checkpoint = @('ShouldProcess declined') }
+    }
+    if ($null -eq $Operations) { $Operations = Get-DefaultWorkshopServiceOperationSet }
+    foreach ($name in @('GetSubscriptionId', 'GetSchedule', 'CreateSchedule')) {
+        if (-not $Operations.ContainsKey($name) -or $Operations[$name] -isnot [scriptblock]) {
+            throw "Operations must provide scriptblock '$name'."
+        }
+    }
+    $specs = @(Get-WorkshopShutdownSpecification -Config $Config `
+        -SubscriptionId ([string] (& $Operations.GetSubscriptionId)) -TimeZoneId $TimeZoneId)
+    $existing = @{}
+    foreach ($spec in $specs) {
+        $existing[$spec.Name] = & $Operations.GetSchedule $spec.Name $Config.ResourceGroupName $spec
+    }
+    foreach ($spec in $specs) {
+        if ($null -ne $existing[$spec.Name] -and
+            -not (Test-WorkshopNetworkResourceMatch -Expected $spec -Actual $existing[$spec.Name])) {
+            throw "Auto-shutdown schedule '$($spec.Name)' conflicts with the approved shape."
+        }
+    }
+    $checkpoint = [System.Collections.Generic.List[string]]::new()
+    foreach ($spec in $specs) {
+        if ($null -eq $existing[$spec.Name]) {
+            $null = & $Operations.CreateSchedule $spec $Config.ResourceGroupName
+            $readBack = & $Operations.GetSchedule $spec.Name $Config.ResourceGroupName $spec
+            if ($null -eq $readBack -or -not (Test-WorkshopNetworkResourceMatch -Expected $spec -Actual $readBack)) {
+                throw "Auto-shutdown schedule '$($spec.Name)' failed positive read-back."
+            }
+            $checkpoint.Add("AutoShutdown/$($spec.Name):created-and-verified")
+        }
+        else { $checkpoint.Add("AutoShutdown/$($spec.Name):matched") }
+    }
+    [pscustomobject][ordered]@{ Completed = $true; Checkpoint = $checkpoint.ToArray(); Schedules = $specs }
+}
+
+function Get-DefaultWorkshopStopOperationSet {
+    [CmdletBinding()]
+    param()
+
+    @{
+        SetContext = {
+            param($SubscriptionId, $TenantId)
+            $parameters = @{ SubscriptionId = $SubscriptionId; ErrorAction = 'Stop' }
+            if (-not [string]::IsNullOrWhiteSpace($TenantId)) { $parameters.Tenant = $TenantId }
+            Set-AzContext @parameters
+        }
+        GetVm = {
+            param($Name, $ResourceGroupName)
+            Get-AzVM -ResourceGroupName $ResourceGroupName -Name $Name -ErrorAction Stop
+        }
+        StopVm = {
+            param($Name, $ResourceGroupName)
+            Stop-AzVM -ResourceGroupName $ResourceGroupName -Name $Name -Force -ErrorAction Stop
+        }
+        GetPowerState = {
+            param($Name, $ResourceGroupName)
+            $vm = Get-AzVM -ResourceGroupName $ResourceGroupName -Name $Name -Status -ErrorAction Stop
+            [string] @($vm.Statuses | Where-Object Code -Like 'PowerState/*' | Select-Object -First 1).Code
+        }
+    }
+}
+
+function Stop-WorkshopEnvironment {
+    [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'High')]
+    param(
+        [Parameter(Mandatory)][hashtable] $Config,
+        [Parameter(Mandatory)][ValidateNotNullOrEmpty()][string] $SubscriptionId,
+        [ValidateNotNullOrEmpty()][string] $TenantId,
+        [hashtable] $Operations
+    )
+
+    if ($null -eq $Operations) { $Operations = Get-DefaultWorkshopStopOperationSet }
+    foreach ($name in @('SetContext', 'GetVm', 'StopVm', 'GetPowerState')) {
+        if (-not $Operations.ContainsKey($name) -or $Operations[$name] -isnot [scriptblock]) {
+            throw "Operations must provide scriptblock '$name'."
+        }
+    }
+    $null = & $Operations.SetContext $SubscriptionId $TenantId
+    $errors = [System.Collections.Generic.List[string]]::new()
+    $checkpoint = [System.Collections.Generic.List[string]]::new()
+    foreach ($vmName in @($Config.AdminVm.Name, $Config.SqlVm.Name)) {
+        try {
+            $vm = & $Operations.GetVm $vmName $Config.ResourceGroupName
+            $expectedId = Get-WorkshopComputeResourceId -SubscriptionId $SubscriptionId `
+                -ResourceGroupName $Config.ResourceGroupName -ResourceType 'virtualMachines' -Name $vmName
+            $actualId = if ($null -eq $vm) { '' } else { [string] $vm.Id }
+            if ((ConvertTo-WorkshopComparableValue $actualId) -cne (ConvertTo-WorkshopComparableValue $expectedId)) {
+                throw "VM '$vmName' did not have the approved full resource ID."
+            }
+            if ($PSCmdlet.ShouldProcess($actualId, 'Deallocate workshop VM')) {
+                $null = & $Operations.StopVm $vmName $Config.ResourceGroupName
+                $powerState = [string] (& $Operations.GetPowerState $vmName $Config.ResourceGroupName)
+                if ($powerState -cne 'PowerState/deallocated') {
+                    throw "VM '$vmName' power state '$powerState' was not PowerState/deallocated."
+                }
+                $checkpoint.Add("VirtualMachine/$vmName:deallocated-and-verified")
+            }
+        }
+        catch {
+            $errors.Add((ConvertTo-WorkshopSafeDetail -Value $_.Exception.Message))
+        }
+    }
+    if ($errors.Count -gt 0) { throw "Workshop VM deallocation failed: $($errors -join '; ')" }
+    [pscustomobject][ordered]@{ Completed = $true; Checkpoint = $checkpoint.ToArray() }
+}
+
+function Wait-WorkshopResourceGroupRemoval {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string] $Name,
+        [Parameter(Mandatory)][ValidateRange(1, 100)][int] $MaximumAttempts,
+        [Parameter(Mandatory)][scriptblock] $ReadOperation,
+        [Parameter(Mandatory)][scriptblock] $WaitOperation
+    )
+
+    for ($attempt = 1; $attempt -le $MaximumAttempts; $attempt++) {
+        $state = [string] (& $ReadOperation $Name)
+        if ($state -ceq 'NotFound') { return $true }
+        if ($state -cne 'Found') {
+            throw "Resource group removal read returned unexpected state '$state'."
+        }
+        if ($attempt -lt $MaximumAttempts) { $null = & $WaitOperation }
+    }
+    $false
+}
+
+function Get-DefaultWorkshopRemoveOperationSet {
+    [CmdletBinding()]
+    param()
+
+    @{
+        SetContext = {
+            param($SubscriptionId, $TenantId)
+            $parameters = @{ SubscriptionId = $SubscriptionId; ErrorAction = 'Stop' }
+            if (-not [string]::IsNullOrWhiteSpace($TenantId)) { $parameters.Tenant = $TenantId }
+            Set-AzContext @parameters
+        }
+        GetResourceGroup = {
+            param($Name)
+            try {
+                [pscustomobject]@{ Status = 'Found'; ResourceGroup = Get-AzResourceGroup -Name $Name -ErrorAction Stop }
+            }
+            catch {
+                if (Test-WorkshopAzureNotFound -ErrorRecord $_) {
+                    return [pscustomobject]@{ Status = 'NotFound'; ResourceGroup = $null }
+                }
+                throw
+            }
+        }
+        RemoveResourceGroup = {
+            param($Name)
+            Remove-AzResourceGroup -Name $Name -Force -ErrorAction Stop
+        }
+        WaitForRemoval = {
+            param($Name, $MaximumAttempts)
+            $readOperation = {
+                param($ResourceGroupName)
+                try {
+                    $null = Get-AzResourceGroup -Name $ResourceGroupName -ErrorAction Stop
+                    'Found'
+                }
+                catch {
+                    if (Test-WorkshopAzureNotFound -ErrorRecord $_) { return 'NotFound' }
+                    throw
+                }
+            }
+            Wait-WorkshopResourceGroupRemoval -Name $Name -MaximumAttempts $MaximumAttempts `
+                -ReadOperation $readOperation -WaitOperation { [System.Threading.Thread]::Sleep(3000) }
+        }
+        GetTaggedResources = {
+            param($Environment, $Workload)
+            @(Get-AzResource -TagName environment -TagValue $Environment -ErrorAction Stop | Where-Object {
+                $null -ne $_.Tags -and $_.Tags['workload'] -eq $Workload
+            })
+        }
+    }
+}
+
+function Remove-WorkshopEnvironment {
+    [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'High')]
+    param(
+        [Parameter(Mandatory)][hashtable] $Config,
+        [Parameter(Mandatory)][ValidateNotNullOrEmpty()][string] $SubscriptionId,
+        [ValidateNotNullOrEmpty()][string] $TenantId,
+        [Parameter(Mandatory)][ValidateNotNullOrEmpty()][string] $ConfirmationPhrase,
+        [ValidateRange(1, 100)][int] $MaximumAttempts = 40,
+        [hashtable] $Operations
+    )
+
+    $requiredPhrase = "DELETE $($Config.ResourceGroupName)"
+    if ($ConfirmationPhrase -cne $requiredPhrase -or $requiredPhrase -cne 'DELETE rg-mcp-sql-workshop') {
+        throw "Removal confirmation phrase must be exactly 'DELETE rg-mcp-sql-workshop'."
+    }
+    if ($null -eq $Operations) { $Operations = Get-DefaultWorkshopRemoveOperationSet }
+    foreach ($name in @('SetContext', 'GetResourceGroup', 'RemoveResourceGroup', 'WaitForRemoval', 'GetTaggedResources')) {
+        if (-not $Operations.ContainsKey($name) -or $Operations[$name] -isnot [scriptblock]) {
+            throw "Operations must provide scriptblock '$name'."
+        }
+    }
+    $null = & $Operations.SetContext $SubscriptionId $TenantId
+    $read = & $Operations.GetResourceGroup $Config.ResourceGroupName
+    if ($null -eq $read -or $read.Status -cne 'Found' -or $null -eq $read.ResourceGroup) {
+        throw "Target resource group '$($Config.ResourceGroupName)' was not positively read before removal."
+    }
+    $resourceGroup = $read.ResourceGroup
+    $expectedId = "/subscriptions/$SubscriptionId/resourceGroups/$($Config.ResourceGroupName)"
+    if ($resourceGroup.ResourceGroupName -cne $Config.ResourceGroupName -or
+        (ConvertTo-WorkshopComparableValue $resourceGroup.ResourceId) -cne (ConvertTo-WorkshopComparableValue $expectedId) -or
+        $null -eq $resourceGroup.Tags -or $resourceGroup.Tags['environment'] -cne 'workshop' -or
+        $resourceGroup.Tags['workload'] -cne 'mcp-sql') {
+        throw 'Target resource group name, subscription-qualified ID, or required workshop tags did not match.'
+    }
+    if (-not $PSCmdlet.ShouldProcess($expectedId, 'Permanently remove the workshop resource group')) {
+        return [pscustomobject][ordered]@{ Completed = $false; Checkpoint = @('ShouldProcess declined') }
+    }
+    $null = & $Operations.RemoveResourceGroup $Config.ResourceGroupName
+    if (-not (& $Operations.WaitForRemoval $Config.ResourceGroupName $MaximumAttempts)) {
+        throw "Resource group deletion did not reach NotFound within $MaximumAttempts checks."
+    }
+    $postRead = & $Operations.GetResourceGroup $Config.ResourceGroupName
+    if ($null -eq $postRead -or $postRead.Status -cne 'NotFound' -or $null -ne $postRead.ResourceGroup) {
+        throw 'Resource group deletion was not verified by an explicit NotFound read.'
+    }
+    $remaining = @(& $Operations.GetTaggedResources 'workshop' 'mcp-sql')
+    if ($remaining.Count -gt 0) {
+        throw "Tagged workshop resource absence verification failed; $($remaining.Count) resource(s) remain."
+    }
+    [pscustomobject][ordered]@{
+        Completed = $true
+        Checkpoint = @('Resource group removal requested', 'Resource group NotFound verified', 'Tagged resource absence verified')
+    }
+}
+
 Export-ModuleMember -Function @(
     'Assert-WorkshopHostCidr'
     'New-WorkshopNetworkModel'
     'New-WorkshopNetwork'
+    'Resolve-WorkshopImageVersion'
+    'New-WorkshopAdminVm'
+    'New-WorkshopSqlVm'
+    'Register-WorkshopSqlIaas'
+    'Set-WorkshopAutoShutdown'
+    'Stop-WorkshopEnvironment'
+    'Remove-WorkshopEnvironment'
     'Get-WorkshopPlan'
     'Test-WorkshopPrerequisites'
     'Test-WorkshopNetworkBoundary'
+    'Test-WorkshopVmBoundary'
     'Format-WorkshopPlanCard'
 )
