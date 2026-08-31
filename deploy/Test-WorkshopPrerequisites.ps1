@@ -16,7 +16,10 @@ param(
 
     [switch] $WindowsClientLicenseAttested,
 
-    [switch] $SqlEnterpriseCostAcknowledged
+    [switch] $SqlEnterpriseCostAcknowledged,
+
+    [Parameter(Mandatory)]
+    [switch] $BillableResourcesAcknowledged
 )
 
 Set-StrictMode -Version Latest
@@ -34,6 +37,7 @@ $parameters = @{
     ExpiresOn = $ExpiresOn
     WindowsClientLicenseAttested = $WindowsClientLicenseAttested.IsPresent
     SqlEnterpriseCostAcknowledged = $SqlEnterpriseCostAcknowledged.IsPresent
+    BillableResourcesAcknowledged = $BillableResourcesAcknowledged.IsPresent
 }
 if ($PSBoundParameters.ContainsKey('TenantId')) {
     $parameters.TenantId = $TenantId

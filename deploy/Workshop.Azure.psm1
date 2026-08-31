@@ -221,6 +221,7 @@ function Get-WorkshopPlan {
         [Parameter(Mandatory)][datetime] $ExpiresOn,
         [Parameter(Mandatory)][bool] $WindowsClientLicenseAttested,
         [Parameter(Mandatory)][bool] $SqlEnterpriseCostAcknowledged,
+        [Parameter(Mandatory)][bool] $BillableResourcesAcknowledged,
         [hashtable] $ResolvedImages
     )
 
@@ -284,17 +285,20 @@ function Get-WorkshopPlan {
         }
         Pricing = [pscustomobject][ordered]@{
             Queried = $false
-            Status = 'Pricing not queried'
+            Status = 'Pricing was not queried'
+            BillableResourcesAcknowledged = $BillableResourcesAcknowledged
             BillableCategories = @(
+                'Windows client compute and license entitlement responsibility'
                 'Administration VM compute'
                 'SQL VM compute'
-                'SQL Server Enterprise PAYG license'
+                'SQL Server Enterprise PAYG'
                 'Managed OS, data, and log disks'
-                'Public IPv4 addresses for administration ingress and NAT egress'
+                'Standard public IP for administration ingress'
+                'Standard public IP for NAT egress'
                 'NAT Gateway hourly usage'
                 'NAT Gateway data processing'
-                'Bandwidth and internet egress'
-                'Private DNS zone and queries'
+                'Outbound data transfer'
+                'Private DNS zone and query charges'
             )
         }
         Tags = [pscustomobject][ordered]@{
@@ -330,6 +334,7 @@ function Format-WorkshopPlanCard {
         $lines.Add("SQL ingress: $($Plan.PublicBoundary.SqlIngress)")
         $lines.Add("Windows client license attested: $($Plan.AdminVm.WindowsClientLicenseAttested)")
         $lines.Add("SQL Enterprise PAYG acknowledged: $($Plan.SqlVm.SqlEnterpriseCostAcknowledged)")
+        $lines.Add("All billable categories acknowledged: $($Plan.Pricing.BillableResourcesAcknowledged)")
         $lines.Add("Pricing queried: $($Plan.Pricing.Queried) - $($Plan.Pricing.Status)")
         $lines.Add('Billable categories:')
         foreach ($category in $Plan.Pricing.BillableCategories) {
@@ -408,6 +413,89 @@ function Test-WorkshopLocationMatch {
     } | Select-Object -First 1)
 }
 
+function ConvertTo-WorkshopSafeDetail {
+    [CmdletBinding()]
+    param(
+        [AllowNull()]
+        [object] $Value,
+
+        [string] $Fallback = 'Validation could not be verified.'
+    )
+
+    if ($null -eq $Value) {
+        return $Fallback
+    }
+    $text = [string] $Value
+    $text = [regex]::Replace($text, '[\x00-\x1F\x7F]+', ' ').Trim()
+    if ([string]::IsNullOrWhiteSpace($text)) {
+        return $Fallback
+    }
+    if ($text.Length -gt 1000) {
+        return $text.Substring(0, 1000) + '...'
+    }
+    return $text
+}
+
+function Get-WorkshopNetworkSkuValidationTemplate {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][ValidateNotNullOrEmpty()][string] $Location,
+        [Parameter(Mandatory)][ValidatePattern('^[a-f0-9]{12}$')][string] $Suffix
+    )
+
+    $resourceGroupName = "rg-mcpsql-sku-$Suffix"
+    $nestedTemplate = [ordered]@{
+        '$schema' = 'https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#'
+        contentVersion = '1.0.0.0'
+        resources = @(
+            [ordered]@{
+                type = 'Microsoft.Network/publicIPAddresses'
+                apiVersion = '2024-05-01'
+                name = "pip-sku-$Suffix"
+                location = $Location
+                sku = [ordered]@{ name = 'Standard' }
+                properties = [ordered]@{
+                    publicIPAllocationMethod = 'Static'
+                    publicIPAddressVersion = 'IPv4'
+                }
+            }
+            [ordered]@{
+                type = 'Microsoft.Network/natGateways'
+                apiVersion = '2024-05-01'
+                name = "nat-sku-$Suffix"
+                location = $Location
+                sku = [ordered]@{ name = 'Standard' }
+                properties = [ordered]@{ idleTimeoutInMinutes = 10 }
+            }
+        )
+    }
+
+    [ordered]@{
+        '$schema' = 'https://schema.management.azure.com/schemas/2018-05-01/subscriptionDeploymentTemplate.json#'
+        contentVersion = '1.0.0.0'
+        resources = @(
+            [ordered]@{
+                type = 'Microsoft.Resources/resourceGroups'
+                apiVersion = '2022-09-01'
+                name = $resourceGroupName
+                location = $Location
+            }
+            [ordered]@{
+                type = 'Microsoft.Resources/deployments'
+                apiVersion = '2022-09-01'
+                name = "network-sku-$Suffix"
+                resourceGroup = $resourceGroupName
+                dependsOn = @("[subscriptionResourceId('Microsoft.Resources/resourceGroups', '$resourceGroupName')]")
+                properties = [ordered]@{
+                    mode = 'Incremental'
+                    expressionEvaluationOptions = [ordered]@{ scope = 'inner' }
+                    template = $nestedTemplate
+                }
+            }
+        )
+    }
+}
+
 function Get-DefaultWorkshopOperationSet {
     [CmdletBinding()]
     param()
@@ -424,6 +512,38 @@ function Get-DefaultWorkshopOperationSet {
             Get-AzVMImage -PublisherName $Publisher -Offer $Offer -Skus $Sku -Location $Location
         }
         GetVmUsages = { param($Location) Get-AzVMUsage -Location $Location }
+        TestNetworkSkuDeployment = {
+            param($Location)
+            $suffix = [guid]::NewGuid().ToString('N').Substring(0, 12)
+            $template = Get-WorkshopNetworkSkuValidationTemplate -Location $Location -Suffix $suffix
+            $validationCommand = 'Test-Az' + 'SubscriptionDeployment'
+            $validationOutput = @(
+                & $validationCommand -Name "mcpsql-sku-$Suffix" -Location $Location `
+                    -TemplateObject $template -ErrorAction Stop
+            )
+            $validationErrors = @(
+                foreach ($item in $validationOutput) {
+                    if ($null -eq $item) {
+                        continue
+                    }
+                    if ($item.PSObject.Properties.Name -contains 'Message') {
+                        ConvertTo-WorkshopSafeDetail -Value $item.Message
+                    }
+                    elseif ($item.PSObject.Properties.Name -contains 'Error') {
+                        ConvertTo-WorkshopSafeDetail -Value $item.Error
+                    }
+                    else {
+                        ConvertTo-WorkshopSafeDetail -Value $item
+                    }
+                }
+            )
+            $validated = $validationErrors.Count -eq 0
+            [pscustomobject][ordered]@{
+                PublicIpStandardAvailable = $validated
+                NatGatewayStandardAvailable = $validated
+                Errors = $validationErrors
+            }
+        }
         FindResourceGroup = { param($Name) Get-AzResourceGroup -Name $Name -ErrorAction SilentlyContinue }
         FindResources = {
             param($Names, $ResourceGroupName)
@@ -442,6 +562,7 @@ ${function:Test-WorkshopPrerequisites} = {
         [Parameter(Mandatory)][ValidateNotNullOrEmpty()][string] $FacilitatorCidr,
         [Parameter(Mandatory)][bool] $WindowsClientLicenseAttested,
         [Parameter(Mandatory)][bool] $SqlEnterpriseCostAcknowledged,
+        [Parameter(Mandatory)][bool] $BillableResourcesAcknowledged,
         [Parameter(Mandatory)][datetime] $ExpiresOn,
         [hashtable] $Operations
     )
@@ -453,7 +574,7 @@ ${function:Test-WorkshopPrerequisites} = {
     $requiredOperations = @(
         'GetPowerShellVersion', 'GetModules', 'GetContext', 'GetProviders',
         'GetLocations', 'GetComputeSkus', 'GetImages', 'GetVmUsages',
-        'FindResourceGroup', 'FindResources'
+        'TestNetworkSkuDeployment', 'FindResourceGroup', 'FindResources'
     )
     foreach ($operationName in $requiredOperations) {
         if (-not $Operations.ContainsKey($operationName) -or $Operations[$operationName] -isnot [scriptblock]) {
@@ -613,6 +734,45 @@ ${function:Test-WorkshopPrerequisites} = {
             -Remediation "Confirm $($requirement.Provider)/$($requirement.Type) supports $($Config.Location), then rerun preflight."
     }
 
+    $networkSkuResult = Invoke-WorkshopReadOperation -Operation $Operations.TestNetworkSkuDeployment -Arguments @($Config.Location)
+    $networkSkuValidation = if ($networkSkuResult.Succeeded -and $networkSkuResult.Value.Count -eq 1) {
+        $networkSkuResult.Value[0]
+    }
+    else {
+        $null
+    }
+    $networkSkuShapeValid = $null -ne $networkSkuValidation -and
+        $networkSkuValidation.PSObject.Properties.Name -contains 'PublicIpStandardAvailable' -and
+        $networkSkuValidation.PublicIpStandardAvailable -is [bool] -and
+        $networkSkuValidation.PSObject.Properties.Name -contains 'NatGatewayStandardAvailable' -and
+        $networkSkuValidation.NatGatewayStandardAvailable -is [bool]
+    $networkSkuErrors = @()
+    if (-not $networkSkuResult.Succeeded) {
+        $networkSkuErrors = @(ConvertTo-WorkshopSafeDetail -Value $networkSkuResult.Error)
+    }
+    elseif (-not $networkSkuShapeValid) {
+        $networkSkuErrors = @('Validation returned no verifiable exact-SKU result.')
+    }
+    elseif ($networkSkuValidation.PSObject.Properties.Name -contains 'Errors') {
+        $networkSkuErrors = @($networkSkuValidation.Errors | ForEach-Object { ConvertTo-WorkshopSafeDetail -Value $_ })
+    }
+    $networkSkuErrorDetail = if ($networkSkuErrors.Count -gt 0) {
+        $networkSkuErrors -join '; '
+    }
+    else {
+        'No validation errors were returned.'
+    }
+    $publicIpStandardPassed = $networkSkuShapeValid -and $networkSkuValidation.PublicIpStandardAvailable -and
+        $networkSkuErrors.Count -eq 0
+    $natGatewayStandardPassed = $networkSkuShapeValid -and $networkSkuValidation.NatGatewayStandardAvailable -and
+        $networkSkuErrors.Count -eq 0
+    Add-WorkshopCheck -Checks $checks -Name 'Network SKU Standard public IP' -Passed $publicIpStandardPassed `
+        -Detail "Subscription deployment validation for Standard, Static IPv4 public IP in $($Config.Location). $networkSkuErrorDetail This validates schema, SKU, and location, not capacity." `
+        -Remediation 'Confirm the Standard public IP SKU validates in the approved subscription and region.'
+    Add-WorkshopCheck -Checks $checks -Name 'Network SKU Standard NAT Gateway' -Passed $natGatewayStandardPassed `
+        -Detail "Subscription deployment validation for Standard NAT Gateway in $($Config.Location). $networkSkuErrorDetail This validates schema, SKU, and location, not capacity." `
+        -Remediation 'Confirm the Standard NAT Gateway SKU validates in the approved subscription and region.'
+
     foreach ($role in @('Admin', 'Sql')) {
         $vm = if ($role -eq 'Admin') { $Config.AdminVm } else { $Config.SqlVm }
         $imageResult = Invoke-WorkshopReadOperation -Operation $Operations.GetImages -Arguments @($vm.Publisher, $vm.Offer, $vm.Sku, $Config.Location)
@@ -716,6 +876,10 @@ ${function:Test-WorkshopPrerequisites} = {
     Add-WorkshopCheck -Checks $checks -Name 'SQL Enterprise PAYG acknowledgement' -Passed $SqlEnterpriseCostAcknowledged `
         -Detail 'The approved SQL Server 2022 Enterprise image uses PAYG licensing.' `
         -Remediation 'Acknowledge SQL Server Enterprise PAYG cost before deployment.'
+    $billableCategoryDetail = 'Windows client compute and license entitlement responsibility; Administration VM compute; SQL VM compute; SQL Server Enterprise PAYG; managed OS, data, and log disks; two Standard public IP resources for administration ingress and NAT egress; NAT Gateway hourly usage and data processing; outbound data transfer; Private DNS zone and query charges. Pricing was not queried.'
+    Add-WorkshopCheck -Checks $checks -Name 'All billable resource categories acknowledged' -Passed $BillableResourcesAcknowledged `
+        -Detail $billableCategoryDetail `
+        -Remediation 'Review and acknowledge every listed billable resource category before deployment.'
 
     $today = (Get-Date).Date
     $expirationDate = $ExpiresOn.Date
@@ -727,7 +891,8 @@ ${function:Test-WorkshopPrerequisites} = {
     if ($validCidr) {
         $plan = Get-WorkshopPlan -Config $Config -FacilitatorCidr $FacilitatorCidr -ExpiresOn $ExpiresOn `
             -WindowsClientLicenseAttested $WindowsClientLicenseAttested `
-            -SqlEnterpriseCostAcknowledged $SqlEnterpriseCostAcknowledged -ResolvedImages $resolvedImages
+            -SqlEnterpriseCostAcknowledged $SqlEnterpriseCostAcknowledged `
+            -BillableResourcesAcknowledged $BillableResourcesAcknowledged -ResolvedImages $resolvedImages
     }
 
     [pscustomobject][ordered]@{

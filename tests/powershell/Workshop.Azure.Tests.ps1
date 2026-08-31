@@ -83,6 +83,15 @@ BeforeAll {
                     [pscustomobject]@{ Name = [pscustomobject]@{ Value = 'standardESv5Family'; LocalizedValue = 'Standard ESv5 Family vCPUs' }; CurrentValue = 4; Limit = 20 }
                 )
             }
+            TestNetworkSkuDeployment = {
+                param($Location)
+                $null = $Location
+                [pscustomobject]@{
+                    PublicIpStandardAvailable = $true
+                    NatGatewayStandardAvailable = $true
+                    Errors = @()
+                }
+            }
             FindResourceGroup = { param($Name) $null = $Name; return $null }
             FindResources = { param($Names, $ResourceGroupName) $null = $Names, $ResourceGroupName; return @() }
         }
@@ -96,6 +105,7 @@ BeforeAll {
             -FacilitatorCidr '203.0.113.8/32' `
             -WindowsClientLicenseAttested $true `
             -SqlEnterpriseCostAcknowledged $true `
+            -BillableResourcesAcknowledged $true `
             -ExpiresOn (Get-Date).Date.AddDays(2) `
             -Operations $Operations
     }
@@ -215,6 +225,7 @@ Describe 'Workshop plan and card' {
             ExpiresOn = [datetime]'2026-09-02T00:00:00Z'
             WindowsClientLicenseAttested = $true
             SqlEnterpriseCostAcknowledged = $true
+            BillableResourcesAcknowledged = $true
         }
         $first = Get-WorkshopPlan @parameters
         $second = Get-WorkshopPlan @parameters
@@ -231,7 +242,7 @@ Describe 'Workshop plan and card' {
     }
 
     It 'returns a deep copy independent of configuration' {
-        $plan = Get-WorkshopPlan -Config $script:Config -FacilitatorCidr '203.0.113.8/32' -ExpiresOn ([datetime]'2026-09-02') -WindowsClientLicenseAttested $true -SqlEnterpriseCostAcknowledged $true
+        $plan = Get-WorkshopPlan -Config $script:Config -FacilitatorCidr '203.0.113.8/32' -ExpiresOn ([datetime]'2026-09-02') -WindowsClientLicenseAttested $true -SqlEnterpriseCostAcknowledged $true -BillableResourcesAcknowledged $true
         $plan.Tags.environment = 'changed'
         $plan.AdminVm.Image.Sku = 'changed'
         $script:Config.Tags.environment | Should -Be 'workshop'
@@ -239,12 +250,12 @@ Describe 'Workshop plan and card' {
     }
 
     It 'preserves date-only expiration semantics regardless of local time zone' {
-        $plan = Get-WorkshopPlan -Config $script:Config -FacilitatorCidr '203.0.113.8/32' -ExpiresOn ([datetime]'2026-09-02') -WindowsClientLicenseAttested $true -SqlEnterpriseCostAcknowledged $true
+        $plan = Get-WorkshopPlan -Config $script:Config -FacilitatorCidr '203.0.113.8/32' -ExpiresOn ([datetime]'2026-09-02') -WindowsClientLicenseAttested $true -SqlEnterpriseCostAcknowledged $true -BillableResourcesAcknowledged $true
         $plan.Tags.expiresOn | Should -Be '2026-09-02'
     }
 
     It 'formats a deterministic plan card with boundaries, costs, and attestations' {
-        $plan = Get-WorkshopPlan -Config $script:Config -FacilitatorCidr '203.0.113.8/32' -ExpiresOn ([datetime]'2026-09-02') -WindowsClientLicenseAttested $true -SqlEnterpriseCostAcknowledged $true
+        $plan = Get-WorkshopPlan -Config $script:Config -FacilitatorCidr '203.0.113.8/32' -ExpiresOn ([datetime]'2026-09-02') -WindowsClientLicenseAttested $true -SqlEnterpriseCostAcknowledged $true -BillableResourcesAcknowledged $true
         $first = Format-WorkshopPlanCard -Plan $plan
         $second = Format-WorkshopPlanCard -Plan $plan
         $first | Should -BeExactly $second
@@ -253,6 +264,7 @@ Describe 'Workshop plan and card' {
         $first | Should -Match 'SQL ingress: Admin ASG to SQL ASG TCP 1433'
         $first | Should -Match 'Windows client license attested: True'
         $first | Should -Match 'SQL Enterprise PAYG acknowledged: True'
+        $first | Should -Match 'All billable categories acknowledged: True'
         $first | Should -Match 'VNet: vnet-mcpsql-workshop 10\.20\.0\.0/16'
         $first | Should -Match 'Admin subnet: snet-admin 10\.20\.1\.0/24; private: True; default outbound: False; NAT required: True'
         $first | Should -Match 'SQL subnet: snet-sql 10\.20\.2\.0/24; private: True; default outbound: False; NAT required: True'
@@ -266,6 +278,21 @@ Describe 'Workshop plan and card' {
             $first | Should -Match ([regex]::Escape($category))
         }
         $first | Should -Match 'Pricing queried: False'
+        $plan.Pricing.BillableResourcesAcknowledged | Should -BeTrue
+        $plan.Pricing.BillableCategories | Should -Be @(
+            'Windows client compute and license entitlement responsibility'
+            'Administration VM compute'
+            'SQL VM compute'
+            'SQL Server Enterprise PAYG'
+            'Managed OS, data, and log disks'
+            'Standard public IP for administration ingress'
+            'Standard public IP for NAT egress'
+            'NAT Gateway hourly usage'
+            'NAT Gateway data processing'
+            'Outbound data transfer'
+            'Private DNS zone and query charges'
+        )
+        $first | Should -Match 'Pricing was not queried'
     }
 }
 
@@ -307,6 +334,7 @@ Describe 'Non-destructive workshop preflight' {
             -FacilitatorCidr '203.0.113.8/32' `
             -WindowsClientLicenseAttested $true `
             -SqlEnterpriseCostAcknowledged $true `
+            -BillableResourcesAcknowledged $true `
             -ExpiresOn (Get-Date).Date.AddDays(2) `
             -Operations $ops
 
@@ -391,6 +419,132 @@ Describe 'Non-destructive workshop preflight' {
             Should -Be "Provider metadata confirms location 'indonesiacentral'; deployment requires SKU 'Standard', whose exact regional listing is not asserted by this metadata."
     }
 
+    It 'requires exact Standard network SKU validation separately from provider location metadata' {
+        $result = Invoke-PassingPreflight
+        ($result.Checks | Where-Object Name -EQ 'Network SKU Standard public IP').Status | Should -Be 'Passed'
+        ($result.Checks | Where-Object Name -EQ 'Network SKU Standard NAT Gateway').Status | Should -Be 'Passed'
+
+        $ops = Get-PassingOperationSet
+        $ops.TestNetworkSkuDeployment = {
+            [pscustomobject]@{
+                PublicIpStandardAvailable = $false
+                NatGatewayStandardAvailable = $true
+                Errors = @()
+            }
+        }
+        $failed = Invoke-PassingPreflight -Operations $ops
+        ($failed.Checks | Where-Object Name -EQ 'Resource type Microsoft.Network/publicIPAddresses').Status | Should -Be 'Passed'
+        ($failed.Checks | Where-Object Name -EQ 'Resource type Microsoft.Network/natGateways').Status | Should -Be 'Passed'
+        ($failed.Checks | Where-Object Name -EQ 'Network SKU Standard public IP').Status | Should -Be 'Failed'
+        ($failed.Checks | Where-Object Name -EQ 'Network SKU Standard NAT Gateway').Status | Should -Be 'Passed'
+
+        $ops.TestNetworkSkuDeployment = {
+            [pscustomobject]@{
+                PublicIpStandardAvailable = $true
+                NatGatewayStandardAvailable = $false
+                Errors = @()
+            }
+        }
+        $failed = Invoke-PassingPreflight -Operations $ops
+        ($failed.Checks | Where-Object Name -EQ 'Network SKU Standard public IP').Status | Should -Be 'Passed'
+        ($failed.Checks | Where-Object Name -EQ 'Network SKU Standard NAT Gateway').Status | Should -Be 'Failed'
+    }
+
+    It 'fails both exact network SKU checks when validation exposes errors despite true flags' {
+        $ops = Get-PassingOperationSet
+        $ops.TestNetworkSkuDeployment = {
+            [pscustomobject]@{
+                PublicIpStandardAvailable = $true
+                NatGatewayStandardAvailable = $true
+                Errors = @("invalid SKU`ndetail")
+            }
+        }
+
+        $result = Invoke-PassingPreflight -Operations $ops
+        $result.Passed | Should -BeFalse
+        foreach ($name in @('Network SKU Standard public IP', 'Network SKU Standard NAT Gateway')) {
+            $check = $result.Checks | Where-Object Name -EQ $name
+            $check.Status | Should -Be 'Failed'
+            $check.Detail | Should -Match 'invalid SKU detail'
+            $check.Detail | Should -Not -Match "[`r`n]"
+        }
+    }
+
+    It 'fails both exact network SKU checks when validation throws or is unverifiable' -ForEach @('throws', 'null') {
+        $ops = Get-PassingOperationSet
+        if ($_ -eq 'throws') {
+            $ops.TestNetworkSkuDeployment = { throw "validation failed`nwith unsafe formatting" }
+        }
+        else {
+            $ops.TestNetworkSkuDeployment = { return $null }
+        }
+
+        { $script:Result = Invoke-PassingPreflight -Operations $ops } | Should -Not -Throw
+        $script:Result.Passed | Should -BeFalse
+        foreach ($name in @('Network SKU Standard public IP', 'Network SKU Standard NAT Gateway')) {
+            $check = $script:Result.Checks | Where-Object Name -EQ $name
+            $check.Status | Should -Be 'Failed'
+            $check.Detail | Should -Not -Match "[`r`n]"
+        }
+    }
+
+    It 'builds the exact in-memory subscription validation template and uses validation only' {
+        InModuleScope Workshop.Azure {
+            $script:CapturedTemplate = $null
+            $script:CapturedLocation = $null
+            $script:CapturedName = $null
+            Mock Test-AzSubscriptionDeployment {
+                $script:CapturedTemplate = $TemplateObject
+                $script:CapturedLocation = $Location
+                $script:CapturedName = $Name
+                return $null
+            }
+
+            $operations = Get-DefaultWorkshopOperationSet
+            $result = & $operations.TestNetworkSkuDeployment 'indonesiacentral'
+
+            $result.PublicIpStandardAvailable | Should -BeTrue
+            $result.NatGatewayStandardAvailable | Should -BeTrue
+            $script:CapturedLocation | Should -Be 'indonesiacentral'
+            $script:CapturedName | Should -Match '^mcpsql-sku-[a-f0-9]{12}$'
+            $script:CapturedTemplate.'$schema' | Should -Be 'https://schema.management.azure.com/schemas/2018-05-01/subscriptionDeploymentTemplate.json#'
+            $script:CapturedTemplate.resources.Count | Should -Be 2
+            ($script:CapturedTemplate.resources | Where-Object type -EQ 'Microsoft.Resources/resourceGroups').location | Should -Be 'indonesiacentral'
+            $nestedDeployment = $script:CapturedTemplate.resources | Where-Object type -EQ 'Microsoft.Resources/deployments'
+            $nestedDeployment.resourceGroup | Should -Match '^rg-mcpsql-sku-[a-f0-9]{12}$'
+            $nestedDeployment.properties.mode | Should -Be 'Incremental'
+            $nestedDeployment.properties.template.'$schema' | Should -Be 'https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#'
+            $publicIp = $nestedDeployment.properties.template.resources | Where-Object type -EQ 'Microsoft.Network/publicIPAddresses'
+            $publicIp.location | Should -Be 'indonesiacentral'
+            $publicIp.sku.name | Should -Be 'Standard'
+            $publicIp.properties.publicIPAllocationMethod | Should -Be 'Static'
+            $publicIp.properties.publicIPAddressVersion | Should -Be 'IPv4'
+            $natGateway = $nestedDeployment.properties.template.resources | Where-Object type -EQ 'Microsoft.Network/natGateways'
+            $natGateway.location | Should -Be 'indonesiacentral'
+            $natGateway.sku.name | Should -Be 'Standard'
+            Should -Invoke Test-AzSubscriptionDeployment -Times 1 -Exactly
+        }
+    }
+
+    It 'aggregates a false all-billable-categories acknowledgement without hiding other failures' {
+        $result = Test-WorkshopPrerequisites -Config $script:Config `
+            -SubscriptionId '11111111-1111-1111-1111-111111111111' `
+            -FacilitatorCidr '203.0.113.8/32' `
+            -WindowsClientLicenseAttested $false `
+            -SqlEnterpriseCostAcknowledged $false `
+            -BillableResourcesAcknowledged $false `
+            -ExpiresOn (Get-Date).Date.AddDays(2) `
+            -Operations (Get-PassingOperationSet)
+
+        $result.Passed | Should -BeFalse
+        $failedNames = @($result.Checks | Where-Object Status -EQ 'Failed' | ForEach-Object Name)
+        $failedNames | Should -Contain 'Windows client license attestation'
+        $failedNames | Should -Contain 'SQL Enterprise PAYG acknowledgement'
+        $failedNames | Should -Contain 'All billable resource categories acknowledged'
+        ($result.Checks | Where-Object Name -EQ 'All billable resource categories acknowledged').Detail |
+            Should -Match 'Windows client compute and license entitlement responsibility.*Administration VM compute.*SQL VM compute.*SQL Server Enterprise PAYG.*managed OS, data, and log disks.*two Standard public IP resources.*NAT Gateway hourly usage and data processing.*outbound data transfer.*Private DNS zone and query charges.*Pricing was not queried'
+    }
+
     It 'fails a restricted managed disk SKU and missing resource-type locations without throwing' {
         $ops = Get-PassingOperationSet
         $ops.GetComputeSkus = {
@@ -441,6 +595,7 @@ Describe 'Non-destructive workshop preflight' {
             -FacilitatorCidr '10.1.2.3/32' `
             -WindowsClientLicenseAttested $false `
             -SqlEnterpriseCostAcknowledged $false `
+            -BillableResourcesAcknowledged $false `
             -ExpiresOn (Get-Date).Date.AddDays(8) `
             -Operations $ops
 
@@ -451,7 +606,8 @@ Describe 'Non-destructive workshop preflight' {
             'VM SKU Standard_D4s_v5', 'Admin VM image', 'SQL VM image',
             'Quota standardDSv5Family', 'Quota standardESv5Family',
             'Resource group collision', 'Resource name collisions', 'Facilitator CIDR',
-            'Windows client license attestation', 'SQL Enterprise PAYG acknowledgement', 'Expiration date'
+            'Windows client license attestation', 'SQL Enterprise PAYG acknowledgement',
+            'All billable resource categories acknowledged', 'Expiration date'
         )) {
             $failedNames | Should -Contain $name
         }
@@ -485,7 +641,7 @@ Describe 'Non-destructive workshop preflight' {
         foreach ($operationName in @(
             'GetPowerShellVersion', 'GetModules', 'GetContext', 'GetProviders',
             'GetLocations', 'GetComputeSkus', 'GetImages', 'GetVmUsages',
-            'FindResourceGroup', 'FindResources'
+            'TestNetworkSkuDeployment', 'FindResourceGroup', 'FindResources'
         )) {
             $ops[$operationName] = { throw 'simulated read failure' }
         }
@@ -573,5 +729,35 @@ Describe 'Static safety and module contract' {
                 ForEach-Object GetCommandName
         }
         @($commands | Where-Object { $_ -match '^(Register|New|Set|Remove|Update)-Az' }).Count | Should -Be 0
+        @($commands | Where-Object { $_ -match '-Az' -and $_ -notmatch '^Get-Az' -and $_ -ne 'Test-AzSubscriptionDeployment' }).Count | Should -Be 0
+        $commands | Should -Not -Contain 'New-AzDeployment'
+
+        $modulePath = Join-Path $PSScriptRoot '../../deploy/Workshop.Azure.psm1'
+        $tokens = $null
+        $errors = $null
+        $moduleAst = [System.Management.Automation.Language.Parser]::ParseFile($modulePath, [ref]$tokens, [ref]$errors)
+        $dynamicCommands = @($moduleAst.FindAll({
+            param($node)
+            $node -is [System.Management.Automation.Language.CommandAst] -and
+                [string]::IsNullOrWhiteSpace($node.GetCommandName())
+        }, $true) | ForEach-Object { $_.Extent.Text })
+        $dynamicCommands.Count | Should -Be 2
+        $dynamicCommands | Should -Contain '& $Operation @Arguments'
+        @($dynamicCommands | Where-Object { $_ -match '^& \$validationCommand -Name' }).Count | Should -Be 1
+        (Get-Content -LiteralPath $modulePath -Raw) | Should -Match "\`$validationCommand = 'Test-Az' \+ 'SubscriptionDeployment'"
+    }
+
+    It 'requires and forwards the billable acknowledgement in the entry script' {
+        $entryPath = Join-Path $PSScriptRoot '../../deploy/Test-WorkshopPrerequisites.ps1'
+        $tokens = $null
+        $errors = $null
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile($entryPath, [ref]$tokens, [ref]$errors)
+        $errors.Count | Should -Be 0
+        $parameter = $ast.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -eq 'BillableResourcesAcknowledged' }
+        $parameter | Should -Not -BeNullOrEmpty
+        @($parameter.Attributes.TypeName.FullName) | Should -Contain 'switch'
+        @($parameter.Attributes.TypeName.FullName) | Should -Contain 'Parameter'
+        $entryText = Get-Content -LiteralPath $entryPath -Raw
+        $entryText | Should -Match 'BillableResourcesAcknowledged\s*=\s*\$BillableResourcesAcknowledged\.IsPresent'
     }
 }
