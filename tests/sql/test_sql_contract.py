@@ -1257,30 +1257,42 @@ def test_all_four_evidence_tables_validate_exact_keys_indexes_defaults_and_check
     assert text.index("THROW 51604") < text.index("CREATE OR ALTER VIEW LAB.VW_WORKSHOPRUNSUMMARY")
 
 
-def _check_fixture_is_semantically_accepted(definition: str, required_tokens: tuple[str, ...]) -> bool:
-    canonical = re.sub(r"[\[\]()\s]", "", definition).upper()
-    return all(token.upper() in canonical for token in required_tokens)
-
-
-def test_check_validation_accepts_engine_normalization_and_rejects_semantic_drift() -> None:
-    required = ("PHASE", "'BASELINE'", "'OPTIMIZED'")
-    fixtures = (
-        ("([Phase] IN ('Baseline', 'Optimized'))", True),
-        ("([Phase]='Baseline' OR [Phase]='Optimized')", True),
-        ("([Phase]='Baseline' OR [Phase]='Comparison')", False),
-    )
-    for definition, expected in fixtures:
-        assert _check_fixture_is_semantically_accepted(definition, required) is expected
-
+def test_check_validation_uses_engine_normalized_full_definition_hashes() -> None:
     text = normalized("05-CreateDiagnostics.sql")
     assert "@EXPECTEDCHECKCOLUMNS" in text
-    assert "@EXPECTEDCHECKTOKENS" in text
     assert "SYS.SQL_EXPRESSION_DEPENDENCIES" in text
-    assert "OBJECT_DEFINITION(CC.OBJECT_ID)" in text
-    assert "REQUIRED_TOKEN" in text
     check_region = text[text.index("DECLARE @EXPECTEDCHECKS"):text.index("CREATE OR ALTER VIEW LAB.VW_WORKSHOPRUNSUMMARY")]
-    assert "SELECT * FROM @EXPECTEDCHECKS EXCEPT" not in check_region
-    assert "EXCEPT SELECT * FROM @EXPECTEDCHECKS" not in check_region
+    for expected_shape in (
+        "#EXPECTEDWORKSHOPRUNCHECKSHAPE",
+        "#EXPECTEDWORKSHOPSAMPLECHECKSHAPE",
+        "#EXPECTEDWORKSHOPREQUESTSAMPLECHECKSHAPE",
+        "#EXPECTEDVALIDATIONRUNCHECKSHAPE",
+    ):
+        assert expected_shape in check_region
+    assert "TEMPDB.SYS.CHECK_CONSTRAINTS" in check_region
+    assert "HASHBYTES(N'SHA2_256'" in check_region
+    assert "NORMALIZED_DEFINITION_HASH" in check_region
+    assert "EXPECTED_DEFINITION_HASH" in check_region
+    assert "ACTUAL_DEFINITION_HASH" in check_region
+    assert "EXCEPT" in check_region
+
+
+def test_check_validation_has_no_token_or_literal_count_acceptance_path() -> None:
+    text = normalized("05-CreateDiagnostics.sql")
+    check_region = text[text.index("DECLARE @EXPECTEDCHECKS"):text.index("CREATE OR ALTER VIEW LAB.VW_WORKSHOPRUNSUMMARY")]
+    for weak_acceptance_marker in (
+        "@EXPECTEDCHECKTOKENS",
+        "REQUIRED_TOKEN",
+        "CHARINDEX(EXPECTED.REQUIRED_TOKEN",
+        "EXPECTED_STRING_LITERAL_COUNT",
+    ):
+        assert weak_acceptance_marker not in check_region
+
+    assert "REPLACE(REPLACE(REPLACE(REPLACE(" in check_region
+    assert "N'[', N''" in check_region
+    assert "N']', N''" in check_region
+    assert "N'(', N''" not in check_region
+    assert "N')', N''" not in check_region
 
 
 def test_workshop_outcome_check_has_only_the_exact_allowed_terminal_states() -> None:

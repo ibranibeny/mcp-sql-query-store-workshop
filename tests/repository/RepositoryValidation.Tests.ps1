@@ -180,15 +180,31 @@ SET @MasterKeySql = N'CREATE MASTER KEY ENCRYPTION BY $passwordKeyword = N'''
             Should -BeNullOrEmpty
     }
 
-    It 'allows generated SQL password expressions backed by non-literal references' -ForEach @(
-        "N'prefix-' + @GeneratedPassword",
-        "N'prefix-' + `$(DatabasePassword)",
+    It 'allows generated SQL password expressions backed entirely by non-literal references' -ForEach @(
+        '@GeneratedPassword',
+        '$(DatabasePassword)',
         "REPLACE(SESSION_CONTEXT(N'DatabaseMasterKeyPassword'), N'''', N'''''')"
     ) {
         $passwordKeyword = 'PASS' + 'WORD'
         $content = "$passwordKeyword = $_"
 
         @(Find-RepositorySecret -Path 'fixture.sql' -Content $content) | Should -BeNullOrEmpty
+    }
+
+    It 'detects a literal password fragment concatenated with a variable reference' -ForEach @(
+        "N'not-a-real-secret' + @suffix",
+        "N'prefix-' + @GeneratedPassword",
+        "N'prefix-' + `$(DatabasePassword)"
+    ) {
+        $passwordKeyword = 'PASS' + 'WORD'
+        $findings = @(
+            Find-RepositorySecret -Path 'fixture.sql' -Content "$passwordKeyword = $_"
+        )
+
+        $findings.Count | Should -Be 1
+        $findings[0].Type | Should -Be 'Password assignment'
+        $findings[0].PSObject.Properties.Name | Should -Be @('Path', 'Type', 'Line')
+        ($findings | Out-String) | Should -Not -Match 'not-a-real-secret|prefix-'
     }
 
     It 'detects a complete quoted SQL password literal without returning its value' {

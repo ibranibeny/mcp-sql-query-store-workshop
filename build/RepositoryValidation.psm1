@@ -77,6 +77,8 @@ function Test-ApprovedPasswordValue {
     $expression = $Value.Trim()
     $candidate = $expression.TrimEnd(';').Trim().Trim("'", '"')
     $sqlReferencePattern = '(?:@[A-Za-z_][A-Za-z0-9_]*|\$\([A-Za-z_][A-Za-z0-9_.-]*\)|(?i:SESSION_CONTEXT)\(\s*N?''[^'']+''\s*\))'
+    $escapedSqlPasswordPattern = "(?i:REPLACE)\(\s*$sqlReferencePattern\s*,\s*N?''''\s*,\s*N?''''''\s*\)"
+    $delimitedEscapedSqlPasswordPattern = "^\s*N?'''\s*\+\s*$escapedSqlPasswordPattern\s*\+\s*N?''''\s*;?\s*$"
     return (
         [string]::IsNullOrWhiteSpace($candidate) -or
         $candidate -match '^(?i:SET_LOCALLY_ON_ADMIN_VM|WORKSHOP-PLACEHOLDER|<password>)$' -or
@@ -88,13 +90,8 @@ function Test-ApprovedPasswordValue {
         $candidate -match '^\[(?:System\.)?Environment\]::GetEnvironmentVariable\((?:''[^'']+''|"[^"]+")\)$' -or
         $candidate -match '^(?i:Read-Host)\b' -or
         $expression -match "^$sqlReferencePattern\s*;?$" -or
-        (
-            (
-                $expression -match '\+' -and
-                $expression -match $sqlReferencePattern
-            ) -or
-            $expression -match "^\s*(?i:REPLACE)\(\s*$sqlReferencePattern\s*,"
-        )
+        $expression -match "^\s*$escapedSqlPasswordPattern\s*;?\s*$" -or
+        $expression -match $delimitedEscapedSqlPasswordPattern
     )
 }
 

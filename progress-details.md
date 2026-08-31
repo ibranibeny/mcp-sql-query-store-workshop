@@ -39,3 +39,23 @@
 - GREEN: repository scanner 59 passed; SQL runner 7 passed; SQL contracts 93 passed.
 - Full strict validation: Python 163 passed with 2 platform-dependent skips; Pester 320 passed; syntax, PSScriptAnalyzer, JSON, tracked-file secret scan, static site, and whitespace gates passed.
 - No live Azure or SQL resources were used.
+
+# Task 10 diagnostic validation bypass fixes
+
+## Root cause
+
+- CHECK validation accepted constraints by required-token presence and string-literal count, so an appended tautology or additional predicate could preserve every weak signal.
+- Generated SQL password approval treated any concatenation containing a variable-like reference as safe, even when a quoted literal supplied part of the password value.
+
+## Fix
+
+- Build isolated expected CHECK constraints in four local temporary tables, read SQL Server's normalized definitions from `tempdb.sys.check_constraints`, normalize only whitespace and identifier brackets, and compare complete SHA2-256 hashes bidirectionally while retaining exact flags and dependency checks. Temporary objects are dropped on success and in `CATCH`.
+- Restrict generated SQL password approval to direct references, an exact `REPLACE` escape over a reference, or the runner's exact quote-delimited escaped-reference shape. Any nonempty quoted value fragment in a concatenation is rejected.
+- Replaced token/count-oriented SQL tests and added scanner regression cases for literal-plus-reference expressions; retained the safe runner construction test.
+
+## Validation
+
+- RED: scanner Pester reported 3 expected failures; SQL contracts reported 2 expected failures before implementation.
+- Focused GREEN: repository scanner 62 passed; SQL runner 7 passed; SQL contracts 94 passed.
+- Strict aggregate GREEN: Python 164 passed with 2 platform-dependent symlink skips; Pester 323 passed; PowerShell syntax, PSScriptAnalyzer, JSON, tracked-file secret scan, static site, and whitespace gates passed with zero failures or warnings.
+- No live SQL, Azure, or plan edits were used.
