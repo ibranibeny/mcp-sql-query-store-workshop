@@ -1,0 +1,23 @@
+{
+  "site": {
+    "title": "MCP SQL Query Store Workshop",
+    "description": "An evidence-driven L400 workshop for optimizing a SQL Server stored procedure with GitHub Copilot and Microsoft SQL MCP.",
+    "language": "en"
+  },
+  "pages": [
+    {
+      "source": "workshop/00-orientation.md",
+      "route": "index.html",
+      "title": "Orientation and safety contract",
+      "phase": "Workshop 00",
+      "durationMinutes": 15
+    },
+    {
+      "source": "docs/facilitator-guide.md",
+      "route": "facilitator-guide.html",
+      "title": "Facilitator guide",
+      "phase": "Facilitator resource",
+      "durationMinutes": 0
+    }
+  ]
+}

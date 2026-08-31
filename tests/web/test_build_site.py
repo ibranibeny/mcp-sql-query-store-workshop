@@ -1,0 +1,277 @@
+import json
+from pathlib import Path
+import subprocess
+import sys
+
+import pytest
+
+from web.build_site import build_site, load_manifest, render_markdown
+
+ROOT = Path(__file__).resolve().parents[2]
+MANIFEST_PATH = ROOT / "web" / "site-manifest.json"
+
+
+def write_manifest(path: Path, pages: list[dict[str, object]], **site: str) -> Path:
+    manifest = {
+        "site": {
+            "title": "Test workshop",
+            "description": "Test description",
+            "language": "en",
+            **site,
+        },
+        "pages": pages,
+    }
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+    return path
+
+
+def page(**overrides: object) -> dict[str, object]:
+    return {
+        "source": "content.md",
+        "route": "index.html",
+        "title": "Test page",
+        "phase": "Orientation",
+        "durationMinutes": 15,
+        **overrides,
+    }
+
+
+def test_manifest_has_unique_ordered_routes_and_existing_sources() -> None:
+    manifest = load_manifest(MANIFEST_PATH)
+    routes = [entry["route"] for entry in manifest["pages"]]
+
+    assert routes[0] == "index.html"
+    assert len(routes) == len(set(routes))
+    assert all(route.endswith(".html") for route in routes)
+    assert all((ROOT / entry["source"]).is_file() for entry in manifest["pages"])
+
+
+def test_load_manifest_requires_site_metadata_and_nonempty_pages(tmp_path: Path) -> None:
+    (tmp_path / "content.md").write_text("# Content", encoding="utf-8")
+    missing_site = tmp_path / "missing-site.json"
+    missing_site.write_text(json.dumps({"pages": [page()]}), encoding="utf-8")
+    empty_pages = write_manifest(tmp_path / "empty-pages.json", [])
+
+    with pytest.raises(ValueError, match="site"):
+        load_manifest(missing_site, root=tmp_path)
+    with pytest.raises(ValueError, match="pages"):
+        load_manifest(empty_pages, root=tmp_path)
+
+
+@pytest.mark.parametrize("property_name", ["source", "route", "title", "phase", "durationMinutes"])
+def test_load_manifest_requires_every_page_property(tmp_path: Path, property_name: str) -> None:
+    (tmp_path / "content.md").write_text("# Content", encoding="utf-8")
+    incomplete_page = page()
+    del incomplete_page[property_name]
+    path = write_manifest(tmp_path / "manifest.json", [incomplete_page])
+
+    with pytest.raises(ValueError, match=property_name):
+        load_manifest(path, root=tmp_path)
+
+
+def test_missing_source_is_rejected(tmp_path: Path) -> None:
+    path = write_manifest(
+        tmp_path / "manifest.json",
+        [page(source="workshop/missing.md")],
+    )
+
+    with pytest.raises(FileNotFoundError):
+        load_manifest(path, root=tmp_path)
+
+
+@pytest.mark.parametrize(
+    "routes",
+    [
+        ["index.html", "index.html"],
+        ["index.html", "../outside.html"],
+        ["index.html", "/absolute.html"],
+        ["index.html", "nested/page.txt"],
+        ["index.html", r"nested\page.html"],
+        ["index.html", "nested/./page.html"],
+        ["index.html", "Page.html", "page.html"],
+        ["index.html", "percent%2fencoded.html"],
+        ["index.html", "folder./page.html"],
+        ["home.html"],
+    ],
+)
+def test_duplicate_or_unsafe_routes_are_rejected(tmp_path: Path, routes: list[str]) -> None:
+    (tmp_path / "content.md").write_text("# Content", encoding="utf-8")
+    pages = [page(route=route, title=f"Page {index}") for index, route in enumerate(routes)]
+    path = write_manifest(tmp_path / "manifest.json", pages)
+
+    with pytest.raises(ValueError, match="route"):
+        load_manifest(path, root=tmp_path)
+
+
+def test_source_traversal_is_rejected_even_when_target_exists(tmp_path: Path) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    (tmp_path / "outside.md").write_text("outside", encoding="utf-8")
+    path = write_manifest(
+        root / "manifest.json",
+        [page(source="../outside.md")],
+    )
+
+    with pytest.raises(ValueError, match="source"):
+        load_manifest(path, root=root)
+
+
+@pytest.mark.parametrize("duration", [-1, 1.5, True, "15"])
+def test_duration_must_be_a_nonnegative_integer(tmp_path: Path, duration: object) -> None:
+    (tmp_path / "content.md").write_text("# Content", encoding="utf-8")
+    path = write_manifest(
+        tmp_path / "manifest.json",
+        [page(durationMinutes=duration)],
+    )
+
+    with pytest.raises(ValueError, match="durationMinutes"):
+        load_manifest(path, root=tmp_path)
+
+
+def test_render_markdown_supports_tables_toc_highlighting_and_safe_mermaid() -> None:
+    rendered = render_markdown(
+        "# Heading\n\n"
+        "| A | B |\n|---|---|\n| 1 | 2 |\n\n"
+        "```python\nprint('<safe>')\n```\n\n"
+        "```mermaid\nflowchart LR\n  A[\"<script>alert(1)</script>\"] --> B\n```\n"
+    )
+
+    assert '<a class="headerlink"' in rendered
+    assert "<table>" in rendered
+    assert "highlight" in rendered
+    assert '<pre class="mermaid">' in rendered
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in rendered
+    assert "<script>alert(1)</script>" not in rendered
+
+
+def test_render_markdown_transforms_evidence_markers_but_not_code() -> None:
+    rendered = render_markdown(
+        "[!DOC-VERIFIED] [!SUBSCRIPTION-VALIDATED] [!LAB-MEASURED] "
+        "[!ASSUMPTION] [!TARGET]\n\n"
+        "`[!TARGET]`\n\n"
+        "```text\n[!TARGET]\n```\n"
+    )
+
+    for label in (
+        "DOC-VERIFIED",
+        "SUBSCRIPTION-VALIDATED",
+        "LAB-MEASURED",
+        "ASSUMPTION",
+        "TARGET",
+    ):
+        assert f'data-evidence-label="{label}"' in rendered
+    assert rendered.count('data-evidence-label="TARGET"') == 1
+    assert rendered.count("[!TARGET]") == 2
+
+
+def test_render_markdown_escapes_source_authored_html() -> None:
+    rendered = render_markdown('<script src="https://cdn.jsdelivr.net/attack.js"></script>')
+
+    assert "<script" not in rendered
+    assert "&lt;script" in rendered
+
+
+def test_render_markdown_does_not_transform_attributes_and_blocks_active_urls() -> None:
+    rendered = render_markdown(
+        '[safe title](https://example.test "[!TARGET]") '
+        "[unsafe](javascript:alert(1))"
+    )
+
+    assert 'title="[!TARGET]"' in rendered
+    assert 'data-evidence-label="TARGET"' not in rendered
+    assert "javascript:" not in rendered
+
+
+def test_build_emits_title_mermaid_target_and_navigation(tmp_path: Path) -> None:
+    build_site(ROOT, tmp_path)
+    html = (tmp_path / "index.html").read_text(encoding="utf-8")
+
+    assert "MCP SQL Query Store Workshop" in html
+    assert '<pre class="mermaid">' in html
+    assert 'data-evidence-label="TARGET"' in html
+    assert 'aria-label="Workshop modules"' in html
+    assert html.count("<main") == 1
+    assert (tmp_path / "facilitator-guide.html").is_file()
+
+
+def test_build_escapes_manifest_values_creates_nested_routes_and_needs_no_assets(tmp_path: Path) -> None:
+    root = tmp_path / "repo"
+    (root / "web" / "templates").mkdir(parents=True)
+    for template in ("base.html", "page.html"):
+        (root / "web" / "templates" / template).write_text(
+            (ROOT / "web" / "templates" / template).read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+    (root / "content.md").write_text("# Safe content", encoding="utf-8")
+    write_manifest(
+        root / "web" / "site-manifest.json",
+        [page(title='<img src=x onerror="alert(1)">'), page(route="guides/page.html", title="Next")],
+        title="<script>alert(1)</script>",
+    )
+    destination = tmp_path / "site"
+
+    build_site(root, destination)
+    html = (destination / "index.html").read_text(encoding="utf-8")
+
+    assert (destination / "guides" / "page.html").is_file()
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html
+    assert "&lt;img src=x onerror=&#34;alert(1)&#34;&gt;" in html
+    assert "<script>alert(1)</script>" not in html
+    assert not (destination / "assets").exists()
+
+
+def test_build_removes_stale_destination_content(tmp_path: Path) -> None:
+    destination = tmp_path / "site"
+    (destination / "assets").mkdir(parents=True)
+    (destination / "obsolete.html").write_text("stale", encoding="utf-8")
+    (destination / "assets" / "obsolete.js").write_text("stale", encoding="utf-8")
+
+    build_site(ROOT, destination)
+
+    assert not (destination / "obsolete.html").exists()
+    assert not (destination / "assets" / "obsolete.js").exists()
+
+
+@pytest.mark.parametrize("relative_destination", ["web", "workshop", "docs"])
+def test_build_refuses_destination_that_contains_source_files(
+    tmp_path: Path, relative_destination: str,
+) -> None:
+    root = tmp_path / "repo"
+    (root / "web" / "templates").mkdir(parents=True)
+    (root / "workshop").mkdir()
+    (root / "docs").mkdir()
+    for template in ("base.html", "page.html"):
+        (root / "web" / "templates" / template).write_text(
+            (ROOT / "web" / "templates" / template).read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+    (root / "workshop" / "content.md").write_text("# Workshop", encoding="utf-8")
+    (root / "docs" / "guide.md").write_text("# Guide", encoding="utf-8")
+    write_manifest(
+        root / "web" / "site-manifest.json",
+        [
+            page(source="workshop/content.md"),
+            page(source="docs/guide.md", route="guide.html", title="Guide"),
+        ],
+    )
+
+    with pytest.raises(ValueError, match="destination"):
+        build_site(root, root / relative_destination)
+
+
+def test_cli_returns_nonzero_for_invalid_input(tmp_path: Path) -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "web" / "build_site.py"),
+            "--root",
+            str(tmp_path),
+            "--output",
+            str(tmp_path / "site"),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0

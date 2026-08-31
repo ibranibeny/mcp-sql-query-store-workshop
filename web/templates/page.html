@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+
+{% block content %}
+<article>
+  <header>
+    <p>{{ page.phase }} · {{ page.durationMinutes }} minutes</p>
+    <h1>{{ page.title }}</h1>
+  </header>
+  <div class="workshop-content">
+    {{ content | safe }}
+  </div>
+</article>
+<nav aria-label="Previous and next pages">
+  {% if previous %}
+  <a rel="prev" href="{{ previous.href }}">Previous: {{ previous.title }}</a>
+  {% endif %}
+  {% if next %}
+  <a rel="next" href="{{ next.href }}">Next: {{ next.title }}</a>
+  {% endif %}
+</nav>
+{% endblock %}
