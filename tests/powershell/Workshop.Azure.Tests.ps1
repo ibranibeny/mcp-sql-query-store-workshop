@@ -21,7 +21,7 @@ BeforeAll {
                     [pscustomobject]@{ Name = 'Az.Accounts'; Version = [version]'4.0.2' }
                     [pscustomobject]@{ Name = 'Az.Resources'; Version = [version]'7.0.0' }
                     [pscustomobject]@{ Name = 'Az.Compute'; Version = [version]'10.0.0' }
-                    [pscustomobject]@{ Name = 'Az.Network'; Version = [version]'7.0.0' }
+                    [pscustomobject]@{ Name = 'Az.Network'; Version = [version]'8.0.0' }
                     [pscustomobject]@{ Name = 'Az.PrivateDns'; Version = [version]'1.0.0' }
                     [pscustomobject]@{ Name = 'Az.SqlVirtualMachine'; Version = [version]'2.3.0' }
                 )
@@ -397,6 +397,32 @@ Describe 'Non-destructive workshop preflight' {
         $result = Invoke-PassingPreflight
 
         ($result.Checks | Where-Object Name -EQ 'Module Az.PrivateDns').Status | Should -Be 'Passed'
+    }
+
+    It 'requires Az.Network 8.0.0 or later' -ForEach @(
+        @{ Version = '7.0.0'; ExpectedStatus = 'Failed' }
+        @{ Version = '7.27.0'; ExpectedStatus = 'Failed' }
+        @{ Version = '8.0.0'; ExpectedStatus = 'Passed' }
+    ) {
+        $ops = Get-PassingOperationSet
+        $testedVersion = $Version
+        $baseGetModules = $ops.GetModules
+        $ops.GetModules = {
+            @(& $baseGetModules | ForEach-Object {
+                if ($_.Name -eq 'Az.Network') {
+                    [pscustomobject]@{ Name = $_.Name; Version = [version] $testedVersion }
+                }
+                else {
+                    $_
+                }
+            })
+        }
+
+        $result = Invoke-PassingPreflight -Operations $ops
+        $check = $result.Checks | Where-Object Name -EQ 'Module Az.Network'
+
+        $check.Status | Should -Be $ExpectedStatus
+        $check.Detail | Should -Match 'minimum version is 8\.0\.0'
     }
 
     It 'aggregates an all-pass result and resolves immutable latest images' {
@@ -1011,6 +1037,7 @@ Describe 'Private workshop network deployment' {
         $script:NetworkCreates = [System.Collections.Generic.List[object]]::new()
         $script:SkipReadBackKind = $null
         $script:NetworkOperations = @{
+            SupportsDefaultOutboundAccess = { $true }
             GetSubscriptionId = { 'mock' }
             GetResource = {
                 param($Kind, $Name, $ResourceGroupName)
@@ -1034,6 +1061,15 @@ Describe 'Private workshop network deployment' {
                 @($script:NetworkState.Values | Where-Object Kind -EQ 'PublicIpAddress')
             }
         }
+    }
+
+    It 'fails before any mutation when private-subnet command capability is unsupported' {
+        $script:NetworkOperations.SupportsDefaultOutboundAccess = { $false }
+
+        { New-WorkshopNetwork -Config $script:Config -FacilitatorCidr '8.8.8.8/32' -Operations $script:NetworkOperations } |
+            Should -Throw -ExpectedMessage '*DefaultOutboundAccess*Az.Network 8.0.0*'
+        $script:NetworkCreates | Should -HaveCount 0
+        $script:NetworkState.Count | Should -Be 0
     }
 
     It 'creates the approved resources in dependency order with exactly two public IPs' {
@@ -1150,6 +1186,7 @@ Describe 'Workshop network boundary verification' {
     BeforeEach {
         $script:NetworkState = @{}
         $script:NetworkOperations = @{
+            SupportsDefaultOutboundAccess = { $true }
             GetSubscriptionId = { 'mock' }
             GetResource = {
                 param($Kind, $Name, $ResourceGroupName)
@@ -1258,6 +1295,20 @@ Describe 'Workshop network boundary verification' {
 }
 
 Describe 'Default workshop network operation shape' {
+    It 'derives private-subnet support from command parameter metadata' {
+        InModuleScope Workshop.Azure {
+            Mock Get-Command {
+                [pscustomobject]@{ Parameters = @{ DefaultOutboundAccess = $null } }
+            } -ParameterFilter { $Name -eq 'New-AzVirtualNetworkSubnetConfig' }
+            $operations = Get-DefaultWorkshopNetworkOperationSet
+
+            (& $operations.SupportsDefaultOutboundAccess) | Should -BeTrue
+            Should -Invoke Get-Command -Times 1 -Exactly -ParameterFilter {
+                $Name -eq 'New-AzVirtualNetworkSubnetConfig' -and $ErrorAction -eq 'Stop'
+            }
+        }
+    }
+
     It 'matches native NSG rule shapes by canonical custom tuples rather than object property layout' {
         InModuleScope Workshop.Azure -Parameters @{ Config = $script:Config } {
             param($Config)

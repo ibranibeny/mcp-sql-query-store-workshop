@@ -4,7 +4,7 @@ $script:RequiredAzModules = [ordered]@{
     'Az.Accounts' = [version]'4.0.0'
     'Az.Resources' = [version]'7.0.0'
     'Az.Compute' = [version]'10.0.0'
-    'Az.Network' = [version]'7.0.0'
+    'Az.Network' = [version]'8.0.0'
     'Az.PrivateDns' = [version]'1.0.0'
     'Az.SqlVirtualMachine' = [version]'2.3.0'
 }
@@ -1594,6 +1594,10 @@ function Get-DefaultWorkshopNetworkOperationSet {
     param()
 
     @{
+        SupportsDefaultOutboundAccess = {
+            $command = Get-Command -Name New-AzVirtualNetworkSubnetConfig -ErrorAction Stop
+            $command.Parameters.ContainsKey('DefaultOutboundAccess')
+        }
         GetSubscriptionId = {
             $context = Get-AzContext -ErrorAction Stop
             $subscriptionId = Get-WorkshopNestedIdentifier -InputObject $context -PropertyName 'Subscription'
@@ -1768,7 +1772,7 @@ function Assert-WorkshopNetworkOperationSet {
     )
 
     $required = @('GetSubscriptionId', 'GetResource', 'GetPublicIpInventory')
-    if (-not $ReadOnly) { $required += 'CreateResource' }
+    if (-not $ReadOnly) { $required += @('SupportsDefaultOutboundAccess', 'CreateResource') }
     foreach ($name in $required) {
         if (-not $Operations.ContainsKey($name) -or $Operations[$name] -isnot [scriptblock]) {
             throw "Operations must provide scriptblock '$name'."
@@ -1786,6 +1790,9 @@ ${function:New-WorkshopNetwork} = {
 
     if ($null -eq $Operations) { $Operations = Get-DefaultWorkshopNetworkOperationSet }
     Assert-WorkshopNetworkOperationSet -Operations $Operations
+    if (-not (& $Operations.SupportsDefaultOutboundAccess)) {
+        throw "New-AzVirtualNetworkSubnetConfig does not support DefaultOutboundAccess. Install Az.Network 8.0.0 or later before deployment."
+    }
     $subscriptionId = [string] (& $Operations.GetSubscriptionId)
     if ([string]::IsNullOrWhiteSpace($subscriptionId)) {
         throw 'Network operations returned an empty subscription ID.'
