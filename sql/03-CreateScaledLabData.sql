@@ -56,25 +56,16 @@ IF SCHEMA_ID(N'lab') IS NULL EXEC(N'CREATE SCHEMA lab AUTHORIZATION dbo;');
 
 DECLARE @DataFileLogicalName sysname;
 DECLARE @CurrentDataFileSizeMB decimal(19,2);
-DECLARE @AvailableSpaceMB bigint;
 SELECT TOP (1)
     @DataFileLogicalName = f.name,
-    @CurrentDataFileSizeMB = f.size * 8.0 / 1024,
-    @AvailableSpaceMB = v.available_bytes / 1048576
+    @CurrentDataFileSizeMB = f.size * 8.0 / 1024
 FROM sys.database_files AS f
-CROSS APPLY sys.dm_os_volume_stats(DB_ID(), f.file_id) AS v
 WHERE f.type_desc = N'ROWS'
 ORDER BY f.file_id;
-IF @DataFileLogicalName IS NULL OR @AvailableSpaceMB IS NULL
-    THROW 51312, 'Primary data-file volume information is unavailable.', 1;
+IF @DataFileLogicalName IS NULL OR @CurrentDataFileSizeMB IS NULL
+    THROW 51312, 'Primary data-file metadata is unavailable.', 1;
 IF @CurrentDataFileSizeMB > @MaximumDataFileSizeMB
     THROW 51313, 'Current data file already exceeds MaximumDataFileSizeMB.', 1;
-
-DECLARE @EstimatedRequiredMB bigint = CEILING(CONVERT(decimal(19,2), @TargetRows) * 700 / 1048576.0);
-IF @AvailableSpaceMB - @EstimatedRequiredMB < @MinimumFreeSpaceMB
-    THROW 51314, 'Estimated generation footprint would violate MinimumFreeSpaceMB.', 1;
-IF @CurrentDataFileSizeMB + @EstimatedRequiredMB > @MaximumDataFileSizeMB
-    THROW 51315, 'Estimated generation footprint would violate MaximumDataFileSizeMB.', 1;
 
 DECLARE @FilePolicySql nvarchar(max) = N'ALTER DATABASE ' + QUOTENAME(DB_NAME())
     + N' MODIFY FILE (NAME = ' + QUOTENAME(@DataFileLogicalName, N'''')
@@ -186,27 +177,56 @@ BEGIN
 
     DECLARE @ThisBatchSize int = CONVERT(int, CASE WHEN @TargetRows - @NextId + 1 < @BatchSize THEN @TargetRows - @NextId + 1 ELSE @BatchSize END);
     DECLARE @BatchEnd bigint = @NextId + @ThisBatchSize - 1;
+    DECLARE @EstimatedBatchMB decimal(19,4) = CEILING(CONVERT(decimal(19,4), @ThisBatchSize) * 700 / 1048576.0);
     DECLARE @BatchAvailableSpaceMB bigint;
-    DECLARE @BatchDataFileSizeMB decimal(19,2);
-    SELECT TOP (1)
-        @BatchDataFileSizeMB = f.size * 8.0 / 1024,
-        @BatchAvailableSpaceMB = v.available_bytes / 1048576
-    FROM sys.database_files AS f
-    CROSS APPLY sys.dm_os_volume_stats(DB_ID(), f.file_id) AS v
-    WHERE f.type_desc = N'ROWS'
-    ORDER BY f.file_id;
-    IF @BatchAvailableSpaceMB < @MinimumFreeSpaceMB
-        THROW 51319, 'Per-batch free-space floor would be violated.', 1;
-    IF @BatchDataFileSizeMB >= @MaximumDataFileSizeMB
-        THROW 51320, 'Per-batch data-file size cap would be violated.', 1;
-    DECLARE @EstimatedBatchMB bigint = CEILING(CONVERT(decimal(19,2), @ThisBatchSize) * 700 / 1048576.0);
-    IF @BatchAvailableSpaceMB - @EstimatedBatchMB < @MinimumFreeSpaceMB
-        THROW 51325, 'Estimated batch footprint would violate the free-space floor.', 1;
-    IF @BatchDataFileSizeMB + @EstimatedBatchMB > @MaximumDataFileSizeMB
-        THROW 51326, 'Estimated batch footprint would violate the data-file size cap.', 1;
+    DECLARE @BatchAllocatedMB decimal(19,4);
+    DECLARE @BatchUsedMB decimal(19,4);
+    DECLARE @BatchUnallocatedMB decimal(19,4);
+    DECLARE @BatchGrowthIncrementMB decimal(19,4);
+    DECLARE @BatchIsPercentGrowth bit;
+    DECLARE @RequiredPhysicalGrowthMB decimal(19,4);
+    DECLARE @RoundedGrowthMB decimal(19,4);
 
     BEGIN TRY
         BEGIN TRANSACTION;
+
+        /* Re-read allocation and volume state immediately before the insert. The row-size
+           estimate is deliberately conservative, not a claim of exact storage consumption. */
+        SELECT TOP (1)
+            @BatchAllocatedMB = f.size * 8.0 / 1024,
+            @BatchUsedMB = FILEPROPERTY(f.name, 'SpaceUsed') * 8.0 / 1024,
+            @BatchGrowthIncrementMB = f.growth * 8.0 / 1024,
+            @BatchIsPercentGrowth = f.is_percent_growth,
+            @BatchAvailableSpaceMB = v.available_bytes / 1048576
+        FROM sys.database_files AS f
+        CROSS APPLY sys.dm_os_volume_stats(DB_ID(), f.file_id) AS v
+        WHERE f.type_desc = N'ROWS'
+        ORDER BY f.file_id;
+
+        IF @BatchAllocatedMB IS NULL OR @BatchUsedMB IS NULL
+           OR @BatchGrowthIncrementMB IS NULL OR @BatchGrowthIncrementMB <= 0
+           OR @BatchIsPercentGrowth IS NULL OR @BatchAvailableSpaceMB IS NULL
+            THROW 51319, 'Per-batch data-file capacity metadata is unavailable.', 1;
+        IF @BatchIsPercentGrowth = 1
+            THROW 51320, 'Percent data-file growth is not supported; configure a fixed increment.', 1;
+
+        SET @BatchUnallocatedMB = @BatchAllocatedMB - @BatchUsedMB;
+        IF @BatchUnallocatedMB < 0
+            THROW 51325, 'Data-file allocated and used metadata is inconsistent.', 1;
+        SET @RequiredPhysicalGrowthMB = CASE
+            WHEN @EstimatedBatchMB > @BatchUnallocatedMB THEN @EstimatedBatchMB - @BatchUnallocatedMB
+            ELSE 0
+        END;
+        SET @RoundedGrowthMB = CASE
+            WHEN @RequiredPhysicalGrowthMB = 0 THEN 0
+            ELSE CEILING(@RequiredPhysicalGrowthMB / @BatchGrowthIncrementMB) * @BatchGrowthIncrementMB
+        END;
+
+        IF @BatchAvailableSpaceMB - @RoundedGrowthMB < @MinimumFreeSpaceMB
+            THROW 51326, 'Worst-case rounded batch growth would violate the free-space floor.', 1;
+        IF @BatchAllocatedMB + @RoundedGrowthMB > @MaximumDataFileSizeMB
+            THROW 51329, 'Worst-case rounded batch growth would violate the data-file size cap.', 1;
+
         INSERT lab.FactSales
         (
             SyntheticSalesID, OrderDate, TerritoryID, CustomerID, ProductID,

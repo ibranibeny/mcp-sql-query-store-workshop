@@ -489,11 +489,18 @@ def test_restore_validates_safe_local_windows_paths_and_extensions() -> None:
     assert "SUBSTRING(@BACKUPPATH, 2, 2) <> N':\\'" in text
     assert "SUBSTRING(@DATAPATH, 2, 2) <> N':\\'" in text
     assert "SUBSTRING(@LOGPATH, 2, 2) <> N':\\'" in text
-    for unsafe in ("N'%..%'", "N'%[%]%'", "N'%[_]%'", "N'%;%'", "NCHAR(0)"):
+    for variable in ("BACKUPPATH", "DATAPATH", "LOGPATH"):
+        assert f"LEN(@{variable}) > 260" in text
+        assert f"LEFT(@{variable}, 1) COLLATE LATIN1_GENERAL_100_BIN2 NOT LIKE N'[A-ZA-Z]'" in text
+    for unsafe in ("N'%..%'", "N'%[%]%'", "N'%[_]%'", "N'%[[]%'", "N'%]%'", "N'%*%'", "N'%?%'", "N'%;%'", "NCHAR(0)"):
         assert unsafe in text
-    assert "QUOTENAME(@BACKUPPATH, N'''')" in text
-    assert "QUOTENAME(@DATAPATH, N'''')" in text
-    assert "QUOTENAME(@LOGPATH, N'''')" in text
+    assert not re.search(r"QUOTENAME\s*\(\s*@(BACKUPPATH|DATAPATH|LOGPATH)\b", text)
+    assert "LIKE N'%''%'" not in text
+    for variable in ("BACKUPPATH", "DATAPATH", "LOGPATH"):
+        assert re.search(
+            rf"N'N'''\s*\+\s*REPLACE\s*\(\s*@{variable}\s*,\s*N''''\s*,\s*N''''''\s*\)\s*\+\s*N''''",
+            text,
+        )
 
 
 def test_restore_verifies_backup_and_filelist_before_restore() -> None:
@@ -513,7 +520,7 @@ def test_restore_verifies_backup_and_filelist_before_restore() -> None:
 def test_restore_never_overwrites_and_existing_database_requires_exact_marker() -> None:
     text = normalized("02-RestoreAndConfigureDatabase.sql")
     assert "DROP DATABASE" not in text
-    assert "REPLACE" not in text
+    assert "WITH REPLACE" not in text
     assert re.search(r"IF DB_ID\(@DATABASENAME\) IS NULL.*?RESTORE DATABASE", text)
     existing = text[text.index("IF DB_ID(@DATABASENAME) IS NOT NULL"):text.index("IF DB_ID(@DATABASENAME) IS NULL")]
     assert "LAB.WORKSHOPMARKER" in existing
@@ -704,10 +711,21 @@ def test_generator_checks_estimated_and_per_batch_capacity() -> None:
     assert "SYS.DM_OS_VOLUME_STATS" in text
     assert "AVAILABLE_BYTES" in text
     assert "SIZE * 8.0 / 1024" in text
-    assert "@ESTIMATEDREQUIREDMB" in text
     assert "@MINIMUMFREESPACEMB" in text and "@MAXIMUMDATAFILESIZEMB" in text
+    assert "FILEPROPERTY(F.NAME, 'SPACEUSED')" in loop
+    assert "F.IS_PERCENT_GROWTH" in loop and re.search(r"@BATCHISPERCENTGROWTH\s*=\s*1.*?THROW", loop)
+    assert "F.GROWTH * 8.0 / 1024" in loop
+    assert re.search(r"@BATCHUNALLOCATEDMB\s*=\s*@BATCHALLOCATEDMB\s*-\s*@BATCHUSEDMB", loop)
+    assert re.search(r"@REQUIREDPHYSICALGROWTHMB\s*=\s*CASE\s+WHEN\s+@ESTIMATEDBATCHMB\s*>\s*@BATCHUNALLOCATEDMB", loop)
+    assert re.search(r"CEILING\s*\(\s*@REQUIREDPHYSICALGROWTHMB\s*/\s*@BATCHGROWTHINCREMENTMB\s*\)", loop)
+    assert re.search(r"@BATCHAVAILABLESPACEMB\s*-\s*@ROUNDEDGROWTHMB\s*<\s*@MINIMUMFREESPACEMB.*?THROW", loop)
+    assert re.search(r"@BATCHALLOCATEDMB\s*\+\s*@ROUNDEDGROWTHMB\s*>\s*@MAXIMUMDATAFILESIZEMB.*?THROW", loop)
     assert "SYS.DM_OS_VOLUME_STATS" in loop
-    assert loop.index("SYS.DM_OS_VOLUME_STATS") < loop.index("BEGIN TRANSACTION")
+    transaction = loop.index("BEGIN TRANSACTION")
+    capacity_read = loop.index("SYS.DM_OS_VOLUME_STATS", transaction)
+    insert = loop.index("INSERT LAB.FACTSALES")
+    assert transaction < capacity_read < insert
+    assert "METADATA" in loop[capacity_read:insert] and "THROW" in loop[capacity_read:insert]
     assert "FILEGROWTH" in text and "MAXSIZE" in text
 
 

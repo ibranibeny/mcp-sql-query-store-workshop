@@ -43,27 +43,34 @@ IF @WorkshopSetupHash <> 0xADA06F206D3DB321527A5AAB390FC814E28EBB59791967EB99841
     THROW 51214, 'The workshop marker contract hash is invalid.', 1;
 
 /* Permit only normalized local drive paths. UNC/device paths, traversal, wildcards,
-   control characters, quotes, comments, and statement delimiters are rejected. */
-IF LEN(@BackupPath) > 260 OR SUBSTRING(@BackupPath, 2, 2) <> N':\'
+   control characters, comments, and statement delimiters are rejected. Apostrophes
+   are supported and escaped as SQL string-literal data after validation. */
+IF LEN(@BackupPath) > 260 OR LEFT(@BackupPath, 1) COLLATE Latin1_General_100_BIN2 NOT LIKE N'[A-Za-z]'
+   OR SUBSTRING(@BackupPath, 2, 2) <> N':\'
    OR RIGHT(LOWER(@BackupPath), 4) <> N'.bak'
    OR @BackupPath LIKE N'%..%' OR @BackupPath LIKE N'%[%]%' OR @BackupPath LIKE N'%[_]%'
-   OR @BackupPath LIKE N'%;%' OR @BackupPath LIKE N'%''%' OR @BackupPath LIKE N'%--%'
+   OR @BackupPath LIKE N'%[[]%' OR @BackupPath LIKE N'%]%' OR @BackupPath LIKE N'%*%' OR @BackupPath LIKE N'%?%'
+   OR @BackupPath LIKE N'%;%' OR @BackupPath LIKE N'%--%'
    OR @BackupPath LIKE N'%/*%' OR @BackupPath LIKE N'%*/%' OR @BackupPath LIKE N'\\%'
    OR CHARINDEX(NCHAR(0), @BackupPath) > 0 OR PATINDEX(N'%[' + NCHAR(1) + N'-' + NCHAR(31) + N']%', @BackupPath) > 0
     THROW 51205, 'BackupPath must be a safe local Windows .bak path.', 1;
 
-IF LEN(@DataPath) > 260 OR SUBSTRING(@DataPath, 2, 2) <> N':\'
+IF LEN(@DataPath) > 260 OR LEFT(@DataPath, 1) COLLATE Latin1_General_100_BIN2 NOT LIKE N'[A-Za-z]'
+    OR SUBSTRING(@DataPath, 2, 2) <> N':\'
    OR RIGHT(LOWER(@DataPath), 4) <> N'.mdf'
-   OR @DataPath LIKE N'%..%' OR @DataPath LIKE N'%[%]%' OR @DataPath LIKE N'%[_]%'
-   OR @DataPath LIKE N'%;%' OR @DataPath LIKE N'%''%' OR @DataPath LIKE N'%--%'
+    OR @DataPath LIKE N'%..%' OR @DataPath LIKE N'%[%]%' OR @DataPath LIKE N'%[_]%'
+    OR @DataPath LIKE N'%[[]%' OR @DataPath LIKE N'%]%' OR @DataPath LIKE N'%*%' OR @DataPath LIKE N'%?%'
+    OR @DataPath LIKE N'%;%' OR @DataPath LIKE N'%--%'
    OR @DataPath LIKE N'%/*%' OR @DataPath LIKE N'%*/%' OR @DataPath LIKE N'\\%'
    OR CHARINDEX(NCHAR(0), @DataPath) > 0 OR PATINDEX(N'%[' + NCHAR(1) + N'-' + NCHAR(31) + N']%', @DataPath) > 0
     THROW 51206, 'DataPath must be a safe local Windows .mdf path.', 1;
 
-IF LEN(@LogPath) > 260 OR SUBSTRING(@LogPath, 2, 2) <> N':\'
+IF LEN(@LogPath) > 260 OR LEFT(@LogPath, 1) COLLATE Latin1_General_100_BIN2 NOT LIKE N'[A-Za-z]'
+    OR SUBSTRING(@LogPath, 2, 2) <> N':\'
    OR RIGHT(LOWER(@LogPath), 4) <> N'.ldf'
-   OR @LogPath LIKE N'%..%' OR @LogPath LIKE N'%[%]%' OR @LogPath LIKE N'%[_]%'
-   OR @LogPath LIKE N'%;%' OR @LogPath LIKE N'%''%' OR @LogPath LIKE N'%--%'
+    OR @LogPath LIKE N'%..%' OR @LogPath LIKE N'%[%]%' OR @LogPath LIKE N'%[_]%'
+    OR @LogPath LIKE N'%[[]%' OR @LogPath LIKE N'%]%' OR @LogPath LIKE N'%*%' OR @LogPath LIKE N'%?%'
+    OR @LogPath LIKE N'%;%' OR @LogPath LIKE N'%--%'
    OR @LogPath LIKE N'%/*%' OR @LogPath LIKE N'%*/%' OR @LogPath LIKE N'\\%'
    OR CHARINDEX(NCHAR(0), @LogPath) > 0 OR PATINDEX(N'%[' + NCHAR(1) + N'-' + NCHAR(31) + N']%', @LogPath) > 0
     THROW 51207, 'LogPath must be a safe local Windows .ldf path.', 1;
@@ -101,11 +108,11 @@ BEGIN
         DifferentialBaseLSN numeric(25,0) NULL, DifferentialBaseGUID uniqueidentifier NULL,
         IsReadOnly bit, IsPresent bit, TDEThumbprint varbinary(32) NULL, SnapshotUrl nvarchar(360) NULL
     );
-    DECLARE @QuotedBackupPath nvarchar(4002) = QUOTENAME(@BackupPath, N'''');
-    DECLARE @QuotedDataPath nvarchar(4002) = QUOTENAME(@DataPath, N'''');
-    DECLARE @QuotedLogPath nvarchar(4002) = QUOTENAME(@LogPath, N'''');
-    IF @QuotedBackupPath IS NULL OR @QuotedDataPath IS NULL OR @QuotedLogPath IS NULL
-        THROW 51209, 'A validated restore path could not be quoted safely.', 1;
+    /* QUOTENAME is limited to sysname (128 characters), so validated paths are escaped
+       directly and wrapped as Unicode SQL string literals. */
+    DECLARE @QuotedBackupPath nvarchar(524) = N'N''' + REPLACE(@BackupPath, N'''', N'''''') + N'''';
+    DECLARE @QuotedDataPath nvarchar(524) = N'N''' + REPLACE(@DataPath, N'''', N'''''') + N'''';
+    DECLARE @QuotedLogPath nvarchar(524) = N'N''' + REPLACE(@LogPath, N'''', N'''''') + N'''';
 
     DECLARE @VerifySql nvarchar(max) = N'RESTORE VERIFYONLY FROM DISK = ' + @QuotedBackupPath + N' WITH CHECKSUM;';
     EXEC sys.sp_executesql @VerifySql;
