@@ -1009,8 +1009,14 @@ ${function:Test-WorkshopPrerequisites} = {
         $imageResult = Invoke-WorkshopReadOperation -Operation $Operations.GetImages -Arguments @($vm.Publisher, $vm.Offer, $vm.Sku, $Config.Location)
         $versions = foreach ($image in $imageResult.Value) {
             $parsedVersion = $null
-            if ($null -ne $image -and $image.PSObject.Properties.Name -contains 'Version' -and
-                $image.Version -ne 'latest' -and [version]::TryParse([string] $image.Version, [ref] $parsedVersion)) {
+            $versionText = if ($null -ne $image -and $image.PSObject.Properties.Name -contains 'Version') {
+                [string] $image.Version
+            }
+            else {
+                ''
+            }
+            if ($versionText -match '^\d+(\.\d+){2,3}$' -and
+                [version]::TryParse($versionText, [ref] $parsedVersion)) {
                 [pscustomobject]@{ Image = $image; ParsedVersion = $parsedVersion }
             }
         }

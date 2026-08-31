@@ -855,6 +855,39 @@ Describe 'Non-destructive workshop preflight' {
         ($script:Result.Checks | Where-Object Name -EQ 'SQL VM image').Status | Should -Be 'Failed'
     }
 
+    It 'rejects image versions outside the immutable numeric three-or-four-part shape without throwing' -ForEach @(
+        '1.2', 'latest', '1.2.3-preview', '1.2.3.4.5'
+    ) {
+        $invalidVersion = $_
+        $ops = Get-PassingOperationSet
+        $ops.GetImages = {
+            [pscustomobject]@{ Version = $invalidVersion }
+        }.GetNewClosure()
+
+        { $script:Result = Invoke-PassingPreflight -Operations $ops } | Should -Not -Throw
+        $script:Result.Passed | Should -BeFalse
+        ($script:Result.Checks | Where-Object Name -EQ 'Admin VM image').Status | Should -Be 'Failed'
+        ($script:Result.Checks | Where-Object Name -EQ 'SQL VM image').Status | Should -Be 'Failed'
+    }
+
+    It 'selects the highest version from only immutable numeric three-or-four-part image records' {
+        $ops = Get-PassingOperationSet
+        $ops.GetImages = {
+            @(
+                [pscustomobject]@{ Version = '999.0' }
+                [pscustomobject]@{ Version = '3.9.9.9' }
+                [pscustomobject]@{ Version = '3.10.0' }
+                [pscustomobject]@{ Version = '999.0.0-preview' }
+            )
+        }
+
+        $result = Invoke-PassingPreflight -Operations $ops
+
+        $result.Passed | Should -BeTrue
+        $result.ResolvedImages.Admin.Version | Should -Be '3.10.0'
+        $result.ResolvedImages.Sql.Version | Should -Be '3.10.0'
+    }
+
     It 'fails null or shapeless image records without throwing' {
         $ops = Get-PassingOperationSet
         $ops.GetImages = { @($null, [pscustomobject]@{ Unexpected = 'shape' }) }

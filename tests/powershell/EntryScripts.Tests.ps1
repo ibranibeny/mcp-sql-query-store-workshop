@@ -100,6 +100,26 @@ Describe 'Workshop deployment entry script gates' {
         $script:Sequence = [System.Collections.Generic.List[string]]::new()
         $counters = $script:Counters
         $sequence = $script:Sequence
+        $script:PreflightResult = [pscustomobject]@{
+            Passed = $true
+            Checks = @()
+            Plan = $null
+            ResolvedImages = [pscustomobject]@{
+                Admin = [pscustomobject]@{
+                    Publisher = 'MicrosoftWindowsDesktop'
+                    Offer = 'windows-11'
+                    Sku = 'win11-24h2-ent'
+                    Version = '26100.2033.1'
+                }
+                Sql = [pscustomobject]@{
+                    Publisher = 'MicrosoftSQLServer'
+                    Offer = 'SQL2022-WS2022'
+                    Sku = 'enterprise-gen2'
+                    Version = '16.0.1135.2'
+                }
+            }
+        }
+        $preflightResult = $script:PreflightResult
         $script:EntryOperations = @{
             SetContext = ({
                 param($SubscriptionId, $TenantId)
@@ -112,15 +132,8 @@ Describe 'Workshop deployment entry script gates' {
                 $null = $Parameters
                 $counters.Preflight++
                 $sequence.Add('preflight')
-                [pscustomobject]@{
-                    Passed = $counters.PreflightPassed
-                    Checks = @()
-                    Plan = $null
-                    ResolvedImages = [pscustomobject]@{
-                        Admin = [pscustomobject]@{ Version = '26100.2033.1' }
-                        Sql = [pscustomobject]@{ Version = '16.0.1135.2' }
-                    }
-                }
+                $preflightResult.Passed = $counters.PreflightPassed
+                $preflightResult
             }).GetNewClosure()
             NewNetwork = ({
                 param($Parameters)
@@ -222,6 +235,32 @@ Describe 'Workshop deployment entry script gates' {
         $script:Counters.Boundary | Should -Be 0
         $script:Counters.AdminVm | Should -Be 0
         $script:Counters.SqlVm | Should -Be 0
+    }
+
+    It 'rejects malformed or mismatched resolved image records before any resource mutation' -ForEach @(
+        @{ Case = 'missing image collection'; Change = { param($p) $p.ResolvedImages = $null } }
+        @{ Case = 'missing admin record'; Change = { param($p) $p.ResolvedImages.Admin = $null } }
+        @{ Case = 'missing SQL record'; Change = { param($p) $p.ResolvedImages.Sql = $null } }
+        @{ Case = 'admin publisher mismatch'; Change = { param($p) $p.ResolvedImages.Admin.Publisher = 'OtherPublisher' } }
+        @{ Case = 'admin offer mismatch'; Change = { param($p) $p.ResolvedImages.Admin.Offer = 'other-offer' } }
+        @{ Case = 'admin SKU mismatch'; Change = { param($p) $p.ResolvedImages.Admin.Sku = 'other-sku' } }
+        @{ Case = 'admin mutable version'; Change = { param($p) $p.ResolvedImages.Admin.Version = 'latest' } }
+        @{ Case = 'admin two-part version'; Change = { param($p) $p.ResolvedImages.Admin.Version = '1.2' } }
+        @{ Case = 'SQL publisher mismatch'; Change = { param($p) $p.ResolvedImages.Sql.Publisher = 'OtherPublisher' } }
+        @{ Case = 'SQL offer mismatch'; Change = { param($p) $p.ResolvedImages.Sql.Offer = 'other-offer' } }
+        @{ Case = 'SQL SKU mismatch'; Change = { param($p) $p.ResolvedImages.Sql.Sku = 'other-sku' } }
+        @{ Case = 'SQL suffixed version'; Change = { param($p) $p.ResolvedImages.Sql.Version = '16.0.1135-preview' } }
+        @{ Case = 'shapeless admin record'; Change = { param($p) $p.ResolvedImages.Admin = [pscustomobject]@{ Unexpected = 'value' } } }
+    ) {
+        & $Change $script:PreflightResult
+
+        { & $script:DeployPath @script:EntryParameters } |
+            Should -Throw '*approved immutable image*' -Because $Case
+        $script:Counters.Network | Should -Be 0
+        $script:Counters.AdminVm | Should -Be 0
+        $script:Counters.SqlVm | Should -Be 0
+        $script:Counters.SqlIaas | Should -Be 0
+        $script:Counters.Shutdown | Should -Be 0
     }
 
     It 'creates nothing when the exact phrase does not match' {

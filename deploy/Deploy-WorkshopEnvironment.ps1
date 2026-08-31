@@ -161,6 +161,38 @@ if (-not $preflight.Passed) {
     throw 'Workshop prerequisite validation failed. No Azure resources were created.'
 }
 
+if ($null -eq $preflight.ResolvedImages) {
+    throw 'Preflight did not return both approved immutable image records. No Azure resources were created.'
+}
+foreach ($imageRequirement in @(
+    @{ Role = 'Admin'; Expected = $config.AdminVm }
+    @{ Role = 'Sql'; Expected = $config.SqlVm }
+)) {
+    $role = $imageRequirement.Role
+    $resolvedImagesProperties = @($preflight.ResolvedImages.PSObject.Properties.Name)
+    $record = if ($resolvedImagesProperties -contains $role) {
+        $preflight.ResolvedImages.$role
+    }
+    else {
+        $null
+    }
+    $recordProperties = if ($null -eq $record) { @() } else { @($record.PSObject.Properties.Name) }
+    $expected = $imageRequirement.Expected
+    $parsedVersion = $null
+    $recordValid = $null -ne $record -and
+        @('Publisher', 'Offer', 'Sku', 'Version' | Where-Object { $recordProperties -notcontains $_ }).Count -eq 0
+    if ($recordValid) {
+        $recordValid = $record.Publisher -is [string] -and $record.Publisher -ceq $expected.Publisher -and
+            $record.Offer -is [string] -and $record.Offer -ceq $expected.Offer -and
+            $record.Sku -is [string] -and $record.Sku -ceq $expected.Sku -and
+            $record.Version -is [string] -and $record.Version -match '^\d+(\.\d+){2,3}$' -and
+            [version]::TryParse($record.Version, [ref] $parsedVersion)
+    }
+    if (-not $recordValid) {
+        throw "Preflight did not return the approved immutable image record for $role. No Azure resources were created."
+    }
+}
+
 $requiredPhrase = 'DEPLOY rg-mcp-sql-workshop'
 if (-not $PSBoundParameters.ContainsKey('ConfirmationPhrase')) {
     $ConfirmationPhrase = Read-Host "Type '$requiredPhrase' to continue"
@@ -198,12 +230,6 @@ try {
     if (-not $boundary.Passed) {
         $failedChecks = @($boundary.Checks | Where-Object Status -EQ 'Failed' | ForEach-Object Name)
         throw "Network boundary verification failed: $($failedChecks -join ', ')."
-    }
-    if ($null -eq $preflight.ResolvedImages -or $null -eq $preflight.ResolvedImages.Admin -or
-        $null -eq $preflight.ResolvedImages.Sql -or
-        [string]::IsNullOrWhiteSpace([string] $preflight.ResolvedImages.Admin.Version) -or
-        [string]::IsNullOrWhiteSpace([string] $preflight.ResolvedImages.Sql.Version)) {
-        throw 'Preflight did not return both approved immutable image versions.'
     }
     $adminParameters = @{
         Config = $config
