@@ -1,6 +1,35 @@
+import os
 from pathlib import Path
+import subprocess
 
 ROOT = Path(__file__).resolve().parents[2]
+VALIDATION_SCRIPT = ROOT / "build" / "Test-Repository.ps1"
+
+
+def run_powershell(command: str, *, environment: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["pwsh", "-NoProfile", "-NonInteractive", "-Command", command],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={**os.environ, **environment},
+    )
+
+
+def validation_function_definitions() -> str:
+    return """
+$source = Get-Content -LiteralPath $env:REPOSITORY_VALIDATION_SCRIPT -Raw
+$entryPoint = $source.IndexOf('Push-Location $script:RepositoryRoot')
+if ($entryPoint -lt 0) { throw 'Could not locate the validation entry point.' }
+$definitionsPath = Join-Path ([System.IO.Path]::GetTempPath()) "repository-validation-$([guid]::NewGuid()).ps1"
+try {
+    Set-Content -LiteralPath $definitionsPath -Value $source.Substring(0, $entryPoint)
+    . $definitionsPath
+}
+finally {
+    Remove-Item -LiteralPath $definitionsPath -ErrorAction SilentlyContinue
+}
+"""
 
 
 def test_sensitive_and_generated_files_are_ignored() -> None:
@@ -9,14 +38,85 @@ def test_sensitive_and_generated_files_are_ignored() -> None:
         ".worktrees/",
         ".env",
         "*.pfx",
+        "*.pfx.password",
+        "*.cer.private",
         "*.key",
+        "*.bak",
+        "*.trc",
+        "*.xel",
+        "*.blg",
+        "*.sqlplan",
         "evidence/runs/",
         "site/",
         ".venv/",
         "__pycache__/",
         ".pytest_cache/",
+        ".coverage",
+        "htmlcov/",
+        "TestResults/",
+        ".vscode/settings.json",
+        "*.user",
+        ".DS_Store",
+        "Thumbs.db",
     }
     assert required.issubset(set(rules))
+
+
+def test_missing_psscriptanalyzer_skips_the_optional_gate() -> None:
+    command = validation_function_definitions() + """
+function Get-Module { return $null }
+$output = @(Invoke-OptionalValidationGate -Name 'PSScriptAnalyzer' -Validation { Test-PowerShellAnalysis } 6>&1)
+$text = $output -join [Environment]::NewLine
+if ($text -notmatch 'SKIP: PSScriptAnalyzer.*not installed') {
+    throw "Expected a clear skip message, got: $text"
+}
+if ($script:GateFailures.Count -ne 0) {
+    throw 'Skipping the optional analyzer gate recorded a validation failure.'
+}
+"""
+    result = run_powershell(
+        command,
+        environment={"REPOSITORY_VALIDATION_SCRIPT": str(VALIDATION_SCRIPT)},
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_json_validation_skips_node_modules(tmp_path: Path) -> None:
+    vendor_directory = tmp_path / "node_modules" / "dependency"
+    vendor_directory.mkdir(parents=True)
+    (vendor_directory / "generated.json").write_text("not json", encoding="utf-8")
+    (tmp_path / "project.json").write_text('{"tracked": true}', encoding="utf-8")
+    command = validation_function_definitions() + """
+$script:RepositoryRoot = $env:JSON_TEST_ROOT
+Test-JsonFile
+"""
+    result = run_powershell(
+        command,
+        environment={
+            "REPOSITORY_VALIDATION_SCRIPT": str(VALIDATION_SCRIPT),
+            "JSON_TEST_ROOT": str(tmp_path),
+        },
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_json_validation_checks_project_json(tmp_path: Path) -> None:
+    (tmp_path / "project.json").write_text("not json", encoding="utf-8")
+    command = validation_function_definitions() + """
+$script:RepositoryRoot = $env:JSON_TEST_ROOT
+Test-JsonFile
+"""
+    result = run_powershell(
+        command,
+        environment={
+            "REPOSITORY_VALIDATION_SCRIPT": str(VALIDATION_SCRIPT),
+            "JSON_TEST_ROOT": str(tmp_path),
+        },
+    )
+
+    assert result.returncode != 0
 
 
 def test_license_is_mit() -> None:

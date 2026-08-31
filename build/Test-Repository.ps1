@@ -87,7 +87,7 @@ function Test-PowerShellAnalysis {
         Sort-Object Version -Descending |
         Select-Object -First 1
     if (-not $analyzer) {
-        throw 'PSScriptAnalyzer is not installed. Run build/Install-DevDependencies.ps1.'
+        return $false
     }
 
     Import-Module $analyzer.Path -Force
@@ -104,10 +104,12 @@ function Test-PowerShellAnalysis {
         }
         throw "PSScriptAnalyzer findings:`n$($summary -join [Environment]::NewLine)"
     }
+
+    return $true
 }
 
 function Test-JsonFile {
-    $excludedDirectoryPattern = '(^|/)(\.git|\.worktrees|\.venv|site)(/|$)'
+    $excludedDirectoryPattern = '(^|/)(\.git|\.worktrees|\.venv|node_modules|site)(/|$)'
     $errors = [System.Collections.Generic.List[string]]::new()
 
     foreach ($path in Get-ChildItem -LiteralPath $script:RepositoryRoot -Filter '*.json' -File -Recurse) {
@@ -205,11 +207,35 @@ function Invoke-ValidationGate {
     }
 }
 
+function Invoke-OptionalValidationGate {
+    param(
+        [Parameter(Mandatory)]
+        [string] $Name,
+
+        [Parameter(Mandatory)]
+        [scriptblock] $Validation
+    )
+
+    try {
+        $wasRun = & $Validation
+        if ($wasRun) {
+            Write-Host "PASS: $Name"
+        }
+        else {
+            Write-Host "SKIP: $Name is not installed; optional analyzer checks were not run."
+        }
+    }
+    catch {
+        $script:GateFailures.Add("${Name}: $($_.Exception.Message)")
+        Write-Warning "FAIL: $Name"
+    }
+}
+
 Push-Location $script:RepositoryRoot
 try {
     Invoke-ValidationGate -Name 'Python tests' -Validation { Test-Python }
     Invoke-ValidationGate -Name 'PowerShell syntax' -Validation { Test-PowerShellSyntax }
-    Invoke-ValidationGate -Name 'PSScriptAnalyzer' -Validation { Test-PowerShellAnalysis }
+    Invoke-OptionalValidationGate -Name 'PSScriptAnalyzer' -Validation { Test-PowerShellAnalysis }
     Invoke-ValidationGate -Name 'JSON parsing' -Validation { Test-JsonFile }
     Invoke-ValidationGate -Name 'Tracked-file secret scan' -Validation { Test-TrackedFileForSecret }
     Invoke-ValidationGate -Name 'Static site build' -Validation { Test-SiteBuild }
