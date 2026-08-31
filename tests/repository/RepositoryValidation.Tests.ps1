@@ -183,6 +183,32 @@ Describe 'Find-RepositorySecret' {
             Should -BeNullOrEmpty
     }
 
+    It 'suppresses an equals-syntax fixture value immediately preceding an inline marker' {
+        $passwordName = 'Pass' + 'word'
+        $marker = '# repository-secret-scan: allow-test-fixture'
+        $content = '{0}=fixture {1}' -f $passwordName, $marker
+
+        @(Find-RepositorySecret -Path 'tests/fixtures/secrets/equals-single.txt' -Content $content) |
+            Should -BeNullOrEmpty
+    }
+
+    It 'suppresses only the immediately preceding equals-syntax fixture assignment' {
+        $passwordName = 'Pass' + 'word'
+        $marker = '# repository-secret-scan: allow-test-fixture'
+        $content = '{0}=first; {0}=fixture {1}' -f $passwordName, $marker
+
+        $findings = @(
+            Find-RepositorySecret -Path 'tests/fixtures/secrets/equals-double.txt' `
+                -Content $content
+        )
+
+        $findings.Count | Should -Be 1
+        $findings[0].Type | Should -Be 'Password assignment'
+        $findings[0].Line | Should -Be 1
+        $findings[0].PSObject.Properties.Name | Should -Be @('Path', 'Type', 'Line')
+        ($findings | Out-String) | Should -Not -Match 'first'
+    }
+
     It 'suppresses only the password assignment immediately preceding an inline marker' {
         $passwordName = 'pass' + 'word'
         $marker = '# repository-secret-scan: allow-test-fixture'

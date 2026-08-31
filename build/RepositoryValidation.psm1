@@ -190,11 +190,26 @@ function Find-RepositorySecret {
                     continue
                 }
 
+                $valueGroup = $match.Groups['value']
+                $valueEndIndex = $valueGroup.Index + $valueGroup.Length
+                if ($inlineFixtureMarkerIndexes.ContainsKey($lineNumber)) {
+                    $markerIndex = $inlineFixtureMarkerIndexes[$lineNumber]
+                    if ($valueGroup.Index -lt $markerIndex -and $valueEndIndex -gt $markerIndex) {
+                        $valueEndIndex = $markerIndex
+                    }
+                }
+                while (
+                    $valueEndIndex -gt $valueGroup.Index -and
+                    [char]::IsWhiteSpace($line[$valueEndIndex - 1])
+                ) {
+                    $valueEndIndex--
+                }
+
                 $candidates.Add([pscustomobject]@{
                     Id = "Password assignment:$assignmentIndex"
                     Type = 'Password assignment'
                     Index = $assignmentIndex
-                    EndIndex = $match.Index + $match.Length
+                    EndIndex = $valueEndIndex
                 })
             }
         }
