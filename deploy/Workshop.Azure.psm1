@@ -311,7 +311,7 @@ ${function:New-WorkshopNetworkModel} = {
                     DestinationPort = 1433
                 }
                 [pscustomobject][ordered]@{
-                    Name = 'Allow-Admin-Rdp-To-Sql'
+                    Name = 'Allow-Admin-To-Sql-Rdp'
                     Priority = 110
                     Direction = 'Inbound'
                     Access = 'Allow'
@@ -323,7 +323,7 @@ ${function:New-WorkshopNetworkModel} = {
                 }
                 [pscustomobject][ordered]@{
                     Name = 'Deny-Other-VNet-To-Sql'
-                    Priority = 120
+                    Priority = 4000
                     Direction = 'Inbound'
                     Access = 'Deny'
                     Protocol = '*'
@@ -1207,10 +1207,741 @@ ${function:Test-WorkshopPrerequisites} = {
     }
 }
 
+function Get-WorkshopNetworkResourceId {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string] $ResourceGroupName,
+        [Parameter(Mandatory)][string] $ResourceType,
+        [Parameter(Mandatory)][string] $Name
+    )
+
+    return "/subscriptions/mock/resourceGroups/$ResourceGroupName/providers/Microsoft.Network/$ResourceType/$Name"
+}
+
+function Get-WorkshopNetworkResourceSpecification {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][hashtable] $Config,
+        [Parameter(Mandatory)][string] $FacilitatorCidr
+    )
+
+    Assert-WorkshopConfigShape -Config $Config
+    $hostCidr = Assert-WorkshopHostCidr -Cidr $FacilitatorCidr
+    $resourceGroupName = [string] $Config.ResourceGroupName
+    $adminAsgId = Get-WorkshopNetworkResourceId -ResourceGroupName $resourceGroupName -ResourceType 'applicationSecurityGroups' -Name $Config.AdminAsg
+    $sqlAsgId = Get-WorkshopNetworkResourceId -ResourceGroupName $resourceGroupName -ResourceType 'applicationSecurityGroups' -Name $Config.SqlAsg
+    $adminPipId = Get-WorkshopNetworkResourceId -ResourceGroupName $resourceGroupName -ResourceType 'publicIPAddresses' -Name 'pip-mcpsql-admin'
+    $natPipId = Get-WorkshopNetworkResourceId -ResourceGroupName $resourceGroupName -ResourceType 'publicIPAddresses' -Name 'pip-mcpsql-nat'
+    $natId = Get-WorkshopNetworkResourceId -ResourceGroupName $resourceGroupName -ResourceType 'natGateways' -Name 'nat-mcpsql-workshop'
+    $adminNsgId = Get-WorkshopNetworkResourceId -ResourceGroupName $resourceGroupName -ResourceType 'networkSecurityGroups' -Name 'nsg-mcpsql-admin'
+    $sqlNsgId = Get-WorkshopNetworkResourceId -ResourceGroupName $resourceGroupName -ResourceType 'networkSecurityGroups' -Name 'nsg-mcpsql-sql'
+    $vnetId = Get-WorkshopNetworkResourceId -ResourceGroupName $resourceGroupName -ResourceType 'virtualNetworks' -Name $Config.VNet.Name
+    $adminSubnetId = "$vnetId/subnets/$($Config.AdminSubnet.Name)"
+    $sqlSubnetId = "$vnetId/subnets/$($Config.SqlSubnet.Name)"
+    $tags = [ordered]@{}
+    foreach ($key in @($Config.Tags.Keys | Sort-Object)) {
+        $tags[$key] = [string] $Config.Tags[$key]
+    }
+
+    @(
+        [pscustomobject][ordered]@{
+            Kind = 'ResourceGroup'; Name = $resourceGroupName; Location = [string] $Config.Location
+            Id = "/subscriptions/mock/resourceGroups/$resourceGroupName"; Tags = $tags
+        }
+        [pscustomobject][ordered]@{
+            Kind = 'ApplicationSecurityGroup'; Name = [string] $Config.AdminAsg; Location = [string] $Config.Location
+            Id = $adminAsgId; Tags = $tags
+        }
+        [pscustomobject][ordered]@{
+            Kind = 'ApplicationSecurityGroup'; Name = [string] $Config.SqlAsg; Location = [string] $Config.Location
+            Id = $sqlAsgId; Tags = $tags
+        }
+        [pscustomobject][ordered]@{
+            Kind = 'PublicIpAddress'; Name = 'pip-mcpsql-admin'; Location = [string] $Config.Location
+            Id = $adminPipId; Sku = 'Standard'; AllocationMethod = 'Static'; IpAddressVersion = 'IPv4'; Tags = $tags
+        }
+        [pscustomobject][ordered]@{
+            Kind = 'PublicIpAddress'; Name = 'pip-mcpsql-nat'; Location = [string] $Config.Location
+            Id = $natPipId; Sku = 'Standard'; AllocationMethod = 'Static'; IpAddressVersion = 'IPv4'; Tags = $tags
+        }
+        [pscustomobject][ordered]@{
+            Kind = 'NatGateway'; Name = 'nat-mcpsql-workshop'; Location = [string] $Config.Location
+            Id = $natId; Sku = 'Standard'; PublicIpAddressIds = @($natPipId); Tags = $tags
+        }
+        [pscustomobject][ordered]@{
+            Kind = 'NetworkSecurityGroup'; Name = 'nsg-mcpsql-admin'; Location = [string] $Config.Location
+            Id = $adminNsgId; Tags = $tags
+            Rules = @(
+                [pscustomobject][ordered]@{
+                    Name = 'Allow-Facilitator-Rdp'; Priority = 100; Direction = 'Inbound'; Access = 'Allow'; Protocol = 'Tcp'
+                    SourcePortRange = '*'; SourceAddressPrefix = $hostCidr; SourceApplicationSecurityGroupId = $null
+                    DestinationPortRange = '3389'; DestinationAddressPrefix = $null
+                    DestinationApplicationSecurityGroupId = $adminAsgId
+                }
+            )
+        }
+        [pscustomobject][ordered]@{
+            Kind = 'NetworkSecurityGroup'; Name = 'nsg-mcpsql-sql'; Location = [string] $Config.Location
+            Id = $sqlNsgId; Tags = $tags
+            Rules = @(
+                [pscustomobject][ordered]@{
+                    Name = 'Allow-Admin-To-Sql'; Priority = 100; Direction = 'Inbound'; Access = 'Allow'; Protocol = 'Tcp'
+                    SourcePortRange = '*'; SourceAddressPrefix = $null; SourceApplicationSecurityGroupId = $adminAsgId
+                    DestinationPortRange = '1433'; DestinationAddressPrefix = $null
+                    DestinationApplicationSecurityGroupId = $sqlAsgId
+                }
+                [pscustomobject][ordered]@{
+                    Name = 'Allow-Admin-To-Sql-Rdp'; Priority = 110; Direction = 'Inbound'; Access = 'Allow'; Protocol = 'Tcp'
+                    SourcePortRange = '*'; SourceAddressPrefix = $null; SourceApplicationSecurityGroupId = $adminAsgId
+                    DestinationPortRange = '3389'; DestinationAddressPrefix = $null
+                    DestinationApplicationSecurityGroupId = $sqlAsgId
+                }
+                [pscustomobject][ordered]@{
+                    Name = 'Deny-Other-VNet-To-Sql'; Priority = 4000; Direction = 'Inbound'; Access = 'Deny'; Protocol = '*'
+                    SourcePortRange = '*'; SourceAddressPrefix = 'VirtualNetwork'; SourceApplicationSecurityGroupId = $null
+                    DestinationPortRange = '*'; DestinationAddressPrefix = $null
+                    DestinationApplicationSecurityGroupId = $sqlAsgId
+                }
+            )
+        }
+        [pscustomobject][ordered]@{
+            Kind = 'VirtualNetwork'; Name = [string] $Config.VNet.Name; Location = [string] $Config.Location
+            Id = $vnetId; AddressPrefix = [string] $Config.VNet.AddressPrefix; Tags = $tags
+            Subnets = @(
+                [pscustomobject][ordered]@{
+                    Name = [string] $Config.AdminSubnet.Name; AddressPrefix = [string] $Config.AdminSubnet.Prefix
+                    PrivateEndpointNetworkPolicies = 'Disabled'; DefaultOutboundAccess = $false
+                    NatGatewayId = $natId; NetworkSecurityGroupId = $adminNsgId
+                }
+                [pscustomobject][ordered]@{
+                    Name = [string] $Config.SqlSubnet.Name; AddressPrefix = [string] $Config.SqlSubnet.Prefix
+                    PrivateEndpointNetworkPolicies = 'Disabled'; DefaultOutboundAccess = $false
+                    NatGatewayId = $natId; NetworkSecurityGroupId = $sqlNsgId
+                }
+            )
+        }
+        [pscustomobject][ordered]@{
+            Kind = 'NetworkInterface'; Name = 'nic-mcpsql-admin'; Location = [string] $Config.Location
+            Id = (Get-WorkshopNetworkResourceId -ResourceGroupName $resourceGroupName -ResourceType 'networkInterfaces' -Name 'nic-mcpsql-admin')
+            SubnetId = $adminSubnetId; PrivateIpAllocationMethod = 'Dynamic'; PrivateIpAddress = $null
+            PublicIpAddressId = $adminPipId; PublicIpAddressIds = @($adminPipId); IpConfigurationCount = 1
+            ApplicationSecurityGroupIds = @($adminAsgId)
+            NetworkSecurityGroupId = $null; Tags = $tags
+        }
+        [pscustomobject][ordered]@{
+            Kind = 'NetworkInterface'; Name = 'nic-mcpsql-sql'; Location = [string] $Config.Location
+            Id = (Get-WorkshopNetworkResourceId -ResourceGroupName $resourceGroupName -ResourceType 'networkInterfaces' -Name 'nic-mcpsql-sql')
+            SubnetId = $sqlSubnetId; PrivateIpAllocationMethod = 'Static'; PrivateIpAddress = [string] $Config.SqlPrivateIp
+            PublicIpAddressId = $null; PublicIpAddressIds = @(); IpConfigurationCount = 1
+            ApplicationSecurityGroupIds = @($sqlAsgId)
+            NetworkSecurityGroupId = $null; Tags = $tags
+        }
+    )
+}
+
+function ConvertTo-WorkshopComparableValue {
+    [CmdletBinding()]
+    param([AllowNull()][object] $Value)
+
+    if ($null -eq $Value) { return $null }
+    if ($Value -is [string]) {
+        if ($Value -match '(?i)/resourceGroups/') {
+            return ($Value.Substring($Value.IndexOf('/resourceGroups/', [System.StringComparison]::OrdinalIgnoreCase))).ToLowerInvariant()
+        }
+        return $Value
+    }
+    if ($Value -is [System.Collections.IDictionary]) {
+        $result = [ordered]@{}
+        foreach ($key in @($Value.Keys | Sort-Object)) {
+            $result[[string] $key] = ConvertTo-WorkshopComparableValue -Value $Value[$key]
+        }
+        return $result
+    }
+    if ($Value -is [System.Collections.IEnumerable]) {
+        return @($Value | ForEach-Object { ConvertTo-WorkshopComparableValue -Value $_ })
+    }
+    if ($Value -is [psobject] -and @($Value.PSObject.Properties).Count -gt 0 -and $Value -isnot [ValueType]) {
+        $result = [ordered]@{}
+        foreach ($property in @($Value.PSObject.Properties | Sort-Object Name)) {
+            $result[$property.Name] = ConvertTo-WorkshopComparableValue -Value $property.Value
+        }
+        return $result
+    }
+    return $Value
+}
+
+function Test-WorkshopNetworkResourceMatch {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][psobject] $Expected,
+        [Parameter(Mandatory)][psobject] $Actual
+    )
+
+    $expectedComparable = ConvertTo-WorkshopComparableValue -Value $Expected
+    $actualComparable = ConvertTo-WorkshopComparableValue -Value $Actual
+    return ($expectedComparable | ConvertTo-Json -Depth 20 -Compress) -ceq
+        ($actualComparable | ConvertTo-Json -Depth 20 -Compress)
+}
+
+function Get-WorkshopReferenceId {
+    [CmdletBinding()]
+    param([AllowNull()][object] $Reference)
+
+    if ($null -eq $Reference) { return '' }
+    if ($Reference -is [string]) { return [string] $Reference }
+    if ($Reference.PSObject.Properties.Name -contains 'Id' -and $null -ne $Reference.Id) {
+        return [string] $Reference.Id
+    }
+    return ''
+}
+
+function ConvertFrom-WorkshopAzNetworkResource {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string] $Kind,
+        [Parameter(Mandatory)][psobject] $Resource
+    )
+
+    if ($Resource.PSObject.Properties.Name -contains 'Kind') {
+        return $Resource
+    }
+    $name = if ($Kind -eq 'ResourceGroup') { [string] $Resource.ResourceGroupName } else { [string] $Resource.Name }
+    $location = [string] $Resource.Location
+    $tags = if ($null -eq $Resource.Tags) { [ordered]@{} } else { $Resource.Tags }
+    switch ($Kind) {
+        'ResourceGroup' {
+            return [pscustomobject][ordered]@{ Kind = $Kind; Name = $name; Location = $location; Id = [string] $Resource.ResourceId; Tags = $tags }
+        }
+        'ApplicationSecurityGroup' {
+            return [pscustomobject][ordered]@{ Kind = $Kind; Name = $name; Location = $location; Id = [string] $Resource.Id; Tags = $tags }
+        }
+        'PublicIpAddress' {
+            return [pscustomobject][ordered]@{
+                Kind = $Kind; Name = $name; Location = $location; Id = [string] $Resource.Id
+                Sku = [string] $Resource.Sku.Name; AllocationMethod = [string] $Resource.PublicIpAllocationMethod
+                IpAddressVersion = [string] $Resource.PublicIpAddressVersion; Tags = $tags
+            }
+        }
+        'NatGateway' {
+            return [pscustomobject][ordered]@{
+                Kind = $Kind; Name = $name; Location = $location; Id = [string] $Resource.Id; Sku = [string] $Resource.Sku.Name
+                PublicIpAddressIds = @($Resource.PublicIpAddresses | ForEach-Object { [string] $_.Id }); Tags = $tags
+            }
+        }
+        'NetworkSecurityGroup' {
+            $rules = @($Resource.SecurityRules | ForEach-Object {
+                [pscustomobject][ordered]@{
+                    Name = [string] $_.Name; Priority = [int] $_.Priority; Direction = [string] $_.Direction
+                    Access = [string] $_.Access; Protocol = [string] $_.Protocol
+                    SourcePortRange = [string] $_.SourcePortRange; SourceAddressPrefix = [string] $_.SourceAddressPrefix
+                    SourceApplicationSecurityGroupId = Get-WorkshopReferenceId -Reference @($_.SourceApplicationSecurityGroups)[0]
+                    DestinationPortRange = [string] $_.DestinationPortRange; DestinationAddressPrefix = [string] $_.DestinationAddressPrefix
+                    DestinationApplicationSecurityGroupId = Get-WorkshopReferenceId -Reference @($_.DestinationApplicationSecurityGroups)[0]
+                }
+            })
+            return [pscustomobject][ordered]@{ Kind = $Kind; Name = $name; Location = $location; Id = [string] $Resource.Id; Tags = $tags; Rules = $rules }
+        }
+        'VirtualNetwork' {
+            $subnets = @($Resource.Subnets | ForEach-Object {
+                $defaultOutboundAccess = if ($_.PSObject.Properties.Name -contains 'DefaultOutboundAccess' -and
+                    $_.DefaultOutboundAccess -is [bool]) {
+                    $_.DefaultOutboundAccess
+                }
+                else {
+                    $null
+                }
+                [pscustomobject][ordered]@{
+                    Name = [string] $_.Name; AddressPrefix = [string] $_.AddressPrefix
+                    PrivateEndpointNetworkPolicies = [string] $_.PrivateEndpointNetworkPolicies
+                    DefaultOutboundAccess = $defaultOutboundAccess
+                    NatGatewayId = Get-WorkshopReferenceId -Reference $_.NatGateway
+                    NetworkSecurityGroupId = Get-WorkshopReferenceId -Reference $_.NetworkSecurityGroup
+                }
+            })
+            return [pscustomobject][ordered]@{
+                Kind = $Kind; Name = $name; Location = $location; Id = [string] $Resource.Id
+                AddressPrefix = [string] @($Resource.AddressSpace.AddressPrefixes)[0]; Tags = $tags; Subnets = $subnets
+            }
+        }
+        'NetworkInterface' {
+            $ipConfigurations = @($Resource.IpConfigurations)
+            $ipConfiguration = $ipConfigurations[0]
+            $privateIpAddress = if ([string] $ipConfiguration.PrivateIpAllocationMethod -eq 'Static') {
+                [string] $ipConfiguration.PrivateIpAddress
+            }
+            else {
+                $null
+            }
+            return [pscustomobject][ordered]@{
+                Kind = $Kind; Name = $name; Location = $location; Id = [string] $Resource.Id
+                SubnetId = Get-WorkshopReferenceId -Reference $ipConfiguration.Subnet
+                PrivateIpAllocationMethod = [string] $ipConfiguration.PrivateIpAllocationMethod
+                PrivateIpAddress = $privateIpAddress
+                PublicIpAddressId = Get-WorkshopReferenceId -Reference $ipConfiguration.PublicIpAddress
+                PublicIpAddressIds = @($ipConfigurations | ForEach-Object { Get-WorkshopReferenceId -Reference $_.PublicIpAddress } |
+                    Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+                IpConfigurationCount = $ipConfigurations.Count
+                ApplicationSecurityGroupIds = @($ipConfiguration.ApplicationSecurityGroups | ForEach-Object { [string] $_.Id })
+                NetworkSecurityGroupId = Get-WorkshopReferenceId -Reference $Resource.NetworkSecurityGroup
+                Tags = $tags
+            }
+        }
+        default { throw "Unsupported workshop network resource kind '$Kind'." }
+    }
+}
+
+function Get-DefaultWorkshopNetworkOperationSet {
+    [CmdletBinding()]
+    param()
+
+    @{
+        GetResource = {
+            param($Kind, $Name, $ResourceGroupName)
+            try {
+                $resource = switch ($Kind) {
+                    'ResourceGroup' { Get-AzResourceGroup -Name $Name -ErrorAction Stop }
+                    'ApplicationSecurityGroup' { Get-AzApplicationSecurityGroup -ResourceGroupName $ResourceGroupName -Name $Name -ErrorAction Stop }
+                    'PublicIpAddress' { Get-AzPublicIpAddress -ResourceGroupName $ResourceGroupName -Name $Name -ErrorAction Stop }
+                    'NatGateway' { Get-AzNatGateway -ResourceGroupName $ResourceGroupName -Name $Name -ErrorAction Stop }
+                    'NetworkSecurityGroup' { Get-AzNetworkSecurityGroup -ResourceGroupName $ResourceGroupName -Name $Name -ErrorAction Stop }
+                    'VirtualNetwork' { Get-AzVirtualNetwork -ResourceGroupName $ResourceGroupName -Name $Name -ErrorAction Stop }
+                    'NetworkInterface' { Get-AzNetworkInterface -ResourceGroupName $ResourceGroupName -Name $Name -ErrorAction Stop }
+                    default { throw "Unsupported workshop network resource kind '$Kind'." }
+                }
+                ConvertFrom-WorkshopAzNetworkResource -Kind $Kind -Resource $resource
+            }
+            catch {
+                if (Test-WorkshopAzureNotFound -ErrorRecord $_) { return $null }
+                throw
+            }
+        }
+        CreateResource = {
+            param($Spec, $ResourceGroupName)
+            switch ($Spec.Kind) {
+                'ResourceGroup' {
+                    New-AzResourceGroup -Name $Spec.Name -Location $Spec.Location -Tag $Spec.Tags -ErrorAction Stop
+                }
+                'ApplicationSecurityGroup' {
+                    New-AzApplicationSecurityGroup -ResourceGroupName $ResourceGroupName -Name $Spec.Name `
+                        -Location $Spec.Location -Tag $Spec.Tags -ErrorAction Stop
+                }
+                'PublicIpAddress' {
+                    New-AzPublicIpAddress -ResourceGroupName $ResourceGroupName -Name $Spec.Name `
+                        -Location $Spec.Location -Sku $Spec.Sku -AllocationMethod $Spec.AllocationMethod `
+                        -IpAddressVersion $Spec.IpAddressVersion -Tag $Spec.Tags -ErrorAction Stop
+                }
+                'NatGateway' {
+                    $publicIp = Get-AzPublicIpAddress -ResourceGroupName $ResourceGroupName `
+                        -Name (($Spec.PublicIpAddressIds[0] -split '/')[-1]) -ErrorAction Stop
+                    New-AzNatGateway -ResourceGroupName $ResourceGroupName -Name $Spec.Name `
+                        -Location $Spec.Location -Sku $Spec.Sku -PublicIpAddress $publicIp `
+                        -Tag $Spec.Tags -ErrorAction Stop
+                }
+                'NetworkSecurityGroup' {
+                    $securityRules = foreach ($rule in $Spec.Rules) {
+                        $parameters = @{
+                            Name = $rule.Name; Priority = $rule.Priority; Direction = $rule.Direction
+                            Access = $rule.Access; Protocol = $rule.Protocol; SourcePortRange = $rule.SourcePortRange
+                            DestinationPortRange = $rule.DestinationPortRange; ErrorAction = 'Stop'
+                        }
+                        if (-not [string]::IsNullOrWhiteSpace([string] $rule.SourceAddressPrefix)) {
+                            $parameters.SourceAddressPrefix = $rule.SourceAddressPrefix
+                        }
+                        if (-not [string]::IsNullOrWhiteSpace([string] $rule.SourceApplicationSecurityGroupId)) {
+                            $parameters.SourceApplicationSecurityGroup = @(
+                                Get-AzApplicationSecurityGroup -ResourceGroupName $ResourceGroupName `
+                                    -Name (($rule.SourceApplicationSecurityGroupId -split '/')[-1]) -ErrorAction Stop
+                            )
+                        }
+                        if (-not [string]::IsNullOrWhiteSpace([string] $rule.DestinationAddressPrefix)) {
+                            $parameters.DestinationAddressPrefix = $rule.DestinationAddressPrefix
+                        }
+                        if (-not [string]::IsNullOrWhiteSpace([string] $rule.DestinationApplicationSecurityGroupId)) {
+                            $parameters.DestinationApplicationSecurityGroup = @(
+                                Get-AzApplicationSecurityGroup -ResourceGroupName $ResourceGroupName `
+                                    -Name (($rule.DestinationApplicationSecurityGroupId -split '/')[-1]) -ErrorAction Stop
+                            )
+                        }
+                        New-AzNetworkSecurityRuleConfig @parameters
+                    }
+                    New-AzNetworkSecurityGroup -ResourceGroupName $ResourceGroupName -Name $Spec.Name `
+                        -Location $Spec.Location -SecurityRules $securityRules -Tag $Spec.Tags -ErrorAction Stop
+                }
+                'VirtualNetwork' {
+                    $natGateway = Get-AzNatGateway -ResourceGroupName $ResourceGroupName `
+                        -Name (($Spec.Subnets[0].NatGatewayId -split '/')[-1]) -ErrorAction Stop
+                    $subnets = foreach ($subnet in $Spec.Subnets) {
+                        $networkSecurityGroup = Get-AzNetworkSecurityGroup -ResourceGroupName $ResourceGroupName `
+                            -Name (($subnet.NetworkSecurityGroupId -split '/')[-1]) -ErrorAction Stop
+                        New-AzVirtualNetworkSubnetConfig -Name $subnet.Name -AddressPrefix $subnet.AddressPrefix `
+                            -NetworkSecurityGroup $networkSecurityGroup -InputObject $natGateway `
+                            -PrivateEndpointNetworkPoliciesFlag $subnet.PrivateEndpointNetworkPolicies `
+                            -DefaultOutboundAccess $subnet.DefaultOutboundAccess -ErrorAction Stop
+                    }
+                    New-AzVirtualNetwork -ResourceGroupName $ResourceGroupName -Name $Spec.Name `
+                        -Location $Spec.Location -AddressPrefix $Spec.AddressPrefix -Subnet $subnets `
+                        -Tag $Spec.Tags -ErrorAction Stop
+                }
+                'NetworkInterface' {
+                    $virtualNetworkName = ($Spec.SubnetId -split '/virtualNetworks/')[1] -split '/subnets/' | Select-Object -First 1
+                    $subnetName = ($Spec.SubnetId -split '/')[-1]
+                    $virtualNetwork = Get-AzVirtualNetwork -ResourceGroupName $ResourceGroupName `
+                        -Name $virtualNetworkName -ErrorAction Stop
+                    $subnet = @($virtualNetwork.Subnets | Where-Object Name -EQ $subnetName)[0]
+                    if ($null -eq $subnet) { throw "Subnet '$subnetName' was not returned for NIC creation." }
+                    $applicationSecurityGroups = @($Spec.ApplicationSecurityGroupIds | ForEach-Object {
+                        Get-AzApplicationSecurityGroup -ResourceGroupName $ResourceGroupName `
+                            -Name (($_ -split '/')[-1]) -ErrorAction Stop
+                    })
+                    $ipParameters = @{
+                        Name = 'ipconfig1'; Subnet = $subnet
+                        ApplicationSecurityGroup = $applicationSecurityGroups
+                        ErrorAction = 'Stop'
+                    }
+                    if ($Spec.PrivateIpAllocationMethod -eq 'Static') {
+                        $ipParameters.PrivateIpAddress = $Spec.PrivateIpAddress
+                        $ipParameters.PrivateIpAddressVersion = 'IPv4'
+                    }
+                    if (-not [string]::IsNullOrWhiteSpace([string] $Spec.PublicIpAddressId)) {
+                        $ipParameters.PublicIpAddress = Get-AzPublicIpAddress -ResourceGroupName $ResourceGroupName `
+                            -Name (($Spec.PublicIpAddressId -split '/')[-1]) -ErrorAction Stop
+                    }
+                    $ipConfiguration = New-AzNetworkInterfaceIpConfig @ipParameters
+                    New-AzNetworkInterface -ResourceGroupName $ResourceGroupName -Name $Spec.Name `
+                        -Location $Spec.Location -IpConfiguration $ipConfiguration -Tag $Spec.Tags `
+                        -ErrorAction Stop
+                }
+                default { throw "Unsupported workshop network resource kind '$($Spec.Kind)'." }
+            }
+        }
+    }
+}
+
+function Assert-WorkshopNetworkOperationSet {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][hashtable] $Operations,
+        [switch] $ReadOnly
+    )
+
+    $required = @('GetResource')
+    if (-not $ReadOnly) { $required += 'CreateResource' }
+    foreach ($name in $required) {
+        if (-not $Operations.ContainsKey($name) -or $Operations[$name] -isnot [scriptblock]) {
+            throw "Operations must provide scriptblock '$name'."
+        }
+    }
+}
+
+${function:New-WorkshopNetwork} = {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][hashtable] $Config,
+        [Parameter(Mandatory)][string] $FacilitatorCidr,
+        [hashtable] $Operations
+    )
+
+    if ($null -eq $Operations) { $Operations = Get-DefaultWorkshopNetworkOperationSet }
+    Assert-WorkshopNetworkOperationSet -Operations $Operations
+    $specs = @(Get-WorkshopNetworkResourceSpecification -Config $Config -FacilitatorCidr $FacilitatorCidr)
+    $checkpoint = [System.Collections.Generic.List[string]]::new()
+    try {
+        foreach ($spec in $specs) {
+            $existing = & $Operations.GetResource $spec.Kind $spec.Name $Config.ResourceGroupName
+            if ($null -ne $existing) {
+                if (-not (Test-WorkshopNetworkResourceMatch -Expected $spec -Actual $existing)) {
+                    throw "$($spec.Kind) '$($spec.Name)' conflicts with the approved shape."
+                }
+                $checkpoint.Add("$($spec.Kind)/$($spec.Name):matched")
+                continue
+            }
+
+            $null = & $Operations.CreateResource $spec $Config.ResourceGroupName
+            $readBack = & $Operations.GetResource $spec.Kind $spec.Name $Config.ResourceGroupName
+            if ($null -eq $readBack) {
+                throw "$($spec.Kind) '$($spec.Name)' was not returned by positive native read-back."
+            }
+            if (-not (Test-WorkshopNetworkResourceMatch -Expected $spec -Actual $readBack)) {
+                throw "$($spec.Kind) '$($spec.Name)' positive native read-back conflicts with the approved shape."
+            }
+            $checkpoint.Add("$($spec.Kind)/$($spec.Name):created-and-verified")
+        }
+    }
+    catch {
+        $safeMessage = ConvertTo-WorkshopSafeDetail -Value $_.Exception.Message
+        $safeCheckpoint = if ($checkpoint.Count -eq 0) { 'none' } else { $checkpoint -join ', ' }
+        throw "$safeMessage Checkpoint: $safeCheckpoint. No automatic rollback was attempted; correct the mismatch or failure, then rerun to resume."
+    }
+
+    [pscustomobject][ordered]@{
+        Completed = $true
+        Checkpoint = $checkpoint.ToArray()
+        Resources = $specs
+    }
+}
+
+function Add-WorkshopBoundaryCheck {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()][System.Collections.Generic.List[object]] $Checks,
+        [Parameter(Mandatory)][string] $Name,
+        [Parameter(Mandatory)][bool] $Passed,
+        [Parameter(Mandatory)][string] $Detail
+    )
+
+    Add-WorkshopCheck -Checks $Checks -Name $Name -Passed $Passed -Detail $Detail `
+        -Remediation 'Restore the exact approved private two-tier network shape, then run boundary verification again.'
+}
+
+function Get-WorkshopRulePropertyValue {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][psobject] $Rule,
+        [Parameter(Mandatory)][string] $SingularName,
+        [Parameter(Mandatory)][string] $PluralName
+    )
+
+    $values = @()
+    if ($Rule.PSObject.Properties.Name -contains $SingularName) {
+        $values += @($Rule.$SingularName)
+    }
+    if ($Rule.PSObject.Properties.Name -contains $PluralName) {
+        $values += @($Rule.$PluralName)
+    }
+    return @($values | Where-Object { $null -ne $_ -and -not [string]::IsNullOrWhiteSpace([string] $_) })
+}
+
+function Test-WorkshopRuleCoversPort {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][psobject] $Rule,
+        [Parameter(Mandatory)][int] $Port
+    )
+
+    foreach ($range in @(Get-WorkshopRulePropertyValue -Rule $Rule `
+            -SingularName 'DestinationPortRange' -PluralName 'DestinationPortRanges')) {
+        if ($range -eq '*' -or $range -eq [string] $Port) { return $true }
+        if ($range -match '^(\d+)-(\d+)$' -and $Port -ge [int] $Matches[1] -and $Port -le [int] $Matches[2]) {
+            return $true
+        }
+    }
+    return $false
+}
+
+function Test-WorkshopRuleProtocol {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][psobject] $Rule,
+        [Parameter(Mandatory)][string] $Protocol
+    )
+
+    return [string] $Rule.Protocol -in @('*', $Protocol)
+}
+
+${function:Test-WorkshopNetworkBoundary} = {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][hashtable] $Config,
+        [Parameter(Mandatory)][string] $FacilitatorCidr,
+        [hashtable] $Operations
+    )
+
+    if ($null -eq $Operations) { $Operations = Get-DefaultWorkshopNetworkOperationSet }
+    Assert-WorkshopNetworkOperationSet -Operations $Operations -ReadOnly
+    $expectedSpecs = @(Get-WorkshopNetworkResourceSpecification -Config $Config -FacilitatorCidr $FacilitatorCidr)
+    $checks = [System.Collections.Generic.List[object]]::new()
+    $actual = @{}
+    foreach ($spec in $expectedSpecs) {
+        try {
+            $resource = & $Operations.GetResource $spec.Kind $spec.Name $Config.ResourceGroupName
+            if ($null -eq $resource) { throw "$($spec.Kind) '$($spec.Name)' was not returned." }
+            $actual["$($spec.Kind)/$($spec.Name)"] = $resource
+            Add-WorkshopBoundaryCheck -Checks $checks -Name "Read $($spec.Kind) $($spec.Name)" -Passed $true `
+                -Detail 'Deployed object was read successfully.'
+        }
+        catch {
+            Add-WorkshopBoundaryCheck -Checks $checks -Name "Read $($spec.Kind) $($spec.Name)" -Passed $false `
+                -Detail (ConvertTo-WorkshopSafeDetail -Value $_.Exception.Message)
+        }
+    }
+    if ($actual.Count -ne $expectedSpecs.Count) {
+        return [pscustomobject][ordered]@{ Passed = $false; Checks = $checks.ToArray() }
+    }
+
+    $adminPip = $actual['PublicIpAddress/pip-mcpsql-admin']
+    $natPip = $actual['PublicIpAddress/pip-mcpsql-nat']
+    $nat = $actual['NatGateway/nat-mcpsql-workshop']
+    $adminNsg = $actual['NetworkSecurityGroup/nsg-mcpsql-admin']
+    $sqlNsg = $actual['NetworkSecurityGroup/nsg-mcpsql-sql']
+    $vnet = $actual["VirtualNetwork/$($Config.VNet.Name)"]
+    $adminNic = $actual['NetworkInterface/nic-mcpsql-admin']
+    $sqlNic = $actual['NetworkInterface/nic-mcpsql-sql']
+    $adminAsgId = $actual["ApplicationSecurityGroup/$($Config.AdminAsg)"].Id
+    $sqlAsgId = $actual["ApplicationSecurityGroup/$($Config.SqlAsg)"].Id
+
+    Add-WorkshopBoundaryCheck -Checks $checks -Name 'Standard static public IP inventory' `
+        -Passed ($adminPip.Sku -eq 'Standard' -and $adminPip.AllocationMethod -eq 'Static' -and
+            $natPip.Sku -eq 'Standard' -and $natPip.AllocationMethod -eq 'Static') `
+        -Detail 'Only the approved administration-ingress and NAT-egress public IP resources are in the model.'
+    Add-WorkshopBoundaryCheck -Checks $checks -Name 'NAT public IP association' `
+        -Passed (@($nat.PublicIpAddressIds).Count -eq 1 -and
+            (ConvertTo-WorkshopComparableValue $nat.PublicIpAddressIds[0]) -eq (ConvertTo-WorkshopComparableValue $natPip.Id)) `
+        -Detail 'NAT Gateway must use exactly the approved NAT-egress public IP.'
+
+    $adminPublicIds = @(
+        if ($adminNic.PSObject.Properties.Name -contains 'PublicIpAddressIds') {
+            @($adminNic.PublicIpAddressIds | Where-Object { -not [string]::IsNullOrWhiteSpace([string] $_) })
+        }
+        else {
+            @($adminNic.PublicIpAddressId | Where-Object { -not [string]::IsNullOrWhiteSpace([string] $_) })
+        }
+    )
+    $sqlPublicIds = @(
+        if ($sqlNic.PSObject.Properties.Name -contains 'PublicIpAddressIds') {
+            @($sqlNic.PublicIpAddressIds | Where-Object { -not [string]::IsNullOrWhiteSpace([string] $_) })
+        }
+        else {
+            @($sqlNic.PublicIpAddressId | Where-Object { -not [string]::IsNullOrWhiteSpace([string] $_) })
+        }
+    )
+    $adminPublicPassed = $adminNic.IpConfigurationCount -eq 1 -and $adminPublicIds.Count -eq 1 -and
+        (ConvertTo-WorkshopComparableValue $adminPublicIds[0]) -eq (ConvertTo-WorkshopComparableValue $adminPip.Id) -and
+        (ConvertTo-WorkshopComparableValue $adminNic.PublicIpAddressId) -eq (ConvertTo-WorkshopComparableValue $adminPip.Id)
+    Add-WorkshopBoundaryCheck -Checks $checks -Name 'Administration NIC public IP' -Passed $adminPublicPassed `
+        -Detail 'Administration NIC must have exactly the administration public IP.'
+    Add-WorkshopBoundaryCheck -Checks $checks -Name 'SQL NIC has no public IP' `
+        -Passed ($sqlNic.IpConfigurationCount -eq 1 -and $sqlPublicIds.Count -eq 0 -and
+            [string]::IsNullOrWhiteSpace([string] $sqlNic.PublicIpAddressId)) `
+        -Detail 'SQL NIC public IP association must be empty.'
+    Add-WorkshopBoundaryCheck -Checks $checks -Name 'NIC NSGs are absent' `
+        -Passed ([string]::IsNullOrWhiteSpace([string] $adminNic.NetworkSecurityGroupId) -and
+            [string]::IsNullOrWhiteSpace([string] $sqlNic.NetworkSecurityGroupId)) `
+        -Detail 'NSGs must be associated only at subnet level.'
+    Add-WorkshopBoundaryCheck -Checks $checks -Name 'NIC ASG membership' `
+        -Passed (@($adminNic.ApplicationSecurityGroupIds).Count -eq 1 -and
+            @($sqlNic.ApplicationSecurityGroupIds).Count -eq 1 -and
+            (ConvertTo-WorkshopComparableValue $adminNic.ApplicationSecurityGroupIds[0]) -eq (ConvertTo-WorkshopComparableValue $adminAsgId) -and
+            (ConvertTo-WorkshopComparableValue $sqlNic.ApplicationSecurityGroupIds[0]) -eq (ConvertTo-WorkshopComparableValue $sqlAsgId)) `
+        -Detail 'Each NIC must belong only to its approved application security group.'
+    Add-WorkshopBoundaryCheck -Checks $checks -Name 'SQL static private IP' `
+        -Passed ($sqlNic.PrivateIpAllocationMethod -eq 'Static' -and $sqlNic.PrivateIpAddress -eq $Config.SqlPrivateIp) `
+        -Detail "SQL NIC must use static private IP '$($Config.SqlPrivateIp)'."
+    $expectedAdminSubnetId = ($expectedSpecs | Where-Object { $_.Kind -eq 'NetworkInterface' -and $_.Name -eq 'nic-mcpsql-admin' }).SubnetId
+    $expectedSqlSubnetId = ($expectedSpecs | Where-Object { $_.Kind -eq 'NetworkInterface' -and $_.Name -eq 'nic-mcpsql-sql' }).SubnetId
+    Add-WorkshopBoundaryCheck -Checks $checks -Name 'NIC subnet and allocation boundaries' `
+        -Passed ($adminNic.PrivateIpAllocationMethod -eq 'Dynamic' -and
+            (ConvertTo-WorkshopComparableValue $adminNic.SubnetId) -eq (ConvertTo-WorkshopComparableValue $expectedAdminSubnetId) -and
+            (ConvertTo-WorkshopComparableValue $sqlNic.SubnetId) -eq (ConvertTo-WorkshopComparableValue $expectedSqlSubnetId)) `
+        -Detail 'Administration and SQL NICs must use their approved subnets and allocation modes.'
+
+    $adminRdp = @($adminNsg.Rules | Where-Object Name -EQ 'Allow-Facilitator-Rdp')
+    $adminRdpPassed = $adminRdp.Count -eq 1 -and $adminRdp[0].Priority -eq 100 -and
+        $adminRdp[0].Protocol -eq 'Tcp' -and $adminRdp[0].SourceAddressPrefix -ceq $FacilitatorCidr -and
+        $adminRdp[0].SourcePortRange -eq '*' -and $adminRdp[0].DestinationPortRange -eq '3389' -and
+        $adminRdp[0].Access -eq 'Allow' -and
+        (ConvertTo-WorkshopComparableValue $adminRdp[0].DestinationApplicationSecurityGroupId) -eq
+            (ConvertTo-WorkshopComparableValue $adminAsgId)
+    $adminRdpAllows = @($adminNsg.Rules | Where-Object {
+        $_.Direction -eq 'Inbound' -and $_.Access -eq 'Allow' -and
+        (Test-WorkshopRuleProtocol -Rule $_ -Protocol 'Tcp') -and
+        (Test-WorkshopRuleCoversPort -Rule $_ -Port 3389)
+    })
+    $adminRdpPassed = $adminRdpPassed -and $adminRdpAllows.Count -eq 1 -and
+        $adminRdpAllows[0].Name -eq 'Allow-Facilitator-Rdp'
+    Add-WorkshopBoundaryCheck -Checks $checks -Name 'Facilitator RDP rule' -Passed $adminRdpPassed `
+        -Detail 'Administration RDP must be TCP 3389 from the exact validated facilitator /32 to the admin ASG.'
+
+    $sqlRulesPassed = $true
+    foreach ($ruleExpectation in @(
+        @{ Name = 'Allow-Admin-To-Sql'; Priority = 100; Port = '1433' },
+        @{ Name = 'Allow-Admin-To-Sql-Rdp'; Priority = 110; Port = '3389' }
+    )) {
+        $rule = @($sqlNsg.Rules | Where-Object Name -EQ $ruleExpectation.Name)
+        $sourcePrefixes = @()
+        $destinationPrefixes = @()
+        if ($rule.Count -eq 1) {
+            $sourcePrefixes = @(Get-WorkshopRulePropertyValue -Rule $rule[0] `
+                -SingularName 'SourceAddressPrefix' -PluralName 'SourceAddressPrefixes')
+            $destinationPrefixes = @(Get-WorkshopRulePropertyValue -Rule $rule[0] `
+                -SingularName 'DestinationAddressPrefix' -PluralName 'DestinationAddressPrefixes')
+        }
+        $sqlRulesPassed = $sqlRulesPassed -and $rule.Count -eq 1 -and
+            $rule[0].Priority -eq $ruleExpectation.Priority -and $rule[0].Direction -eq 'Inbound' -and
+            $rule[0].Protocol -eq 'Tcp' -and $rule[0].SourcePortRange -eq '*' -and
+            $rule[0].DestinationPortRange -eq $ruleExpectation.Port -and $rule[0].Access -eq 'Allow' -and
+            $sourcePrefixes.Count -eq 0 -and $destinationPrefixes.Count -eq 0 -and
+            (ConvertTo-WorkshopComparableValue $rule[0].SourceApplicationSecurityGroupId) -eq
+                (ConvertTo-WorkshopComparableValue $adminAsgId) -and
+            (ConvertTo-WorkshopComparableValue $rule[0].DestinationApplicationSecurityGroupId) -eq
+                (ConvertTo-WorkshopComparableValue $sqlAsgId)
+    }
+    Add-WorkshopBoundaryCheck -Checks $checks -Name 'SQL ASG allow rules' -Passed $sqlRulesPassed `
+        -Detail 'SQL TCP 1433 and private RDP must originate at the admin ASG and target the SQL ASG.'
+
+    $deny = @($sqlNsg.Rules | Where-Object Name -EQ 'Deny-Other-VNet-To-Sql')
+    $denySourceAsgs = @()
+    $denyDestinationPrefixes = @()
+    if ($deny.Count -eq 1) {
+        $denySourceAsgs = @(Get-WorkshopRulePropertyValue -Rule $deny[0] `
+            -SingularName 'SourceApplicationSecurityGroupId' -PluralName 'SourceApplicationSecurityGroupIds')
+        $denyDestinationPrefixes = @(Get-WorkshopRulePropertyValue -Rule $deny[0] `
+            -SingularName 'DestinationAddressPrefix' -PluralName 'DestinationAddressPrefixes')
+    }
+    $denyPassed = $deny.Count -eq 1 -and $deny[0].Priority -eq 4000 -and
+        $deny[0].Direction -eq 'Inbound' -and $deny[0].Protocol -eq '*' -and $deny[0].SourcePortRange -eq '*' -and
+        $deny[0].SourceAddressPrefix -eq 'VirtualNetwork' -and $deny[0].DestinationPortRange -eq '*' -and
+        $deny[0].Access -eq 'Deny' -and $denySourceAsgs.Count -eq 0 -and $denyDestinationPrefixes.Count -eq 0 -and
+        (ConvertTo-WorkshopComparableValue $deny[0].DestinationApplicationSecurityGroupId) -eq
+            (ConvertTo-WorkshopComparableValue $sqlAsgId)
+    Add-WorkshopBoundaryCheck -Checks $checks -Name 'SQL VNet deny rule' -Passed $denyPassed `
+        -Detail 'Other VNet traffic must be denied to the SQL ASG at priority 4000.'
+
+    $publicSqlRule = @($sqlNsg.Rules + $adminNsg.Rules | Where-Object {
+        $sourceAsgs = @(Get-WorkshopRulePropertyValue -Rule $_ `
+            -SingularName 'SourceApplicationSecurityGroupId' -PluralName 'SourceApplicationSecurityGroupIds')
+        $sourcePrefixes = @(Get-WorkshopRulePropertyValue -Rule $_ `
+            -SingularName 'SourceAddressPrefix' -PluralName 'SourceAddressPrefixes')
+        $_.Direction -eq 'Inbound' -and $_.Access -eq 'Allow' -and $sourceAsgs.Count -eq 0 -and
+        @($sourcePrefixes | Where-Object { $_ -ne 'VirtualNetwork' }).Count -gt 0 -and
+        (((Test-WorkshopRuleProtocol -Rule $_ -Protocol 'Tcp') -and
+            (Test-WorkshopRuleCoversPort -Rule $_ -Port 1433)) -or
+            ((Test-WorkshopRuleProtocol -Rule $_ -Protocol 'Udp') -and
+            (Test-WorkshopRuleCoversPort -Rule $_ -Port 1434)))
+    })
+    Add-WorkshopBoundaryCheck -Checks $checks -Name 'No public SQL or Browser rule' -Passed ($publicSqlRule.Count -eq 0) `
+        -Detail 'No custom rule may permit public TCP 1433 or UDP 1434.'
+
+    $subnetsPassed = @($vnet.Subnets).Count -eq 2
+    foreach ($expectedSubnet in @(
+        @{ Name = $Config.AdminSubnet.Name; Prefix = $Config.AdminSubnet.Prefix; Nsg = 'nsg-mcpsql-admin' },
+        @{ Name = $Config.SqlSubnet.Name; Prefix = $Config.SqlSubnet.Prefix; Nsg = 'nsg-mcpsql-sql' }
+    )) {
+        $subnet = @($vnet.Subnets | Where-Object Name -EQ $expectedSubnet.Name)
+        $outboundVerified = $subnet.Count -eq 1 -and
+            $subnet[0].PSObject.Properties.Name -contains 'DefaultOutboundAccess' -and
+            $subnet[0].DefaultOutboundAccess -is [bool] -and -not $subnet[0].DefaultOutboundAccess
+        $subnetsPassed = $subnetsPassed -and $subnet.Count -eq 1 -and $outboundVerified -and
+            $subnet[0].AddressPrefix -eq $expectedSubnet.Prefix -and
+            $subnet[0].PrivateEndpointNetworkPolicies -eq 'Disabled' -and
+            -not [string]::IsNullOrWhiteSpace([string] $subnet[0].NatGatewayId) -and
+            $subnet[0].NatGatewayId -like "*/nat-mcpsql-workshop" -and
+            $subnet[0].NetworkSecurityGroupId -like "*/$($expectedSubnet.Nsg)"
+    }
+    Add-WorkshopBoundaryCheck -Checks $checks -Name 'Private subnet NAT and NSG associations' -Passed $subnetsPassed `
+        -Detail 'Both private subnets require default outbound disabled plus the approved NAT Gateway and subnet NSG.'
+
+    [pscustomobject][ordered]@{
+        Passed = @($checks | Where-Object Status -EQ 'Failed').Count -eq 0
+        Checks = $checks.ToArray()
+    }
+}
+
 Export-ModuleMember -Function @(
     'Assert-WorkshopHostCidr'
     'New-WorkshopNetworkModel'
+    'New-WorkshopNetwork'
     'Get-WorkshopPlan'
     'Test-WorkshopPrerequisites'
+    'Test-WorkshopNetworkBoundary'
     'Format-WorkshopPlanCard'
 )

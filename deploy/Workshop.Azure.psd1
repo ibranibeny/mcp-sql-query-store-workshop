@@ -5,13 +5,15 @@
     Author = 'ibranibeny'
     CompanyName = 'Community'
     Copyright = '(c) 2026 ibranibeny. MIT License.'
-    Description = 'Pure workshop planning and non-destructive Azure prerequisite validation.'
+    Description = 'Workshop planning, prerequisite validation, and private network deployment.'
     PowerShellVersion = '7.4'
     FunctionsToExport = @(
         'Assert-WorkshopHostCidr'
         'New-WorkshopNetworkModel'
+        'New-WorkshopNetwork'
         'Get-WorkshopPlan'
         'Test-WorkshopPrerequisites'
+        'Test-WorkshopNetworkBoundary'
         'Format-WorkshopPlanCard'
     )
     CmdletsToExport = @()

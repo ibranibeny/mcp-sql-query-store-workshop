@@ -292,7 +292,7 @@ Describe 'Workshop network model' {
 
     It 'uses ASG-only SQL rules for 1433 and private RDP' {
         $sqlRule = $Network.Sql.Rules | Where-Object Name -EQ 'Allow-Admin-To-Sql'
-        $rdpRule = $Network.Sql.Rules | Where-Object Name -EQ 'Allow-Admin-Rdp-To-Sql'
+        $rdpRule = $Network.Sql.Rules | Where-Object Name -EQ 'Allow-Admin-To-Sql-Rdp'
         $sqlRule.SourceAsg | Should -Be 'asg-mcpsql-admin'
         $sqlRule.DestinationAsg | Should -Be 'asg-mcpsql-sql'
         $sqlRule.DestinationPort | Should -Be 1433
@@ -306,7 +306,7 @@ Describe 'Workshop network model' {
         $deny = $Network.Sql.Rules | Where-Object Name -EQ 'Deny-Other-VNet-To-Sql'
         $deny.SourcePrefix | Should -Be 'VirtualNetwork'
         $deny.Access | Should -Be 'Deny'
-        $deny.Priority | Should -BeLessThan 65000
+        $deny.Priority | Should -Be 4000
         ($Network.Sql.Rules | Sort-Object Priority | Select-Object -Last 1).Name | Should -Be 'AzureDefault-AllowVNetInBound'
     }
 }
@@ -962,15 +962,13 @@ Describe 'Static safety and module contract' {
         $manifest.PowerShellVersion | Should -Be ([version]'7.4')
         @($manifest.ExportedFunctions.Keys | Sort-Object) | Should -Be @(
             'Assert-WorkshopHostCidr', 'Format-WorkshopPlanCard', 'Get-WorkshopPlan',
-            'New-WorkshopNetworkModel', 'Test-WorkshopPrerequisites'
+            'New-WorkshopNetwork', 'New-WorkshopNetworkModel',
+            'Test-WorkshopNetworkBoundary', 'Test-WorkshopPrerequisites'
         )
     }
 
-    It 'contains no mutating Az command in the module or preflight entry point' {
-        $files = @(
-            (Join-Path $PSScriptRoot '../../deploy/Workshop.Azure.psm1'),
-            (Join-Path $PSScriptRoot '../../deploy/Test-WorkshopPrerequisites.ps1')
-        )
+    It 'contains no mutating Az command in the preflight entry point' {
+        $files = @((Join-Path $PSScriptRoot '../../deploy/Test-WorkshopPrerequisites.ps1'))
         $commands = foreach ($file in $files) {
             $tokens = $null
             $errors = $null
@@ -983,19 +981,6 @@ Describe 'Static safety and module contract' {
         @($commands | Where-Object { $_ -match '-Az' -and $_ -notmatch '^Get-Az' -and $_ -ne 'Test-AzSubscriptionDeployment' }).Count | Should -Be 0
         $commands | Should -Not -Contain 'New-AzDeployment'
 
-        $modulePath = Join-Path $PSScriptRoot '../../deploy/Workshop.Azure.psm1'
-        $tokens = $null
-        $errors = $null
-        $moduleAst = [System.Management.Automation.Language.Parser]::ParseFile($modulePath, [ref]$tokens, [ref]$errors)
-        $dynamicCommands = @($moduleAst.FindAll({
-            param($node)
-            $node -is [System.Management.Automation.Language.CommandAst] -and
-                [string]::IsNullOrWhiteSpace($node.GetCommandName())
-        }, $true) | ForEach-Object { $_.Extent.Text })
-        $dynamicCommands.Count | Should -Be 2
-        $dynamicCommands | Should -Contain '& $Operation @Arguments 2>&1'
-        @($dynamicCommands | Where-Object { $_ -match '^& \$validationCommand -Name' }).Count | Should -Be 1
-        (Get-Content -LiteralPath $modulePath -Raw) | Should -Match "\`$validationCommand = 'Test-Az' \+ 'SubscriptionDeployment'"
     }
 
     It 'requires and forwards the billable acknowledgement in the entry script' {
@@ -1010,5 +995,258 @@ Describe 'Static safety and module contract' {
         @($parameter.Attributes.TypeName.FullName) | Should -Contain 'Parameter'
         $entryText = Get-Content -LiteralPath $entryPath -Raw
         $entryText | Should -Match 'BillableResourcesAcknowledged\s*=\s*\$BillableResourcesAcknowledged\.IsPresent'
+    }
+}
+
+Describe 'Private workshop network deployment' {
+    BeforeEach {
+        $script:NetworkState = @{}
+        $script:NetworkCreates = [System.Collections.Generic.List[object]]::new()
+        $script:SkipReadBackKind = $null
+        $script:NetworkOperations = @{
+            GetResource = {
+                param($Kind, $Name, $ResourceGroupName)
+                $null = $ResourceGroupName
+                $key = "$Kind/$Name"
+                if ($script:NetworkState.ContainsKey($key)) { return $script:NetworkState[$key] }
+                return $null
+            }
+            CreateResource = {
+                param($Spec, $ResourceGroupName)
+                $null = $ResourceGroupName
+                $script:NetworkCreates.Add($Spec)
+                if ($script:SkipReadBackKind -ne $Spec.Kind) {
+                    $script:NetworkState["$($Spec.Kind)/$($Spec.Name)"] = $Spec
+                }
+                return $Spec
+            }
+        }
+    }
+
+    It 'creates the approved resources in dependency order with exactly two public IPs' {
+        $result = New-WorkshopNetwork -Config $script:Config -FacilitatorCidr '8.8.8.8/32' -Operations $script:NetworkOperations
+
+        $result.Completed | Should -BeTrue
+        @($script:NetworkCreates.Kind) | Should -Be @(
+            'ResourceGroup', 'ApplicationSecurityGroup', 'ApplicationSecurityGroup',
+            'PublicIpAddress', 'PublicIpAddress', 'NatGateway',
+            'NetworkSecurityGroup', 'NetworkSecurityGroup', 'VirtualNetwork',
+            'NetworkInterface', 'NetworkInterface'
+        )
+        @($script:NetworkCreates | Where-Object Kind -EQ 'PublicIpAddress').Name |
+            Should -Be @('pip-mcpsql-admin', 'pip-mcpsql-nat')
+        @($script:NetworkCreates | Where-Object { $_.Kind -eq 'PublicIpAddress' -and $_.Name -eq 'pip-mcpsql-sql' }).Count |
+            Should -Be 0
+    }
+
+    It 'uses exact NSG ASG boundaries, source CIDR, protocols, ports, and priorities' {
+        $null = New-WorkshopNetwork -Config $script:Config -FacilitatorCidr '8.8.8.8/32' -Operations $script:NetworkOperations
+        $adminNsg = $script:NetworkState['NetworkSecurityGroup/nsg-mcpsql-admin']
+        $sqlNsg = $script:NetworkState['NetworkSecurityGroup/nsg-mcpsql-sql']
+
+        $adminNsg.Rules | Should -HaveCount 1
+        $adminNsg.Rules[0].Name | Should -Be 'Allow-Facilitator-Rdp'
+        $adminNsg.Rules[0].Priority | Should -Be 100
+        $adminNsg.Rules[0].Protocol | Should -Be 'Tcp'
+        $adminNsg.Rules[0].SourcePortRange | Should -Be '*'
+        $adminNsg.Rules[0].SourceAddressPrefix | Should -Be '8.8.8.8/32'
+        $adminNsg.Rules[0].DestinationApplicationSecurityGroupId | Should -BeLike '*/asg-mcpsql-admin'
+        $adminNsg.Rules[0].DestinationPortRange | Should -Be '3389'
+
+        ($sqlNsg.Rules | Where-Object Name -EQ 'Allow-Admin-To-Sql').Priority | Should -Be 100
+        ($sqlNsg.Rules | Where-Object Name -EQ 'Allow-Admin-To-Sql').DestinationPortRange | Should -Be '1433'
+        ($sqlNsg.Rules | Where-Object Name -EQ 'Allow-Admin-To-Sql-Rdp').Priority | Should -Be 110
+        ($sqlNsg.Rules | Where-Object Name -EQ 'Allow-Admin-To-Sql-Rdp').DestinationPortRange | Should -Be '3389'
+        foreach ($rule in @($sqlNsg.Rules | Where-Object Access -EQ 'Allow')) {
+            $rule.SourceApplicationSecurityGroupId | Should -BeLike '*/asg-mcpsql-admin'
+            $rule.DestinationApplicationSecurityGroupId | Should -BeLike '*/asg-mcpsql-sql'
+        }
+        $deny = $sqlNsg.Rules | Where-Object Name -EQ 'Deny-Other-VNet-To-Sql'
+        $deny.Priority | Should -Be 4000
+        $deny.Protocol | Should -Be '*'
+        $deny.SourceAddressPrefix | Should -Be 'VirtualNetwork'
+        $deny.DestinationApplicationSecurityGroupId | Should -BeLike '*/asg-mcpsql-sql'
+        $deny.DestinationPortRange | Should -Be '*'
+        $deny.Access | Should -Be 'Deny'
+    }
+
+    It 'creates private NAT and subnet NSG associations and the approved NIC boundaries' {
+        $null = New-WorkshopNetwork -Config $script:Config -FacilitatorCidr '8.8.8.8/32' -Operations $script:NetworkOperations
+        $vnet = $script:NetworkState['VirtualNetwork/vnet-mcpsql-workshop']
+        foreach ($subnet in $vnet.Subnets) {
+            $subnet.PrivateEndpointNetworkPolicies | Should -Be 'Disabled'
+            $subnet.DefaultOutboundAccess | Should -BeFalse
+            $subnet.NatGatewayId | Should -BeLike '*/nat-mcpsql-workshop'
+            $subnet.NetworkSecurityGroupId | Should -Match '/nsg-mcpsql-(admin|sql)$'
+        }
+        $adminNic = $script:NetworkState['NetworkInterface/nic-mcpsql-admin']
+        $sqlNic = $script:NetworkState['NetworkInterface/nic-mcpsql-sql']
+        $adminNic.PublicIpAddressId | Should -BeLike '*/pip-mcpsql-admin'
+        $adminNic.ApplicationSecurityGroupIds | Should -Be @('/subscriptions/mock/resourceGroups/rg-mcp-sql-workshop/providers/Microsoft.Network/applicationSecurityGroups/asg-mcpsql-admin')
+        $adminNic.NetworkSecurityGroupId | Should -BeNullOrEmpty
+        $sqlNic.PublicIpAddressId | Should -BeNullOrEmpty
+        $sqlNic.PrivateIpAllocationMethod | Should -Be 'Static'
+        $sqlNic.PrivateIpAddress | Should -Be '10.20.2.10'
+        $sqlNic.ApplicationSecurityGroupIds | Should -Be @('/subscriptions/mock/resourceGroups/rg-mcp-sql-workshop/providers/Microsoft.Network/applicationSecurityGroups/asg-mcpsql-sql')
+        $sqlNic.NetworkSecurityGroupId | Should -BeNullOrEmpty
+    }
+
+    It 'is idempotent when every existing resource exactly matches' {
+        $first = New-WorkshopNetwork -Config $script:Config -FacilitatorCidr '8.8.8.8/32' -Operations $script:NetworkOperations
+        $script:NetworkCreates.Clear()
+        $second = New-WorkshopNetwork -Config $script:Config -FacilitatorCidr '8.8.8.8/32' -Operations $script:NetworkOperations
+
+        $first.Completed | Should -BeTrue
+        $second.Completed | Should -BeTrue
+        $script:NetworkCreates | Should -HaveCount 0
+    }
+
+    It 'refuses a conflicting existing resource without updating it' {
+        $null = New-WorkshopNetwork -Config $script:Config -FacilitatorCidr '8.8.8.8/32' -Operations $script:NetworkOperations
+        $script:NetworkState['VirtualNetwork/vnet-mcpsql-workshop'].AddressPrefix = '10.99.0.0/16'
+        $script:NetworkCreates.Clear()
+
+        { New-WorkshopNetwork -Config $script:Config -FacilitatorCidr '8.8.8.8/32' -Operations $script:NetworkOperations } |
+            Should -Throw -ExpectedMessage '*conflicts with the approved shape*'
+        $script:NetworkCreates | Should -HaveCount 0
+    }
+
+    It 'throws with a resumable checkpoint when positive read-back is missing' {
+        $script:SkipReadBackKind = 'NatGateway'
+        { New-WorkshopNetwork -Config $script:Config -FacilitatorCidr '8.8.8.8/32' -Operations $script:NetworkOperations } |
+            Should -Throw -ExpectedMessage '*NatGateway*native read-back*Checkpoint*'
+        @($script:NetworkState.Keys | Where-Object { $_ -like 'PublicIpAddress/*' }).Count | Should -Be 2
+    }
+}
+
+Describe 'Workshop network boundary verification' {
+    BeforeEach {
+        $script:NetworkState = @{}
+        $script:NetworkOperations = @{
+            GetResource = {
+                param($Kind, $Name, $ResourceGroupName)
+                $null = $ResourceGroupName
+                $key = "$Kind/$Name"
+                if ($script:NetworkState.ContainsKey($key)) { return $script:NetworkState[$key] }
+                return $null
+            }
+            CreateResource = {
+                param($Spec, $ResourceGroupName)
+                $null = $ResourceGroupName
+                $script:NetworkState["$($Spec.Kind)/$($Spec.Name)"] = $Spec
+                return $Spec
+            }
+        }
+        $null = New-WorkshopNetwork -Config $script:Config -FacilitatorCidr '8.8.8.8/32' -Operations $script:NetworkOperations
+    }
+
+    It 'passes the exact approved deployed boundary without mutation' {
+        $script:NetworkOperations.Remove('CreateResource')
+        $result = Test-WorkshopNetworkBoundary -Config $script:Config -FacilitatorCidr '8.8.8.8/32' -Operations $script:NetworkOperations
+        $result.Passed | Should -BeTrue
+        @($result.Checks | Where-Object Status -EQ 'Failed') | Should -HaveCount 0
+    }
+
+    It 'fails every critical boundary violation' -ForEach @(
+        @{ Case = 'SQL public IP'; Change = { $script:NetworkState['NetworkInterface/nic-mcpsql-sql'].PublicIpAddressId = '/public/sql' } }
+        @{ Case = 'SQL secondary public IP'; Change = { $script:NetworkState['NetworkInterface/nic-mcpsql-sql'] | Add-Member -NotePropertyName PublicIpAddressIds -NotePropertyValue @($null, '/public/sql') -Force } }
+        @{ Case = 'admin missing expected public IP'; Change = { $script:NetworkState['NetworkInterface/nic-mcpsql-admin'].PublicIpAddressId = $null } }
+        @{ Case = 'public SQL TCP'; Change = { $script:NetworkState['NetworkSecurityGroup/nsg-mcpsql-sql'].Rules += [pscustomobject]@{ Name='Bad'; Priority=200; Direction='Inbound'; Access='Allow'; Protocol='Tcp'; SourceAddressPrefix='Internet'; DestinationPortRange='1433' } } }
+        @{ Case = 'public SQL CIDR'; Change = { $script:NetworkState['NetworkSecurityGroup/nsg-mcpsql-sql'].Rules += [pscustomobject]@{ Name='Bad'; Priority=200; Direction='Inbound'; Access='Allow'; Protocol='Tcp'; SourceAddressPrefix='8.8.8.0/24'; DestinationPortRange='1433' } } }
+        @{ Case = 'public SQL plural port'; Change = { $script:NetworkState['NetworkSecurityGroup/nsg-mcpsql-sql'].Rules += [pscustomobject]@{ Name='Bad'; Priority=200; Direction='Inbound'; Access='Allow'; Protocol='Tcp'; SourceAddressPrefixes=@('Internet'); DestinationPortRanges=@('1433') } } }
+        @{ Case = 'public SQL Browser UDP'; Change = { $script:NetworkState['NetworkSecurityGroup/nsg-mcpsql-sql'].Rules += [pscustomobject]@{ Name='Bad'; Priority=200; Direction='Inbound'; Access='Allow'; Protocol='Udp'; SourceAddressPrefix='*'; DestinationPortRange='1434' } } }
+        @{ Case = 'admin RDP broad'; Change = { $script:NetworkState['NetworkSecurityGroup/nsg-mcpsql-admin'].Rules[0].SourceAddressPrefix = 'Internet' } }
+        @{ Case = 'competing admin RDP broad'; Change = { $script:NetworkState['NetworkSecurityGroup/nsg-mcpsql-admin'].Rules += [pscustomobject]@{ Name='Bad-Rdp'; Priority=90; Direction='Inbound'; Access='Allow'; Protocol='Tcp'; SourceAddressPrefix='Internet'; DestinationPortRange='3389' } } }
+        @{ Case = 'SQL ASG rule wrong'; Change = { ($script:NetworkState['NetworkSecurityGroup/nsg-mcpsql-sql'].Rules | Where-Object Name -EQ 'Allow-Admin-To-Sql').SourceApplicationSecurityGroupId = '/wrong' } }
+        @{ Case = 'deny absent'; Change = { $script:NetworkState['NetworkSecurityGroup/nsg-mcpsql-sql'].Rules = @($script:NetworkState['NetworkSecurityGroup/nsg-mcpsql-sql'].Rules | Where-Object Name -NE 'Deny-Other-VNet-To-Sql') } }
+        @{ Case = 'deny priority wrong'; Change = { ($script:NetworkState['NetworkSecurityGroup/nsg-mcpsql-sql'].Rules | Where-Object Name -EQ 'Deny-Other-VNet-To-Sql').Priority = 3999 } }
+        @{ Case = 'subnet prefix wrong'; Change = { $script:NetworkState['VirtualNetwork/vnet-mcpsql-workshop'].Subnets[1].AddressPrefix = '10.20.3.0/24' } }
+        @{ Case = 'subnet NAT missing'; Change = { $script:NetworkState['VirtualNetwork/vnet-mcpsql-workshop'].Subnets[0].NatGatewayId = $null } }
+        @{ Case = 'subnet NSG missing'; Change = { $script:NetworkState['VirtualNetwork/vnet-mcpsql-workshop'].Subnets[1].NetworkSecurityGroupId = $null } }
+        @{ Case = 'default outbound enabled'; Change = { $script:NetworkState['VirtualNetwork/vnet-mcpsql-workshop'].Subnets[1].DefaultOutboundAccess = $true } }
+        @{ Case = 'default outbound unverifiable'; Change = { $script:NetworkState['VirtualNetwork/vnet-mcpsql-workshop'].Subnets[1].PSObject.Properties.Remove('DefaultOutboundAccess') } }
+        @{ Case = 'SQL private IP wrong'; Change = { $script:NetworkState['NetworkInterface/nic-mcpsql-sql'].PrivateIpAddress = '10.20.2.11' } }
+        @{ Case = 'admin subnet wrong'; Change = { $script:NetworkState['NetworkInterface/nic-mcpsql-admin'].SubnetId = '/vnet/wrong/subnets/snet-sql' } }
+        @{ Case = 'SQL subnet wrong'; Change = { $script:NetworkState['NetworkInterface/nic-mcpsql-sql'].SubnetId = '/vnet/wrong/subnets/snet-admin' } }
+        @{ Case = 'admin allocation static'; Change = { $script:NetworkState['NetworkInterface/nic-mcpsql-admin'].PrivateIpAllocationMethod = 'Static' } }
+        @{ Case = 'SQL allow outbound'; Change = { ($script:NetworkState['NetworkSecurityGroup/nsg-mcpsql-sql'].Rules | Where-Object Name -EQ 'Allow-Admin-To-Sql').Direction = 'Outbound' } }
+        @{ Case = 'SQL allow source port narrowed'; Change = { ($script:NetworkState['NetworkSecurityGroup/nsg-mcpsql-sql'].Rules | Where-Object Name -EQ 'Allow-Admin-To-Sql').SourcePortRange = '1433' } }
+        @{ Case = 'SQL allow mixed public source'; Change = { ($script:NetworkState['NetworkSecurityGroup/nsg-mcpsql-sql'].Rules | Where-Object Name -EQ 'Allow-Admin-To-Sql').SourceAddressPrefix = 'Internet' } }
+        @{ Case = 'deny outbound'; Change = { ($script:NetworkState['NetworkSecurityGroup/nsg-mcpsql-sql'].Rules | Where-Object Name -EQ 'Deny-Other-VNet-To-Sql').Direction = 'Outbound' } }
+        @{ Case = 'NIC NSG attached'; Change = { $script:NetworkState['NetworkInterface/nic-mcpsql-admin'].NetworkSecurityGroupId = '/nsg/forbidden' } }
+    ) {
+        & $Change
+        $script:NetworkOperations.Remove('CreateResource')
+        $result = Test-WorkshopNetworkBoundary -Config $script:Config -FacilitatorCidr '8.8.8.8/32' -Operations $script:NetworkOperations
+        $result.Passed | Should -BeFalse -Because $Case
+        @($result.Checks | Where-Object Status -EQ 'Failed').Count | Should -BeGreaterThan 0
+    }
+
+    It 'fails closed and sanitizes an unverifiable read without mutating anything' {
+        $script:NetworkOperations.GetResource = { throw "read failed`nwith detail" }
+        $result = Test-WorkshopNetworkBoundary -Config $script:Config -FacilitatorCidr '8.8.8.8/32' -Operations $script:NetworkOperations
+        $result.Passed | Should -BeFalse
+        @($result.Checks | Where-Object Status -EQ 'Failed').Count | Should -BeGreaterThan 0
+        foreach ($check in $result.Checks) {
+            $check.Detail | Should -Not -Match "[`r`n]"
+        }
+    }
+}
+
+Describe 'Default workshop network operation shape' {
+    It 'uses native Az mutation commands with ErrorAction Stop and exactly two Standard static public IP calls' {
+        InModuleScope Workshop.Azure -Parameters @{ Config = $script:Config } {
+            param($Config)
+            Mock New-AzResourceGroup { [pscustomobject]@{ ResourceGroupName = $Name; Location = $Location } }
+            Mock New-AzApplicationSecurityGroup { [pscustomobject]@{ Name = $Name; Id = "/asg/$Name" } }
+            Mock Get-AzApplicationSecurityGroup {
+                [Microsoft.Azure.Commands.Network.Models.PSApplicationSecurityGroup]@{ Name = $Name; Id = "/asg/$Name" }
+            }
+            Mock New-AzPublicIpAddress { [pscustomobject]@{ Name = $Name; Id = "/pip/$Name" } }
+            Mock Get-AzPublicIpAddress {
+                [Microsoft.Azure.Commands.Network.Models.PSPublicIpAddress]@{ Name = $Name; Id = "/pip/$Name" }
+            }
+            Mock New-AzNatGateway { [pscustomobject]@{ Name = $Name; Id = "/nat/$Name" } }
+            Mock Get-AzNatGateway {
+                [Microsoft.Azure.Commands.Network.Models.PSNatGateway]@{ Name = $Name; Id = "/nat/$Name" }
+            }
+            Mock Get-AzNetworkSecurityGroup {
+                [Microsoft.Azure.Commands.Network.Models.PSNetworkSecurityGroup]@{ Name = $Name; Id = "/nsg/$Name" }
+            }
+            Mock New-AzNetworkSecurityRuleConfig {
+                [Microsoft.Azure.Commands.Network.Models.PSSecurityRule]@{ Name = $Name }
+            }
+            Mock New-AzNetworkSecurityGroup { [pscustomobject]@{ Name = $Name; Id = "/nsg/$Name" } }
+            Mock New-AzVirtualNetworkSubnetConfig {
+                [Microsoft.Azure.Commands.Network.Models.PSSubnet]@{ Name = $Name }
+            }
+            Mock New-AzVirtualNetwork { [pscustomobject]@{ Name = $Name; Id = "/vnet/$Name" } }
+            Mock Get-AzVirtualNetwork {
+                [Microsoft.Azure.Commands.Network.Models.PSVirtualNetwork]@{
+                    Name = $Name
+                    Id = "/vnet/$Name"
+                    Subnets = @(
+                        [Microsoft.Azure.Commands.Network.Models.PSSubnet]@{ Name = 'snet-admin'; Id = '/subnet/snet-admin' }
+                        [Microsoft.Azure.Commands.Network.Models.PSSubnet]@{ Name = 'snet-sql'; Id = '/subnet/snet-sql' }
+                    )
+                }
+            }
+            Mock New-AzNetworkInterfaceIpConfig {
+                [Microsoft.Azure.Commands.Network.Models.PSNetworkInterfaceIPConfiguration]@{ Name = $Name }
+            }
+            Mock New-AzNetworkInterface { [pscustomobject]@{ Name = $Name; Id = "/nic/$Name" } }
+
+            $operations = Get-DefaultWorkshopNetworkOperationSet
+            $specs = Get-WorkshopNetworkResourceSpecification -Config $Config -FacilitatorCidr '8.8.8.8/32'
+            foreach ($spec in $specs) { $null = & $operations.CreateResource $spec $Config.ResourceGroupName }
+
+            Should -Invoke New-AzPublicIpAddress -Times 2 -Exactly -ParameterFilter {
+                $Name -in @('pip-mcpsql-admin', 'pip-mcpsql-nat') -and $Sku -eq 'Standard' -and
+                $AllocationMethod -eq 'Static' -and $ErrorAction -eq 'Stop'
+            }
+            Should -Invoke New-AzNatGateway -Times 1 -Exactly -ParameterFilter { $Sku -eq 'Standard' -and $ErrorAction -eq 'Stop' }
+            Should -Invoke New-AzNetworkInterface -Times 2 -Exactly -ParameterFilter { $null -eq $NetworkSecurityGroup -and $ErrorAction -eq 'Stop' }
+            Should -Invoke New-AzResourceGroup -Times 1 -Exactly -ParameterFilter { $ErrorAction -eq 'Stop' }
+        }
     }
 }
