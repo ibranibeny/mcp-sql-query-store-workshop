@@ -1,0 +1,6 @@
+Markdown>=3.7,<4
+Jinja2>=3.1,<4
+pymdown-extensions>=10.12,<11
+pytest>=8,<10
+jsonschema>=4.23,<5
+beautifulsoup4>=4.12,<5
