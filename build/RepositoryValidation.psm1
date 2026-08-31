@@ -104,13 +104,25 @@ function Find-RepositorySecret {
         return
     }
 
-    $fixtureBypassIsAllowed = (
-        $normalizedPath -match '^(?i:tests/fixtures/)' -or
-        $normalizedPath -ieq 'tests/repository/RepositoryValidation.Tests.ps1'
-    )
-    if ($fixtureBypassIsAllowed -and
-        $Content -match 'repository-secret-scan:\s*allow-test-fixture') {
-        return
+    $fixtureBypassIsAllowed = $normalizedPath -match '^(?i:tests/fixtures/secrets/)'
+    $fixtureMarkerPattern = '(?i)(?:^|\s)#\s*repository-secret-scan:\s*allow-test-fixture\s*$'
+    $fixtureMarkerOnlyPattern = '(?i)^\s*#\s*repository-secret-scan:\s*allow-test-fixture\s*$'
+    $contentLines = @($Content -split '\r?\n')
+    $suppressedFixtureLines = [System.Collections.Generic.HashSet[int]]::new()
+    if ($fixtureBypassIsAllowed) {
+        for ($index = 0; $index -lt $contentLines.Count; $index++) {
+            if ($contentLines[$index] -notmatch $fixtureMarkerPattern) {
+                continue
+            }
+
+            $suppressedLine = if ($contentLines[$index] -match $fixtureMarkerOnlyPattern) {
+                $index + 2
+            }
+            else {
+                $index + 1
+            }
+            [void] $suppressedFixtureLines.Add($suppressedLine)
+        }
     }
 
     $privateKeyPattern = '-----BEGIN (?:RSA |EC |OPENSSH |DSA |ENCRYPTED )?PRIVATE KEY-----'
@@ -127,21 +139,22 @@ function Find-RepositorySecret {
 
     $multilineJsonPattern = '(?im)"(?:password|pwd)"\s*:\s*\r?\n\s*(?<value>"(?:\\.|[^"\\])*")'
     foreach ($match in [regex]::Matches($Content, $multilineJsonPattern)) {
-        if (-not (Test-ApprovedPasswordValue -Value $match.Groups['value'].Value)) {
+        $findingLine = 1 + ([regex]::Matches($Content.Substring(0, $match.Index), '\r?\n')).Count
+        if (-not $suppressedFixtureLines.Contains($findingLine) -and
+            -not (Test-ApprovedPasswordValue -Value $match.Groups['value'].Value)) {
             [pscustomobject]@{
                 Path = $Path
                 Type = 'Password assignment'
-                Line = 1 + ([regex]::Matches($Content.Substring(0, $match.Index), '\r?\n')).Count
+                Line = $findingLine
             }
         }
     }
 
     $lineNumber = 0
-    foreach ($line in ($Content -split '\r?\n')) {
+    foreach ($line in $contentLines) {
         $lineNumber++
         $reportedAssignments = [System.Collections.Generic.HashSet[int]]::new()
-        if ($fixtureBypassIsAllowed -and
-            $line -match 'repository-secret-scan:\s*allow-test-fixture') {
+        if ($suppressedFixtureLines.Contains($lineNumber)) {
             continue
         }
         if ($line -match $privateKeyPattern) {

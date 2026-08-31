@@ -33,32 +33,47 @@ Describe 'Get-RepositoryJsonFile' {
 
 Describe 'Find-RepositorySecret' {
     It 'detects each supported private-key header' -ForEach @(
-        '-----BEGIN PRIVATE KEY-----', # repository-secret-scan: allow-test-fixture
-        '-----BEGIN RSA PRIVATE KEY-----', # repository-secret-scan: allow-test-fixture
-        '-----BEGIN EC PRIVATE KEY-----', # repository-secret-scan: allow-test-fixture
-        '-----BEGIN OPENSSH PRIVATE KEY-----', # repository-secret-scan: allow-test-fixture
-        '-----BEGIN DSA PRIVATE KEY-----', # repository-secret-scan: allow-test-fixture
-        '-----BEGIN ENCRYPTED PRIVATE KEY-----' # repository-secret-scan: allow-test-fixture
+        '',
+        'RSA ',
+        'EC ',
+        'OPENSSH ',
+        'DSA ',
+        'ENCRYPTED '
     ) {
-        $findings = @(Find-RepositorySecret -Path 'fixture.pem' -Content $_)
+        $keyHeader = '-----BEGIN ' + $_ + 'PRIVATE KEY-----'
+        $findings = @(Find-RepositorySecret -Path 'fixture.pem' -Content $keyHeader)
 
         $findings.Count | Should -Be 1
         $findings[0].Type | Should -Be 'Private key'
         $findings[0].Line | Should -Be 1
-        ($findings | Out-String) | Should -Not -Match ([regex]::Escape($_))
+        ($findings | Out-String) | Should -Not -Match ([regex]::Escape($keyHeader))
     }
 
     It 'detects format-aware password assignments without returning values' -ForEach @(
-        @{ Name = 'JSON'; Content = '{"password": "actual-secret-123"}' }, # repository-secret-scan: allow-test-fixture
-        @{ Name = 'dotenv'; Content = 'Server=db;Password=actual-secret-123;Encrypt=True' }, # repository-secret-scan: allow-test-fixture
-        @{ Name = 'dotenv-pwd'; Content = 'Pwd=actual-secret-123' }, # repository-secret-scan: allow-test-fixture
-        @{ Name = 'YAML'; Content = 'password: actual-secret-123' }, # repository-secret-scan: allow-test-fixture
-        @{ Name = 'PowerShell parameter'; Content = "Connect-Thing -Password 'actual-secret-123'" }, # repository-secret-scan: allow-test-fixture
-        @{ Name = 'PowerShell hashtable'; Content = "@{ Password = 'actual-secret-123' }" }, # repository-secret-scan: allow-test-fixture
-        @{ Name = 'PowerShell variable'; Content = "`$Password = 'actual-secret-123'" }, # repository-secret-scan: allow-test-fixture
-        @{ Name = 'Insecure SecureString conversion'; Content = "ConvertTo-SecureString 'actual-secret-123' -AsPlainText -Force" } # repository-secret-scan: allow-test-fixture
+        @{ Name = 'JSON'; Format = 'Json' },
+        @{ Name = 'dotenv'; Format = 'ConnectionString' },
+        @{ Name = 'dotenv-pwd'; Format = 'Assignment' },
+        @{ Name = 'YAML'; Format = 'Yaml' },
+        @{ Name = 'PowerShell parameter'; Format = 'Parameter' },
+        @{ Name = 'PowerShell hashtable'; Format = 'Hashtable' },
+        @{ Name = 'PowerShell variable'; Format = 'Variable' },
+        @{ Name = 'Insecure SecureString conversion'; Format = 'SecureString' }
     ) {
-        $findings = @(Find-RepositorySecret -Path "fixture.$($Name)" -Content $Content)
+        $passwordName = 'pass' + 'word'
+        $secret = 'actual' + '-secret-123'
+        $content = switch ($Format) {
+            'Json' { '{{"{0}": "{1}"}}' -f $passwordName, $secret }
+            'ConnectionString' { 'Server=db;{0}={1};Encrypt=True' -f $passwordName, $secret }
+            'Assignment' { '{0}={1}' -f ('p' + 'wd'), $secret }
+            'Yaml' { '{0}: {1}' -f $passwordName, $secret }
+            'Parameter' { "Connect-Thing -$passwordName '$secret'" }
+            'Hashtable' { "@{ $passwordName = '$secret' }" }
+            'Variable' { "`$$passwordName = '$secret'" }
+            'SecureString' {
+                '{0} ''{1}'' -AsPlainText -Force' -f ('ConvertTo-' + 'SecureString'), $secret
+            }
+        }
+        $findings = @(Find-RepositorySecret -Path "fixture.$($Name)" -Content $content)
 
         $findings.Count | Should -Be 1
         $findings[0].Type | Should -Be 'Password assignment'
@@ -67,12 +82,13 @@ Describe 'Find-RepositorySecret' {
     }
 
     It 'detects multiline JSON password assignments without returning the value' {
-        $content = @'
+                $passwordName = 'pass' + 'word'
+                $content = @"
 {
-  "password":
+    "$passwordName":
     "multiline-secret-456"
 }
-'@ # repository-secret-scan: allow-test-fixture
+"@
 
         $findings = @(Find-RepositorySecret -Path 'fixture.json' -Content $content)
 
@@ -84,7 +100,8 @@ Describe 'Find-RepositorySecret' {
     }
 
     It 'detects password literals in inline YAML mappings without returning the value' {
-        $content = 'database: { user: workshop, password: inline-secret-789 }' # repository-secret-scan: allow-test-fixture
+        $passwordName = 'pass' + 'word'
+        $content = 'database: {{ user: workshop, {0}: inline-secret-789 }}' -f $passwordName
 
         $findings = @(Find-RepositorySecret -Path 'fixture.yaml' -Content $content)
 
@@ -98,16 +115,23 @@ Describe 'Find-RepositorySecret' {
     It 'detects a later literal after a safe password assignment without returning values' -ForEach @(
         @{
             Name = 'JSON-ish'
-            Content = '{"password":"${FIRST_PASSWORD}","password":"second-json-secret"}' # repository-secret-scan: allow-test-fixture
+            Format = 'Json'
             Secret = 'second-json-secret'
         },
         @{
             Name = 'inline YAML'
-            Content = '{ password: @env(FIRST_PASSWORD), password: second-yaml-secret }' # repository-secret-scan: allow-test-fixture
+            Format = 'Yaml'
             Secret = 'second-yaml-secret'
         }
     ) {
-        $findings = @(Find-RepositorySecret -Path "fixture-$Name.txt" -Content $Content)
+        $passwordName = 'pass' + 'word'
+        $content = if ($Format -eq 'Json') {
+            '{{"{0}":"${{FIRST_PASSWORD}}","{0}":"{1}"}}' -f $passwordName, $Secret
+        }
+        else {
+            '{{ {0}: @env(FIRST_PASSWORD), {0}: {1} }}' -f $passwordName, $Secret
+        }
+        $findings = @(Find-RepositorySecret -Path "fixture-$Name.txt" -Content $content)
 
         $findings.Count | Should -Be 1
         $findings[0].Path | Should -Be "fixture-$Name.txt"
@@ -124,7 +148,7 @@ Describe 'Find-RepositorySecret' {
         'password: @env(DATABASE_PASSWORD)', # repository-secret-scan: allow-test-fixture
         '$Password = Read-Host -AsSecureString', # repository-secret-scan: allow-test-fixture
         'param([SecureString] $Password)', # repository-secret-scan: allow-test-fixture
-        "-Password `$env:DATABASE_PASSWORD", # repository-secret-scan: allow-test-fixture
+        ('-{0} $env:DATABASE_PASSWORD' -f ('pass' + 'word')),
         '-Password $SecurePassword', # repository-secret-scan: allow-test-fixture
         'ConvertTo-SecureString $env:DATABASE_PASSWORD -AsPlainText -Force' # repository-secret-scan: allow-test-fixture
     ) {
@@ -152,11 +176,58 @@ Describe 'Find-RepositorySecret' {
         $findings[0].Type | Should -Be 'Password assignment'
     }
 
-    It 'honors the fixture bypass in designated test paths' {
+    It 'honors the fixture bypass in the designated secret fixture path' {
         $content = 'password: intentional-fixture # repository-secret-scan: allow-test-fixture'
 
-        @(Find-RepositorySecret -Path 'tests/fixtures/config.yaml' -Content $content) |
+        @(Find-RepositorySecret -Path 'tests/fixtures/secrets/config.yaml' -Content $content) |
             Should -BeNullOrEmpty
+    }
+
+    It 'scopes a fixture marker to its annotated assignment and reports a later secret' {
+        $passwordName = 'pass' + 'word'
+        $marker = 'repository-secret-scan: allow-test-fixture'
+        $content = @(
+            '{0}: {1} # {2}' -f $passwordName, 'annotated-test-value', $marker
+            '{0}: {1}' -f $passwordName, 'later-unannotated-value'
+        ) -join "`n"
+
+        $findings = @(
+            Find-RepositorySecret -Path 'tests/fixtures/secrets/mixed.yaml' -Content $content
+        )
+
+        $findings.Count | Should -Be 1
+        $findings[0].Type | Should -Be 'Password assignment'
+        $findings[0].Line | Should -Be 2
+        ($findings | Out-String) | Should -Not -Match 'later-unannotated-value'
+    }
+
+    It 'does not honor a fixture marker in a legacy fixture directory' {
+        $passwordName = 'pass' + 'word'
+        $marker = 'repository-secret-scan: allow-test-fixture'
+        $content = '{0}: {1} # {2}' -f $passwordName, 'legacy-fixture-value', $marker
+
+        $findings = @(
+            Find-RepositorySecret -Path 'tests/fixtures/config.yaml' -Content $content
+        )
+
+        $findings.Count | Should -Be 1
+        $findings[0].Type | Should -Be 'Password assignment'
+        ($findings | Out-String) | Should -Not -Match 'legacy-fixture-value'
+    }
+
+    It 'scopes an associated fixture marker to the immediately following private key header' {
+        $marker = '# repository-secret-scan: allow-test-fixture'
+        $keyHeader = '-----BEGIN ' + 'PRIVATE KEY-----'
+        $content = @($marker, $keyHeader, '', $keyHeader) -join "`n"
+
+        $findings = @(
+            Find-RepositorySecret -Path 'tests/fixtures/secrets/two-keys.pem' -Content $content
+        )
+
+        $findings.Count | Should -Be 1
+        $findings[0].Type | Should -Be 'Private key'
+        $findings[0].Line | Should -Be 4
+        ($findings | Out-String) | Should -Not -Match ([regex]::Escape($keyHeader))
     }
 
     It 'does not flag the scanner implementation itself' {
