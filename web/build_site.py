@@ -294,23 +294,32 @@ def _relative_href(current_route: str, target_route: str) -> str:
 
 def build_site(root: Path, destination: Path) -> None:
     root = root.resolve()
-    destination = _reject_linked_path_components(destination, "Site destination")
+    destination = _reject_linked_path_components(
+        destination, "Site destination"
+    ).resolve(strict=False)
     if destination == root or root.is_relative_to(destination):
         raise ValueError("Site destination must not contain the repository root")
     manifest_path = root / "web" / "site-manifest.json"
     manifest = load_manifest(manifest_path, root=root)
-    protected_paths = [
+    content_sources = [
+        (root / page["source"]).resolve() for page in manifest["pages"]
+    ]
+    protected_paths = {
+        (root / "web").resolve(),
         manifest_path.resolve(),
         (root / "web" / "templates").resolve(),
-        *((root / page["source"]).resolve() for page in manifest["pages"]),
-    ]
+        *content_sources,
+        *(source.parent for source in content_sources if source.parent != root),
+    }
     assets = root / "web" / "assets"
     canonical_assets = None
     if os.path.lexists(assets):
         canonical_assets = _validate_asset_tree(assets)
-        protected_paths.append(assets.resolve())
+        protected_paths.add(canonical_assets)
     if any(
-        protected == destination or protected.is_relative_to(destination)
+        protected == destination
+        or protected.is_relative_to(destination)
+        or destination.is_relative_to(protected)
         for protected in protected_paths
     ):
         raise ValueError("Site destination must not contain source files")

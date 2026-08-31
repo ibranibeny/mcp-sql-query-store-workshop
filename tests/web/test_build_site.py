@@ -378,12 +378,27 @@ def test_build_rejects_junctioned_asset_directory_without_copying_external_conte
     assert stale.read_text(encoding="utf-8") == "DO-NOT-DELETE"
 
 
-@pytest.mark.parametrize("relative_destination", ["web", "workshop", "docs"])
-def test_build_refuses_destination_that_contains_source_files(
+@pytest.mark.parametrize(
+    "relative_destination",
+    [
+        ".",
+        "web",
+        "web/assets",
+        "web/assets/nested-output",
+        "web/templates",
+        "web/templates/nested-output",
+        "workshop",
+        "workshop/nested-output",
+        "docs",
+        "docs/nested-output",
+    ],
+)
+def test_build_rejects_protected_source_destination_before_deletion(
     tmp_path: Path, relative_destination: str,
 ) -> None:
     root = tmp_path / "repo"
     (root / "web" / "templates").mkdir(parents=True)
+    (root / "web" / "assets").mkdir()
     (root / "workshop").mkdir()
     (root / "docs").mkdir()
     for template in ("base.html", "page.html"):
@@ -400,9 +415,27 @@ def test_build_refuses_destination_that_contains_source_files(
             page(source="docs/guide.md", route="guide.html", title="Guide"),
         ],
     )
+    destination = root / relative_destination
+    destination.mkdir(parents=True, exist_ok=True)
+    marker = destination / "source-marker.txt"
+    marker.write_text("DO-NOT-DELETE", encoding="utf-8")
 
     with pytest.raises(ValueError, match="destination"):
-        build_site(root, root / relative_destination)
+        build_site(root, destination)
+
+    assert marker.read_text(encoding="utf-8") == "DO-NOT-DELETE"
+
+
+def test_build_allows_ignored_site_directory_inside_repository(tmp_path: Path) -> None:
+    root = make_site_root(tmp_path)
+    destination = root / "site"
+    destination.mkdir()
+    (destination / "obsolete.html").write_text("stale", encoding="utf-8")
+
+    build_site(root, destination)
+
+    assert (destination / "index.html").is_file()
+    assert not (destination / "obsolete.html").exists()
 
 
 def test_cli_returns_nonzero_for_invalid_input(tmp_path: Path) -> None:
