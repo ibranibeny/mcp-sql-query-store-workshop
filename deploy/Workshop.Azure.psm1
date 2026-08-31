@@ -140,6 +140,19 @@ function Assert-WorkshopConfigShape {
         }
     }
 
+    foreach ($identityPair in @(
+        @{ Label = 'AdminSubnet.Name and SqlSubnet.Name'; Admin = $Config.AdminSubnet.Name; Sql = $Config.SqlSubnet.Name }
+        @{ Label = 'AdminAsg and SqlAsg'; Admin = $Config.AdminAsg; Sql = $Config.SqlAsg }
+        @{ Label = 'AdminVm.Name and SqlVm.Name'; Admin = $Config.AdminVm.Name; Sql = $Config.SqlVm.Name }
+    )) {
+        if ([string]::Equals(
+                [string] $identityPair.Admin,
+                [string] $identityPair.Sql,
+                [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw "Workshop configuration $($identityPair.Label) must be distinct (case-insensitive)."
+        }
+    }
+
     foreach ($subnetName in @('AdminSubnet', 'SqlSubnet')) {
         if ($Config[$subnetName].DefaultOutboundAccess -isnot [bool] -or
             $Config[$subnetName].DefaultOutboundAccess -ne $false) {
@@ -160,7 +173,14 @@ function Assert-WorkshopConfigShape {
     $vnet = ConvertTo-WorkshopIpv4Network -Cidr ([string] $Config.VNet.AddressPrefix)
     $adminSubnet = ConvertTo-WorkshopIpv4Network -Cidr ([string] $Config.AdminSubnet.Prefix)
     $sqlSubnet = ConvertTo-WorkshopIpv4Network -Cidr ([string] $Config.SqlSubnet.Prefix)
-    foreach ($subnet in @($adminSubnet, $sqlSubnet)) {
+    foreach ($subnetItem in @(
+        @{ Label = 'AdminSubnet'; Network = $adminSubnet }
+        @{ Label = 'SqlSubnet'; Network = $sqlSubnet }
+    )) {
+        $subnet = $subnetItem.Network
+        if ($subnet.Prefix -lt 16 -or $subnet.Prefix -gt 29) {
+            throw "Workshop configuration $($subnetItem.Label).Prefix must have a prefix length between /16 and /29."
+        }
         if ($subnet.Network -lt $vnet.Network -or $subnet.Broadcast -gt $vnet.Broadcast -or
             $subnet.Prefix -le $vnet.Prefix) {
             throw 'Workshop configuration subnets must be fully contained in the VNet.'

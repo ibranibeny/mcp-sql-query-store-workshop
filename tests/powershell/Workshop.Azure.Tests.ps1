@@ -201,6 +201,52 @@ Describe 'Workshop configuration shape validation' {
             Should -Throw -Because $Case
     }
 
+    It 'accepts contained nonoverlapping /29 subnets with an Azure-usable SQL host address' {
+        $config = Import-PowerShellDataFile $script:ConfigPath
+        $config.AdminSubnet.Prefix = '10.20.1.0/29'
+        $config.SqlSubnet.Prefix = '10.20.2.0/29'
+        $config.SqlPrivateIp = '10.20.2.4'
+
+        { New-WorkshopNetworkModel -Config $config -FacilitatorCidr '8.8.8.8/32' } |
+            Should -Not -Throw
+    }
+
+    It 'rejects subnets without at least three Azure-usable host addresses' -ForEach @(
+        @{ Case = 'admin /30'; Change = { param($c) $c.AdminSubnet.Prefix = '10.20.1.0/30' } }
+        @{ Case = 'admin /31'; Change = { param($c) $c.AdminSubnet.Prefix = '10.20.1.0/31' } }
+        @{ Case = 'SQL /30'; Change = { param($c) $c.SqlSubnet.Prefix = '10.20.2.0/30'; $c.SqlPrivateIp = '10.20.2.1' } }
+        @{ Case = 'SQL /31'; Change = { param($c) $c.SqlSubnet.Prefix = '10.20.2.0/31'; $c.SqlPrivateIp = '10.20.2.1' } }
+    ) {
+        $config = Import-PowerShellDataFile $script:ConfigPath
+        & $Change $config
+
+        { New-WorkshopNetworkModel -Config $config -FacilitatorCidr '8.8.8.8/32' } |
+            Should -Throw -ExpectedMessage '*prefix length between /16 and /29*' -Because $Case
+    }
+
+    It 'rejects subnet prefixes broader than /16 even when contained in a broader VNet' {
+        $config = Import-PowerShellDataFile $script:ConfigPath
+        $config.VNet.AddressPrefix = '10.0.0.0/8'
+        $config.AdminSubnet.Prefix = '10.20.0.0/15'
+        $config.SqlSubnet.Prefix = '10.22.0.0/24'
+        $config.SqlPrivateIp = '10.22.0.10'
+
+        { New-WorkshopNetworkModel -Config $config -FacilitatorCidr '8.8.8.8/32' } |
+            Should -Throw -ExpectedMessage '*prefix length between /16 and /29*'
+    }
+
+    It 'rejects case-insensitive duplicate network and compute identities' -ForEach @(
+        @{ Case = 'subnet names'; Change = { param($c) $c.SqlSubnet.Name = $c.AdminSubnet.Name.ToUpperInvariant() } }
+        @{ Case = 'application security groups'; Change = { param($c) $c.SqlAsg = $c.AdminAsg.ToUpperInvariant() } }
+        @{ Case = 'virtual machines'; Change = { param($c) $c.SqlVm.Name = $c.AdminVm.Name.ToUpperInvariant() } }
+    ) {
+        $config = Import-PowerShellDataFile $script:ConfigPath
+        & $Change $config
+
+        { New-WorkshopNetworkModel -Config $config -FacilitatorCidr '8.8.8.8/32' } |
+            Should -Throw -ExpectedMessage '*must be distinct*' -Because $Case
+    }
+
     It 'throws for invalid configuration before invoking any external read' {
         $config = Import-PowerShellDataFile $script:ConfigPath
         $config.SqlSubnet.Prefix = '10.99.0.0/24'
