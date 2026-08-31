@@ -35,7 +35,7 @@ Describe 'Workshop deployment entry script contract' {
             Should -HaveCount 1
     }
 
-    It 'requires an explicit target and supports secure credential input or prompt' {
+    It 'requires an explicit target and a mandatory secure credential without prompting' {
         $subscription = $script:Ast.ParamBlock.Parameters |
             Where-Object { $_.Name.VariablePath.UserPath -eq 'SubscriptionId' }
         @($subscription.Attributes | Where-Object { $_.Extent.Text -match '^\[Parameter\(Mandatory\)\]$' }) |
@@ -46,10 +46,12 @@ Describe 'Workshop deployment entry script contract' {
             @($parameter.Attributes | Where-Object { $_.Extent.Text -match 'Mandatory' }) |
                 Should -HaveCount 0
         }
-        ($script:Ast.ParamBlock.Parameters |
-            Where-Object { $_.Name.VariablePath.UserPath -eq 'Credential' }).StaticType.FullName |
-            Should -Be 'System.Management.Automation.PSCredential'
-        (Get-Content -LiteralPath $script:DeployPath -Raw) | Should -Match 'Get-Credential'
+        $credential = $script:Ast.ParamBlock.Parameters |
+            Where-Object { $_.Name.VariablePath.UserPath -eq 'Credential' }
+        $credential.StaticType.FullName | Should -Be 'System.Management.Automation.PSCredential'
+        @($credential.Attributes | Where-Object { $_.Extent.Text -match '^\[Parameter\(Mandatory\)\]$' }) |
+            Should -HaveCount 1
+        (Get-Content -LiteralPath $script:DeployPath -Raw) | Should -Not -Match 'Get-Credential'
     }
 
     It 'uses the exact phrase, has no default phrase, and orders context, preflight, phrase, ShouldProcess, network' {
@@ -170,5 +172,23 @@ Describe 'Workshop deployment entry script gates' {
         $result[-1].Completed | Should -BeFalse
         $script:Counters.Network | Should -Be 0
         $script:Counters.Boundary | Should -Be 0
+    }
+
+    It 'rejects an empty credential username before context, preflight, approval, or output' {
+        $script:EntryParameters.Credential = [PSCredential]::new(' ', $script:Credential.Password)
+
+        { & $script:DeployPath @script:EntryParameters } | Should -Throw '*nonempty administrator credential*'
+        $script:Counters.SetContext | Should -Be 0
+        $script:Counters.Preflight | Should -Be 0
+        $script:Counters.Network | Should -Be 0
+    }
+
+    It 'rejects an empty SecureString password before context, preflight, approval, or output' {
+        $script:EntryParameters.Credential = [PSCredential]::new('workshop-admin', [Security.SecureString]::new())
+
+        { & $script:DeployPath @script:EntryParameters } | Should -Throw '*nonempty SecureString password*'
+        $script:Counters.SetContext | Should -Be 0
+        $script:Counters.Preflight | Should -Be 0
+        $script:Counters.Network | Should -Be 0
     }
 }

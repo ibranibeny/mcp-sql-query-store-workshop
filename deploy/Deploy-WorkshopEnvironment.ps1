@@ -12,6 +12,7 @@ param(
 
     [Nullable[datetime]] $ExpiresOn,
 
+    [Parameter(Mandatory)]
     [PSCredential] $Credential,
 
     [Parameter(Mandatory)]
@@ -34,6 +35,13 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+if ($null -eq $Credential -or [string]::IsNullOrWhiteSpace($Credential.UserName)) {
+    throw 'A nonempty administrator credential is required before deployment can continue.'
+}
+if ($Credential.Password -isnot [Security.SecureString] -or $Credential.Password.Length -eq 0) {
+    throw 'A nonempty SecureString password is required before deployment can continue.'
+}
 
 $modulePath = Join-Path $PSScriptRoot 'Workshop.Azure.psd1'
 $configPath = Join-Path $PSScriptRoot 'WorkshopConfig.psd1'
@@ -141,13 +149,6 @@ if (-not $PSCmdlet.ShouldProcess($config.ResourceGroupName, 'Create the approved
         Checkpoint = @('Preflight passed', 'Confirmation phrase matched', 'ShouldProcess declined')
         Remediation = 'Rerun without WhatIf and approve ShouldProcess only when billable deployment is intended.'
     }
-}
-
-if ($null -eq $Credential) {
-    $Credential = Get-Credential -Message 'Enter the local administrator credential reserved for Task 6 VM creation'
-}
-if ($null -eq $Credential -or [string]::IsNullOrWhiteSpace($Credential.UserName)) {
-    throw 'A nonempty administrator credential is required before deployment can continue.'
 }
 
 $config.Tags.expiresOn = ([datetime] $ExpiresOn).Date.ToString(

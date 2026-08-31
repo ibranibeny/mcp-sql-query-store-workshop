@@ -22,6 +22,7 @@ BeforeAll {
                     [pscustomobject]@{ Name = 'Az.Resources'; Version = [version]'7.0.0' }
                     [pscustomobject]@{ Name = 'Az.Compute'; Version = [version]'10.0.0' }
                     [pscustomobject]@{ Name = 'Az.Network'; Version = [version]'7.0.0' }
+                    [pscustomobject]@{ Name = 'Az.PrivateDns'; Version = [version]'1.0.0' }
                     [pscustomobject]@{ Name = 'Az.SqlVirtualMachine'; Version = [version]'2.3.0' }
                 )
             }
@@ -392,6 +393,12 @@ Describe 'Workshop plan and card' {
 }
 
 Describe 'Non-destructive workshop preflight' {
+    It 'requires the Private DNS module before deployment can pass preflight' {
+        $result = Invoke-PassingPreflight
+
+        ($result.Checks | Where-Object Name -EQ 'Module Az.PrivateDns').Status | Should -Be 'Passed'
+    }
+
     It 'aggregates an all-pass result and resolves immutable latest images' {
         $result = Invoke-PassingPreflight
         $failedChecks = @($result.Checks | Where-Object Status -NE 'Passed')
@@ -777,7 +784,7 @@ Describe 'Non-destructive workshop preflight' {
         $ops.GetModules = { @([pscustomobject]@{ Name = 'Az.Accounts'; Version = [version]'1.0.0' }) }
         { $script:Result = Invoke-PassingPreflight -Operations $ops } | Should -Not -Throw
         $script:Result.Passed | Should -BeFalse
-        @($script:Result.Checks | Where-Object { $_.Name -like 'Module Az.*' -and $_.Status -eq 'Failed' }).Count | Should -Be 5
+        @($script:Result.Checks | Where-Object { $_.Name -like 'Module Az.*' -and $_.Status -eq 'Failed' }).Count | Should -Be 6
     }
 
     It 'aggregates read-operation errors without throwing or omitting quota checks' {
@@ -1004,6 +1011,7 @@ Describe 'Private workshop network deployment' {
         $script:NetworkCreates = [System.Collections.Generic.List[object]]::new()
         $script:SkipReadBackKind = $null
         $script:NetworkOperations = @{
+            GetSubscriptionId = { 'mock' }
             GetResource = {
                 param($Kind, $Name, $ResourceGroupName)
                 $null = $ResourceGroupName
@@ -1020,6 +1028,11 @@ Describe 'Private workshop network deployment' {
                 }
                 return $Spec
             }
+            GetPublicIpInventory = {
+                param($ResourceGroupName)
+                $null = $ResourceGroupName
+                @($script:NetworkState.Values | Where-Object Kind -EQ 'PublicIpAddress')
+            }
         }
     }
 
@@ -1031,6 +1044,7 @@ Describe 'Private workshop network deployment' {
             'ResourceGroup', 'ApplicationSecurityGroup', 'ApplicationSecurityGroup',
             'PublicIpAddress', 'PublicIpAddress', 'NatGateway',
             'NetworkSecurityGroup', 'NetworkSecurityGroup', 'VirtualNetwork',
+            'PrivateDnsZone', 'PrivateDnsVirtualNetworkLink', 'PrivateDnsARecord',
             'NetworkInterface', 'NetworkInterface'
         )
         @($script:NetworkCreates | Where-Object Kind -EQ 'PublicIpAddress').Name |
@@ -1091,6 +1105,19 @@ Describe 'Private workshop network deployment' {
         $sqlNic.NetworkSecurityGroupId | Should -BeNullOrEmpty
     }
 
+    It 'creates the exact private DNS zone, registration-disabled VNet link, and SQL A record' {
+        $null = New-WorkshopNetwork -Config $script:Config -FacilitatorCidr '8.8.8.8/32' -Operations $script:NetworkOperations
+
+        $zone = $script:NetworkState['PrivateDnsZone/mcpworkshop.internal']
+        $link = $script:NetworkState['PrivateDnsVirtualNetworkLink/mcpworkshop.internal/vnet-mcpsql-workshop-link']
+        $record = $script:NetworkState['PrivateDnsARecord/mcpworkshop.internal/sql01']
+        $zone.Id | Should -Be '/subscriptions/mock/resourceGroups/rg-mcp-sql-workshop/providers/Microsoft.Network/privateDnsZones/mcpworkshop.internal'
+        $link.VirtualNetworkId | Should -Be '/subscriptions/mock/resourceGroups/rg-mcp-sql-workshop/providers/Microsoft.Network/virtualNetworks/vnet-mcpsql-workshop'
+        $link.RegistrationEnabled | Should -BeFalse
+        $record.RecordType | Should -Be 'A'
+        $record.Ipv4Addresses | Should -Be @('10.20.2.10')
+    }
+
     It 'is idempotent when every existing resource exactly matches' {
         $first = New-WorkshopNetwork -Config $script:Config -FacilitatorCidr '8.8.8.8/32' -Operations $script:NetworkOperations
         $script:NetworkCreates.Clear()
@@ -1123,6 +1150,7 @@ Describe 'Workshop network boundary verification' {
     BeforeEach {
         $script:NetworkState = @{}
         $script:NetworkOperations = @{
+            GetSubscriptionId = { 'mock' }
             GetResource = {
                 param($Kind, $Name, $ResourceGroupName)
                 $null = $ResourceGroupName
@@ -1135,6 +1163,11 @@ Describe 'Workshop network boundary verification' {
                 $null = $ResourceGroupName
                 $script:NetworkState["$($Spec.Kind)/$($Spec.Name)"] = $Spec
                 return $Spec
+            }
+            GetPublicIpInventory = {
+                param($ResourceGroupName)
+                $null = $ResourceGroupName
+                @($script:NetworkState.Values | Where-Object Kind -EQ 'PublicIpAddress')
             }
         }
         $null = New-WorkshopNetwork -Config $script:Config -FacilitatorCidr '8.8.8.8/32' -Operations $script:NetworkOperations
@@ -1157,12 +1190,17 @@ Describe 'Workshop network boundary verification' {
         @{ Case = 'public SQL Browser UDP'; Change = { $script:NetworkState['NetworkSecurityGroup/nsg-mcpsql-sql'].Rules += [pscustomobject]@{ Name='Bad'; Priority=200; Direction='Inbound'; Access='Allow'; Protocol='Udp'; SourceAddressPrefix='*'; DestinationPortRange='1434' } } }
         @{ Case = 'admin RDP broad'; Change = { $script:NetworkState['NetworkSecurityGroup/nsg-mcpsql-admin'].Rules[0].SourceAddressPrefix = 'Internet' } }
         @{ Case = 'competing admin RDP broad'; Change = { $script:NetworkState['NetworkSecurityGroup/nsg-mcpsql-admin'].Rules += [pscustomobject]@{ Name='Bad-Rdp'; Priority=90; Direction='Inbound'; Access='Allow'; Protocol='Tcp'; SourceAddressPrefix='Internet'; DestinationPortRange='3389' } } }
+        @{ Case = 'extra admin deny'; Change = { $script:NetworkState['NetworkSecurityGroup/nsg-mcpsql-admin'].Rules += [pscustomobject]@{ Name='Unapproved-Deny'; Priority=90; Direction='Inbound'; Access='Deny'; Protocol='*'; SourcePortRange='*'; SourceAddressPrefix='*'; DestinationPortRange='*'; DestinationAddressPrefix='*' } } }
+        @{ Case = 'high-priority SQL VNet bypass'; Change = { $script:NetworkState['NetworkSecurityGroup/nsg-mcpsql-sql'].Rules += [pscustomobject]@{ Name='Allow-All-VNet-Sql'; Priority=90; Direction='Inbound'; Access='Allow'; Protocol='Tcp'; SourcePortRange='*'; SourceAddressPrefix='VirtualNetwork'; DestinationPortRange='1433'; DestinationApplicationSecurityGroupId=$script:NetworkState['ApplicationSecurityGroup/asg-mcpsql-sql'].Id } } }
+        @{ Case = 'extra SQL deny'; Change = { $script:NetworkState['NetworkSecurityGroup/nsg-mcpsql-sql'].Rules += [pscustomobject]@{ Name='Unapproved-Sql-Deny'; Priority=120; Direction='Inbound'; Access='Deny'; Protocol='Tcp'; SourcePortRange='*'; SourceAddressPrefix='VirtualNetwork'; DestinationPortRange='1433'; DestinationApplicationSecurityGroupId=$script:NetworkState['ApplicationSecurityGroup/asg-mcpsql-sql'].Id } } }
         @{ Case = 'SQL ASG rule wrong'; Change = { ($script:NetworkState['NetworkSecurityGroup/nsg-mcpsql-sql'].Rules | Where-Object Name -EQ 'Allow-Admin-To-Sql').SourceApplicationSecurityGroupId = '/wrong' } }
         @{ Case = 'deny absent'; Change = { $script:NetworkState['NetworkSecurityGroup/nsg-mcpsql-sql'].Rules = @($script:NetworkState['NetworkSecurityGroup/nsg-mcpsql-sql'].Rules | Where-Object Name -NE 'Deny-Other-VNet-To-Sql') } }
         @{ Case = 'deny priority wrong'; Change = { ($script:NetworkState['NetworkSecurityGroup/nsg-mcpsql-sql'].Rules | Where-Object Name -EQ 'Deny-Other-VNet-To-Sql').Priority = 3999 } }
         @{ Case = 'subnet prefix wrong'; Change = { $script:NetworkState['VirtualNetwork/vnet-mcpsql-workshop'].Subnets[1].AddressPrefix = '10.20.3.0/24' } }
         @{ Case = 'subnet NAT missing'; Change = { $script:NetworkState['VirtualNetwork/vnet-mcpsql-workshop'].Subnets[0].NatGatewayId = $null } }
         @{ Case = 'subnet NSG missing'; Change = { $script:NetworkState['VirtualNetwork/vnet-mcpsql-workshop'].Subnets[1].NetworkSecurityGroupId = $null } }
+        @{ Case = 'subnet NAT lookalike resource group'; Change = { $script:NetworkState['VirtualNetwork/vnet-mcpsql-workshop'].Subnets[0].NatGatewayId = '/subscriptions/mock/resourceGroups/other/providers/Microsoft.Network/natGateways/nat-mcpsql-workshop' } }
+        @{ Case = 'subnet NSG lookalike subscription'; Change = { $script:NetworkState['VirtualNetwork/vnet-mcpsql-workshop'].Subnets[1].NetworkSecurityGroupId = '/subscriptions/other/resourceGroups/rg-mcp-sql-workshop/providers/Microsoft.Network/networkSecurityGroups/nsg-mcpsql-sql' } }
         @{ Case = 'default outbound enabled'; Change = { $script:NetworkState['VirtualNetwork/vnet-mcpsql-workshop'].Subnets[1].DefaultOutboundAccess = $true } }
         @{ Case = 'default outbound unverifiable'; Change = { $script:NetworkState['VirtualNetwork/vnet-mcpsql-workshop'].Subnets[1].PSObject.Properties.Remove('DefaultOutboundAccess') } }
         @{ Case = 'SQL private IP wrong'; Change = { $script:NetworkState['NetworkInterface/nic-mcpsql-sql'].PrivateIpAddress = '10.20.2.11' } }
@@ -1174,12 +1212,38 @@ Describe 'Workshop network boundary verification' {
         @{ Case = 'SQL allow mixed public source'; Change = { ($script:NetworkState['NetworkSecurityGroup/nsg-mcpsql-sql'].Rules | Where-Object Name -EQ 'Allow-Admin-To-Sql').SourceAddressPrefix = 'Internet' } }
         @{ Case = 'deny outbound'; Change = { ($script:NetworkState['NetworkSecurityGroup/nsg-mcpsql-sql'].Rules | Where-Object Name -EQ 'Deny-Other-VNet-To-Sql').Direction = 'Outbound' } }
         @{ Case = 'NIC NSG attached'; Change = { $script:NetworkState['NetworkInterface/nic-mcpsql-admin'].NetworkSecurityGroupId = '/nsg/forbidden' } }
+        @{ Case = 'admin NIC PIP lookalike subscription'; Change = { $script:NetworkState['NetworkInterface/nic-mcpsql-admin'].PublicIpAddressId = '/subscriptions/other/resourceGroups/rg-mcp-sql-workshop/providers/Microsoft.Network/publicIPAddresses/pip-mcpsql-admin'; $script:NetworkState['NetworkInterface/nic-mcpsql-admin'].PublicIpAddressIds = @($script:NetworkState['NetworkInterface/nic-mcpsql-admin'].PublicIpAddressId) } }
+        @{ Case = 'admin NIC ASG lookalike resource group'; Change = { $script:NetworkState['NetworkInterface/nic-mcpsql-admin'].ApplicationSecurityGroupIds = @('/subscriptions/mock/resourceGroups/other/providers/Microsoft.Network/applicationSecurityGroups/asg-mcpsql-admin') } }
+        @{ Case = 'admin PIP wrong SKU'; Change = { $script:NetworkState['PublicIpAddress/pip-mcpsql-admin'].Sku = 'Basic' } }
+        @{ Case = 'NAT PIP dynamic'; Change = { $script:NetworkState['PublicIpAddress/pip-mcpsql-nat'].AllocationMethod = 'Dynamic' } }
+        @{ Case = 'NAT PIP IPv6'; Change = { $script:NetworkState['PublicIpAddress/pip-mcpsql-nat'].IpAddressVersion = 'IPv6' } }
+        @{ Case = 'NAT wrong SKU'; Change = { $script:NetworkState['NatGateway/nat-mcpsql-workshop'].Sku = 'Basic' } }
+        @{ Case = 'NAT lookalike identity'; Change = { $script:NetworkState['NatGateway/nat-mcpsql-workshop'].Id = '/subscriptions/other/resourceGroups/rg-mcp-sql-workshop/providers/Microsoft.Network/natGateways/nat-mcpsql-workshop' } }
+        @{ Case = 'DNS zone wrong identity'; Change = { $script:NetworkState['PrivateDnsZone/mcpworkshop.internal'].Id = '/subscriptions/mock/resourceGroups/other/providers/Microsoft.Network/privateDnsZones/mcpworkshop.internal' } }
+        @{ Case = 'DNS registration enabled'; Change = { $script:NetworkState['PrivateDnsVirtualNetworkLink/mcpworkshop.internal/vnet-mcpsql-workshop-link'].RegistrationEnabled = $true } }
+        @{ Case = 'DNS VNet lookalike'; Change = { $script:NetworkState['PrivateDnsVirtualNetworkLink/mcpworkshop.internal/vnet-mcpsql-workshop-link'].VirtualNetworkId = '/subscriptions/other/resourceGroups/rg-mcp-sql-workshop/providers/Microsoft.Network/virtualNetworks/vnet-mcpsql-workshop' } }
+        @{ Case = 'DNS record extra address'; Change = { $script:NetworkState['PrivateDnsARecord/mcpworkshop.internal/sql01'].Ipv4Addresses += '10.20.2.11' } }
+        @{ Case = 'DNS record wrong address'; Change = { $script:NetworkState['PrivateDnsARecord/mcpworkshop.internal/sql01'].Ipv4Addresses = @('10.20.2.11') } }
     ) {
         & $Change
         $script:NetworkOperations.Remove('CreateResource')
         $result = Test-WorkshopNetworkBoundary -Config $script:Config -FacilitatorCidr '8.8.8.8/32' -Operations $script:NetworkOperations
         $result.Passed | Should -BeFalse -Because $Case
         @($result.Checks | Where-Object Status -EQ 'Failed').Count | Should -BeGreaterThan 0
+    }
+
+    It 'rejects any extra public IP in the target resource group regardless of attachment' {
+        $script:NetworkState['PublicIpAddress/unattached-extra'] = [pscustomobject]@{
+            Kind = 'PublicIpAddress'; Name = 'unattached-extra'; Location = 'indonesiacentral'
+            Id = '/subscriptions/mock/resourceGroups/rg-mcp-sql-workshop/providers/Microsoft.Network/publicIPAddresses/unattached-extra'
+            Sku = 'Standard'; AllocationMethod = 'Static'; IpAddressVersion = 'IPv4'; Tags = @{}
+        }
+        $script:NetworkOperations.Remove('CreateResource')
+
+        $result = Test-WorkshopNetworkBoundary -Config $script:Config -FacilitatorCidr '8.8.8.8/32' -Operations $script:NetworkOperations
+
+        $result.Passed | Should -BeFalse
+        ($result.Checks | Where-Object Name -EQ 'Standard static public IP inventory').Status | Should -Be 'Failed'
     }
 
     It 'fails closed and sanitizes an unverifiable read without mutating anything' {
@@ -1194,9 +1258,55 @@ Describe 'Workshop network boundary verification' {
 }
 
 Describe 'Default workshop network operation shape' {
+    It 'matches native NSG rule shapes by canonical custom tuples rather than object property layout' {
+        InModuleScope Workshop.Azure -Parameters @{ Config = $script:Config } {
+            param($Config)
+            $expected = Get-WorkshopNetworkResourceSpecification -Config $Config `
+                -FacilitatorCidr '8.8.8.8/32' -SubscriptionId 'mock' |
+                Where-Object { $_.Kind -eq 'NetworkSecurityGroup' -and $_.Name -eq 'nsg-mcpsql-admin' }
+            $nativeRules = @($expected.Rules | ForEach-Object {
+                [pscustomobject]@{
+                    Name = $_.Name; Priority = $_.Priority; Direction = $_.Direction; Access = $_.Access; Protocol = $_.Protocol
+                    SourcePortRange = $_.SourcePortRange; SourcePortRanges = @()
+                    SourceAddressPrefix = $_.SourceAddressPrefix; SourceAddressPrefixes = @()
+                    SourceApplicationSecurityGroupId = $_.SourceApplicationSecurityGroupId; SourceApplicationSecurityGroupIds = @()
+                    DestinationPortRange = $_.DestinationPortRange; DestinationPortRanges = @()
+                    DestinationAddressPrefix = $_.DestinationAddressPrefix; DestinationAddressPrefixes = @()
+                    DestinationApplicationSecurityGroupId = $_.DestinationApplicationSecurityGroupId
+                    DestinationApplicationSecurityGroupIds = @()
+                }
+            })
+            $nativeShape = [pscustomobject]@{
+                Kind = $expected.Kind; Name = $expected.Name; Location = $expected.Location
+                Id = $expected.Id; Tags = $expected.Tags; Rules = $nativeRules
+            }
+
+            Test-WorkshopNetworkResourceMatch -Expected $expected -Actual $nativeShape | Should -BeTrue
+        }
+    }
+
     It 'uses native Az mutation commands with ErrorAction Stop and exactly two Standard static public IP calls' {
         InModuleScope Workshop.Azure -Parameters @{ Config = $script:Config } {
             param($Config)
+            Set-Item -Path Function:New-AzPrivateDnsZone -Value {
+                [CmdletBinding()]
+                param($ResourceGroupName, $Name, $Tag)
+                $null = $ResourceGroupName, $Name, $Tag
+            }
+            Set-Item -Path Function:New-AzPrivateDnsVirtualNetworkLink -Value {
+                [CmdletBinding()]
+                param($ResourceGroupName, $ZoneName, $Name, $VirtualNetworkId, $EnableRegistration, $Tag)
+                $null = $ResourceGroupName, $ZoneName, $Name, $VirtualNetworkId, $EnableRegistration, $Tag
+            }
+            Set-Item -Path Function:New-AzPrivateDnsRecordConfig -Value {
+                param($IPv4Address)
+                $null = $IPv4Address
+            }
+            Set-Item -Path Function:New-AzPrivateDnsRecordSet -Value {
+                [CmdletBinding()]
+                param($ResourceGroupName, $ZoneName, $Name, $RecordType, $Ttl, $PrivateDnsRecords)
+                $null = $ResourceGroupName, $ZoneName, $Name, $RecordType, $Ttl, $PrivateDnsRecords
+            }
             Mock New-AzResourceGroup { [pscustomobject]@{ ResourceGroupName = $Name; Location = $Location } }
             Mock New-AzApplicationSecurityGroup { [pscustomobject]@{ Name = $Name; Id = "/asg/$Name" } }
             Mock Get-AzApplicationSecurityGroup {
@@ -1235,9 +1345,14 @@ Describe 'Default workshop network operation shape' {
                 [Microsoft.Azure.Commands.Network.Models.PSNetworkInterfaceIPConfiguration]@{ Name = $Name }
             }
             Mock New-AzNetworkInterface { [pscustomobject]@{ Name = $Name; Id = "/nic/$Name" } }
+            Mock New-AzPrivateDnsZone { [pscustomobject]@{ Name = $Name; ResourceId = "/privateDnsZones/$Name" } }
+            Mock New-AzPrivateDnsVirtualNetworkLink { [pscustomobject]@{ Name = $Name; ResourceId = "/privateDnsLinks/$Name" } }
+            Mock New-AzPrivateDnsRecordConfig { [pscustomobject]@{ Ipv4Address = $IPv4Address } }
+            Mock New-AzPrivateDnsRecordSet { [pscustomobject]@{ Name = $Name; RecordType = $RecordType } }
 
             $operations = Get-DefaultWorkshopNetworkOperationSet
-            $specs = Get-WorkshopNetworkResourceSpecification -Config $Config -FacilitatorCidr '8.8.8.8/32'
+            $specs = Get-WorkshopNetworkResourceSpecification -Config $Config `
+                -FacilitatorCidr '8.8.8.8/32' -SubscriptionId 'mock'
             foreach ($spec in $specs) { $null = & $operations.CreateResource $spec $Config.ResourceGroupName }
 
             Should -Invoke New-AzPublicIpAddress -Times 2 -Exactly -ParameterFilter {
@@ -1245,8 +1360,26 @@ Describe 'Default workshop network operation shape' {
                 $AllocationMethod -eq 'Static' -and $ErrorAction -eq 'Stop'
             }
             Should -Invoke New-AzNatGateway -Times 1 -Exactly -ParameterFilter { $Sku -eq 'Standard' -and $ErrorAction -eq 'Stop' }
+            Should -Invoke New-AzPrivateDnsZone -Times 1 -Exactly -ParameterFilter { $Name -eq 'mcpworkshop.internal' -and $ErrorAction -eq 'Stop' }
+            Should -Invoke New-AzPrivateDnsVirtualNetworkLink -Times 1 -Exactly -ParameterFilter { $ZoneName -eq 'mcpworkshop.internal' -and -not $EnableRegistration -and $ErrorAction -eq 'Stop' }
+            Should -Invoke New-AzPrivateDnsRecordSet -Times 1 -Exactly -ParameterFilter { $ZoneName -eq 'mcpworkshop.internal' -and $Name -eq 'sql01' -and $RecordType -eq 'A' -and $ErrorAction -eq 'Stop' }
             Should -Invoke New-AzNetworkInterface -Times 2 -Exactly -ParameterFilter { $null -eq $NetworkSecurityGroup -and $ErrorAction -eq 'Stop' }
             Should -Invoke New-AzResourceGroup -Times 1 -Exactly -ParameterFilter { $ErrorAction -eq 'Stop' }
+        }
+    }
+
+    It 'enumerates every public IP in the target resource group with terminating errors' {
+        InModuleScope Workshop.Azure {
+            Mock Get-AzPublicIpAddress { @() }
+            Mock Get-AzContext { [pscustomobject]@{ Subscription = [pscustomobject]@{ Id = 'sub-id' } } }
+            $operations = Get-DefaultWorkshopNetworkOperationSet
+
+            $null = & $operations.GetPublicIpInventory 'rg-mcp-sql-workshop'
+
+            Should -Invoke Get-AzPublicIpAddress -Times 1 -Exactly -ParameterFilter {
+                $ResourceGroupName -eq 'rg-mcp-sql-workshop' -and
+                -not $PSBoundParameters.ContainsKey('Name') -and $ErrorAction -eq 'Stop'
+            }
         }
     }
 }

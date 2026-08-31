@@ -5,6 +5,7 @@ $script:RequiredAzModules = [ordered]@{
     'Az.Resources' = [version]'7.0.0'
     'Az.Compute' = [version]'10.0.0'
     'Az.Network' = [version]'7.0.0'
+    'Az.PrivateDns' = [version]'1.0.0'
     'Az.SqlVirtualMachine' = [version]'2.3.0'
 }
 $script:RequiredProviders = @(
@@ -1210,32 +1211,39 @@ ${function:Test-WorkshopPrerequisites} = {
 function Get-WorkshopNetworkResourceId {
     [CmdletBinding()]
     param(
+        [Parameter(Mandatory)][ValidateNotNullOrEmpty()][string] $SubscriptionId,
         [Parameter(Mandatory)][string] $ResourceGroupName,
         [Parameter(Mandatory)][string] $ResourceType,
         [Parameter(Mandatory)][string] $Name
     )
 
-    return "/subscriptions/mock/resourceGroups/$ResourceGroupName/providers/Microsoft.Network/$ResourceType/$Name"
+    return "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroupName/providers/Microsoft.Network/$ResourceType/$Name"
 }
 
 function Get-WorkshopNetworkResourceSpecification {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][hashtable] $Config,
-        [Parameter(Mandatory)][string] $FacilitatorCidr
+        [Parameter(Mandatory)][string] $FacilitatorCidr,
+        [Parameter(Mandatory)][ValidateNotNullOrEmpty()][string] $SubscriptionId
     )
 
     Assert-WorkshopConfigShape -Config $Config
     $hostCidr = Assert-WorkshopHostCidr -Cidr $FacilitatorCidr
     $resourceGroupName = [string] $Config.ResourceGroupName
-    $adminAsgId = Get-WorkshopNetworkResourceId -ResourceGroupName $resourceGroupName -ResourceType 'applicationSecurityGroups' -Name $Config.AdminAsg
-    $sqlAsgId = Get-WorkshopNetworkResourceId -ResourceGroupName $resourceGroupName -ResourceType 'applicationSecurityGroups' -Name $Config.SqlAsg
-    $adminPipId = Get-WorkshopNetworkResourceId -ResourceGroupName $resourceGroupName -ResourceType 'publicIPAddresses' -Name 'pip-mcpsql-admin'
-    $natPipId = Get-WorkshopNetworkResourceId -ResourceGroupName $resourceGroupName -ResourceType 'publicIPAddresses' -Name 'pip-mcpsql-nat'
-    $natId = Get-WorkshopNetworkResourceId -ResourceGroupName $resourceGroupName -ResourceType 'natGateways' -Name 'nat-mcpsql-workshop'
-    $adminNsgId = Get-WorkshopNetworkResourceId -ResourceGroupName $resourceGroupName -ResourceType 'networkSecurityGroups' -Name 'nsg-mcpsql-admin'
-    $sqlNsgId = Get-WorkshopNetworkResourceId -ResourceGroupName $resourceGroupName -ResourceType 'networkSecurityGroups' -Name 'nsg-mcpsql-sql'
-    $vnetId = Get-WorkshopNetworkResourceId -ResourceGroupName $resourceGroupName -ResourceType 'virtualNetworks' -Name $Config.VNet.Name
+    $idParameters = @{ SubscriptionId = $SubscriptionId; ResourceGroupName = $resourceGroupName }
+    $adminAsgId = Get-WorkshopNetworkResourceId @idParameters -ResourceType 'applicationSecurityGroups' -Name $Config.AdminAsg
+    $sqlAsgId = Get-WorkshopNetworkResourceId @idParameters -ResourceType 'applicationSecurityGroups' -Name $Config.SqlAsg
+    $adminPipId = Get-WorkshopNetworkResourceId @idParameters -ResourceType 'publicIPAddresses' -Name 'pip-mcpsql-admin'
+    $natPipId = Get-WorkshopNetworkResourceId @idParameters -ResourceType 'publicIPAddresses' -Name 'pip-mcpsql-nat'
+    $natId = Get-WorkshopNetworkResourceId @idParameters -ResourceType 'natGateways' -Name 'nat-mcpsql-workshop'
+    $adminNsgId = Get-WorkshopNetworkResourceId @idParameters -ResourceType 'networkSecurityGroups' -Name 'nsg-mcpsql-admin'
+    $sqlNsgId = Get-WorkshopNetworkResourceId @idParameters -ResourceType 'networkSecurityGroups' -Name 'nsg-mcpsql-sql'
+    $vnetId = Get-WorkshopNetworkResourceId @idParameters -ResourceType 'virtualNetworks' -Name $Config.VNet.Name
+    $privateDnsZoneId = Get-WorkshopNetworkResourceId @idParameters -ResourceType 'privateDnsZones' -Name $Config.PrivateDnsZone
+    $privateDnsLinkName = "$($Config.VNet.Name)-link"
+    $privateDnsLinkId = "$privateDnsZoneId/virtualNetworkLinks/$privateDnsLinkName"
+    $privateDnsRecordId = "$privateDnsZoneId/A/sql01"
     $adminSubnetId = "$vnetId/subnets/$($Config.AdminSubnet.Name)"
     $sqlSubnetId = "$vnetId/subnets/$($Config.SqlSubnet.Name)"
     $tags = [ordered]@{}
@@ -1246,7 +1254,7 @@ function Get-WorkshopNetworkResourceSpecification {
     @(
         [pscustomobject][ordered]@{
             Kind = 'ResourceGroup'; Name = $resourceGroupName; Location = [string] $Config.Location
-            Id = "/subscriptions/mock/resourceGroups/$resourceGroupName"; Tags = $tags
+            Id = "/subscriptions/$SubscriptionId/resourceGroups/$resourceGroupName"; Tags = $tags
         }
         [pscustomobject][ordered]@{
             Kind = 'ApplicationSecurityGroup'; Name = [string] $Config.AdminAsg; Location = [string] $Config.Location
@@ -1321,8 +1329,22 @@ function Get-WorkshopNetworkResourceSpecification {
             )
         }
         [pscustomobject][ordered]@{
+            Kind = 'PrivateDnsZone'; Name = [string] $Config.PrivateDnsZone; Location = 'global'
+            Id = $privateDnsZoneId; Tags = $tags
+        }
+        [pscustomobject][ordered]@{
+            Kind = 'PrivateDnsVirtualNetworkLink'; Name = "$($Config.PrivateDnsZone)/$privateDnsLinkName"; Location = 'global'
+            Id = $privateDnsLinkId; ZoneName = [string] $Config.PrivateDnsZone; LinkName = $privateDnsLinkName
+            VirtualNetworkId = $vnetId; RegistrationEnabled = $false; Tags = $tags
+        }
+        [pscustomobject][ordered]@{
+            Kind = 'PrivateDnsARecord'; Name = "$($Config.PrivateDnsZone)/sql01"; Location = 'global'
+            Id = $privateDnsRecordId; ZoneName = [string] $Config.PrivateDnsZone; RecordName = 'sql01'
+            RecordType = 'A'; Ttl = 300; Ipv4Addresses = @([string] $Config.SqlPrivateIp)
+        }
+        [pscustomobject][ordered]@{
             Kind = 'NetworkInterface'; Name = 'nic-mcpsql-admin'; Location = [string] $Config.Location
-            Id = (Get-WorkshopNetworkResourceId -ResourceGroupName $resourceGroupName -ResourceType 'networkInterfaces' -Name 'nic-mcpsql-admin')
+            Id = (Get-WorkshopNetworkResourceId @idParameters -ResourceType 'networkInterfaces' -Name 'nic-mcpsql-admin')
             SubnetId = $adminSubnetId; PrivateIpAllocationMethod = 'Dynamic'; PrivateIpAddress = $null
             PublicIpAddressId = $adminPipId; PublicIpAddressIds = @($adminPipId); IpConfigurationCount = 1
             ApplicationSecurityGroupIds = @($adminAsgId)
@@ -1330,7 +1352,7 @@ function Get-WorkshopNetworkResourceSpecification {
         }
         [pscustomobject][ordered]@{
             Kind = 'NetworkInterface'; Name = 'nic-mcpsql-sql'; Location = [string] $Config.Location
-            Id = (Get-WorkshopNetworkResourceId -ResourceGroupName $resourceGroupName -ResourceType 'networkInterfaces' -Name 'nic-mcpsql-sql')
+            Id = (Get-WorkshopNetworkResourceId @idParameters -ResourceType 'networkInterfaces' -Name 'nic-mcpsql-sql')
             SubnetId = $sqlSubnetId; PrivateIpAllocationMethod = 'Static'; PrivateIpAddress = [string] $Config.SqlPrivateIp
             PublicIpAddressId = $null; PublicIpAddressIds = @(); IpConfigurationCount = 1
             ApplicationSecurityGroupIds = @($sqlAsgId)
@@ -1345,8 +1367,8 @@ function ConvertTo-WorkshopComparableValue {
 
     if ($null -eq $Value) { return $null }
     if ($Value -is [string]) {
-        if ($Value -match '(?i)/resourceGroups/') {
-            return ($Value.Substring($Value.IndexOf('/resourceGroups/', [System.StringComparison]::OrdinalIgnoreCase))).ToLowerInvariant()
+        if ($Value -match '(?i)^/?subscriptions/') {
+            return ('/' + $Value.Trim('/')).ToLowerInvariant()
         }
         return $Value
     }
@@ -1376,6 +1398,23 @@ function Test-WorkshopNetworkResourceMatch {
         [Parameter(Mandatory)][psobject] $Expected,
         [Parameter(Mandatory)][psobject] $Actual
     )
+
+    if ($Expected.Kind -eq 'NetworkSecurityGroup' -and $Actual.Kind -eq 'NetworkSecurityGroup') {
+        $expectedBase = [pscustomobject][ordered]@{
+            Kind = $Expected.Kind; Name = $Expected.Name; Location = $Expected.Location
+            Id = $Expected.Id; Tags = $Expected.Tags
+        }
+        $actualBase = [pscustomobject][ordered]@{
+            Kind = $Actual.Kind; Name = $Actual.Name; Location = $Actual.Location
+            Id = $Actual.Id; Tags = $Actual.Tags
+        }
+        $expectedComparable = ConvertTo-WorkshopComparableValue -Value $expectedBase
+        $actualComparable = ConvertTo-WorkshopComparableValue -Value $actualBase
+        $baseMatches = ($expectedComparable | ConvertTo-Json -Depth 20 -Compress) -ceq
+            ($actualComparable | ConvertTo-Json -Depth 20 -Compress)
+        return $baseMatches -and (Test-WorkshopExactCustomRuleSet `
+            -ExpectedRules @($Expected.Rules) -ActualRules @($Actual.Rules))
+    }
 
     $expectedComparable = ConvertTo-WorkshopComparableValue -Value $Expected
     $actualComparable = ConvertTo-WorkshopComparableValue -Value $Actual
@@ -1435,8 +1474,12 @@ function ConvertFrom-WorkshopAzNetworkResource {
                     Access = [string] $_.Access; Protocol = [string] $_.Protocol
                     SourcePortRange = [string] $_.SourcePortRange; SourceAddressPrefix = [string] $_.SourceAddressPrefix
                     SourceApplicationSecurityGroupId = Get-WorkshopReferenceId -Reference @($_.SourceApplicationSecurityGroups)[0]
+                    SourcePortRanges = @($_.SourcePortRanges); SourceAddressPrefixes = @($_.SourceAddressPrefixes)
+                    SourceApplicationSecurityGroupIds = @($_.SourceApplicationSecurityGroups | ForEach-Object { Get-WorkshopReferenceId -Reference $_ })
                     DestinationPortRange = [string] $_.DestinationPortRange; DestinationAddressPrefix = [string] $_.DestinationAddressPrefix
                     DestinationApplicationSecurityGroupId = Get-WorkshopReferenceId -Reference @($_.DestinationApplicationSecurityGroups)[0]
+                    DestinationPortRanges = @($_.DestinationPortRanges); DestinationAddressPrefixes = @($_.DestinationAddressPrefixes)
+                    DestinationApplicationSecurityGroupIds = @($_.DestinationApplicationSecurityGroups | ForEach-Object { Get-WorkshopReferenceId -Reference $_ })
                 }
             })
             return [pscustomobject][ordered]@{ Kind = $Kind; Name = $name; Location = $location; Id = [string] $Resource.Id; Tags = $tags; Rules = $rules }
@@ -1486,6 +1529,62 @@ function ConvertFrom-WorkshopAzNetworkResource {
                 Tags = $tags
             }
         }
+        'PrivateDnsZone' {
+            $resourceId = if ($Resource.PSObject.Properties.Name -contains 'ResourceId') {
+                [string] $Resource.ResourceId
+            }
+            else {
+                [string] $Resource.Id
+            }
+            return [pscustomobject][ordered]@{
+                Kind = $Kind; Name = $name; Location = 'global'; Id = $resourceId; Tags = $tags
+            }
+        }
+        'PrivateDnsVirtualNetworkLink' {
+            $resourceId = if ($Resource.PSObject.Properties.Name -contains 'ResourceId') {
+                [string] $Resource.ResourceId
+            }
+            else {
+                [string] $Resource.Id
+            }
+            $registrationEnabled = if ($Resource.PSObject.Properties.Name -contains 'RegistrationEnabled') {
+                [bool] $Resource.RegistrationEnabled
+            }
+            else {
+                [bool] $Resource.EnableRegistration
+            }
+            $virtualNetworkId = if ($Resource.PSObject.Properties.Name -contains 'VirtualNetworkId') {
+                [string] $Resource.VirtualNetworkId
+            }
+            elseif ($Resource.PSObject.Properties.Name -contains 'VirtualNetwork') {
+                Get-WorkshopReferenceId -Reference $Resource.VirtualNetwork
+            }
+            else {
+                ''
+            }
+            return [pscustomobject][ordered]@{
+                Kind = $Kind; Name = "$($Resource.ZoneName)/$name"; Location = 'global'; Id = $resourceId
+                ZoneName = [string] $Resource.ZoneName; LinkName = $name
+                VirtualNetworkId = $virtualNetworkId
+                RegistrationEnabled = $registrationEnabled; Tags = $tags
+            }
+        }
+        'PrivateDnsARecord' {
+            $resourceId = if ($Resource.PSObject.Properties.Name -contains 'ResourceId') {
+                [string] $Resource.ResourceId
+            }
+            else {
+                [string] $Resource.Id
+            }
+            $ipv4Addresses = @($Resource.Records | ForEach-Object {
+                if ($_.PSObject.Properties.Name -contains 'Ipv4Address') { [string] $_.Ipv4Address }
+            } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+            return [pscustomobject][ordered]@{
+                Kind = $Kind; Name = "$($Resource.ZoneName)/$name"; Location = 'global'; Id = $resourceId
+                ZoneName = [string] $Resource.ZoneName; RecordName = $name; RecordType = [string] $Resource.RecordType
+                Ttl = [int] $Resource.Ttl; Ipv4Addresses = $ipv4Addresses
+            }
+        }
         default { throw "Unsupported workshop network resource kind '$Kind'." }
     }
 }
@@ -1495,6 +1594,14 @@ function Get-DefaultWorkshopNetworkOperationSet {
     param()
 
     @{
+        GetSubscriptionId = {
+            $context = Get-AzContext -ErrorAction Stop
+            $subscriptionId = Get-WorkshopNestedIdentifier -InputObject $context -PropertyName 'Subscription'
+            if ([string]::IsNullOrWhiteSpace($subscriptionId)) {
+                throw 'The active Azure context did not return a subscription ID.'
+            }
+            $subscriptionId
+        }
         GetResource = {
             param($Kind, $Name, $ResourceGroupName)
             try {
@@ -1506,6 +1613,21 @@ function Get-DefaultWorkshopNetworkOperationSet {
                     'NetworkSecurityGroup' { Get-AzNetworkSecurityGroup -ResourceGroupName $ResourceGroupName -Name $Name -ErrorAction Stop }
                     'VirtualNetwork' { Get-AzVirtualNetwork -ResourceGroupName $ResourceGroupName -Name $Name -ErrorAction Stop }
                     'NetworkInterface' { Get-AzNetworkInterface -ResourceGroupName $ResourceGroupName -Name $Name -ErrorAction Stop }
+                    'PrivateDnsZone' { Get-AzPrivateDnsZone -ResourceGroupName $ResourceGroupName -Name $Name -ErrorAction Stop }
+                    'PrivateDnsVirtualNetworkLink' {
+                        $zoneName, $linkName = $Name -split '/', 2
+                        $link = Get-AzPrivateDnsVirtualNetworkLink -ResourceGroupName $ResourceGroupName `
+                            -ZoneName $zoneName -Name $linkName -ErrorAction Stop
+                        $link | Add-Member -NotePropertyName ZoneName -NotePropertyValue $zoneName -Force
+                        $link
+                    }
+                    'PrivateDnsARecord' {
+                        $zoneName, $recordName = $Name -split '/', 2
+                        $record = Get-AzPrivateDnsRecordSet -ResourceGroupName $ResourceGroupName `
+                            -ZoneName $zoneName -Name $recordName -RecordType A -ErrorAction Stop
+                        $record | Add-Member -NotePropertyName ZoneName -NotePropertyValue $zoneName -Force
+                        $record
+                    }
                     default { throw "Unsupported workshop network resource kind '$Kind'." }
                 }
                 ConvertFrom-WorkshopAzNetworkResource -Kind $Kind -Resource $resource
@@ -1514,6 +1636,12 @@ function Get-DefaultWorkshopNetworkOperationSet {
                 if (Test-WorkshopAzureNotFound -ErrorRecord $_) { return $null }
                 throw
             }
+        }
+        GetPublicIpInventory = {
+            param($ResourceGroupName)
+            @(Get-AzPublicIpAddress -ResourceGroupName $ResourceGroupName -ErrorAction Stop | ForEach-Object {
+                ConvertFrom-WorkshopAzNetworkResource -Kind 'PublicIpAddress' -Resource $_
+            })
         }
         CreateResource = {
             param($Spec, $ResourceGroupName)
@@ -1582,6 +1710,21 @@ function Get-DefaultWorkshopNetworkOperationSet {
                         -Location $Spec.Location -AddressPrefix $Spec.AddressPrefix -Subnet $subnets `
                         -Tag $Spec.Tags -ErrorAction Stop
                 }
+                'PrivateDnsZone' {
+                    New-AzPrivateDnsZone -ResourceGroupName $ResourceGroupName -Name $Spec.Name `
+                        -Tag $Spec.Tags -ErrorAction Stop
+                }
+                'PrivateDnsVirtualNetworkLink' {
+                    New-AzPrivateDnsVirtualNetworkLink -ResourceGroupName $ResourceGroupName `
+                        -ZoneName $Spec.ZoneName -Name $Spec.LinkName -VirtualNetworkId $Spec.VirtualNetworkId `
+                        -EnableRegistration:$Spec.RegistrationEnabled -Tag $Spec.Tags -ErrorAction Stop
+                }
+                'PrivateDnsARecord' {
+                    $record = New-AzPrivateDnsRecordConfig -IPv4Address $Spec.Ipv4Addresses[0]
+                    New-AzPrivateDnsRecordSet -ResourceGroupName $ResourceGroupName -ZoneName $Spec.ZoneName `
+                        -Name $Spec.RecordName -RecordType A -Ttl $Spec.Ttl -PrivateDnsRecords $record `
+                        -ErrorAction Stop
+                }
                 'NetworkInterface' {
                     $virtualNetworkName = ($Spec.SubnetId -split '/virtualNetworks/')[1] -split '/subnets/' | Select-Object -First 1
                     $subnetName = ($Spec.SubnetId -split '/')[-1]
@@ -1624,7 +1767,7 @@ function Assert-WorkshopNetworkOperationSet {
         [switch] $ReadOnly
     )
 
-    $required = @('GetResource')
+    $required = @('GetSubscriptionId', 'GetResource', 'GetPublicIpInventory')
     if (-not $ReadOnly) { $required += 'CreateResource' }
     foreach ($name in $required) {
         if (-not $Operations.ContainsKey($name) -or $Operations[$name] -isnot [scriptblock]) {
@@ -1643,7 +1786,12 @@ ${function:New-WorkshopNetwork} = {
 
     if ($null -eq $Operations) { $Operations = Get-DefaultWorkshopNetworkOperationSet }
     Assert-WorkshopNetworkOperationSet -Operations $Operations
-    $specs = @(Get-WorkshopNetworkResourceSpecification -Config $Config -FacilitatorCidr $FacilitatorCidr)
+    $subscriptionId = [string] (& $Operations.GetSubscriptionId)
+    if ([string]::IsNullOrWhiteSpace($subscriptionId)) {
+        throw 'Network operations returned an empty subscription ID.'
+    }
+    $specs = @(Get-WorkshopNetworkResourceSpecification -Config $Config `
+        -FacilitatorCidr $FacilitatorCidr -SubscriptionId $subscriptionId)
     $checkpoint = [System.Collections.Generic.List[string]]::new()
     try {
         foreach ($spec in $specs) {
@@ -1738,6 +1886,62 @@ function Test-WorkshopRuleProtocol {
     return [string] $Rule.Protocol -in @('*', $Protocol)
 }
 
+function ConvertTo-WorkshopNormalizedRule {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][psobject] $Rule)
+
+    function Get-NormalizedScalarValue {
+        param([string] $SingularName, [string] $PluralName, [switch] $Reference)
+
+        $values = Get-WorkshopRulePropertyValue -Rule $Rule -SingularName $SingularName -PluralName $PluralName
+        @($values | ForEach-Object {
+            $value = if ($Reference) { Get-WorkshopReferenceId -Reference $_ } else { [string] $_ }
+            if (-not [string]::IsNullOrWhiteSpace($value)) {
+                if ($value -match '(?i)^/?subscriptions/') {
+                    ConvertTo-WorkshopComparableValue -Value $value
+                }
+                else {
+                    $value.ToLowerInvariant()
+                }
+            }
+        } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Sort-Object -Unique)
+    }
+
+    [pscustomobject][ordered]@{
+        Name = ([string] $Rule.Name).ToLowerInvariant()
+        Priority = [int] $Rule.Priority
+        Direction = ([string] $Rule.Direction).ToLowerInvariant()
+        Access = ([string] $Rule.Access).ToLowerInvariant()
+        Protocol = ([string] $Rule.Protocol).ToLowerInvariant()
+        SourcePorts = @(Get-NormalizedScalarValue -SingularName 'SourcePortRange' -PluralName 'SourcePortRanges')
+        SourceAddresses = @(Get-NormalizedScalarValue -SingularName 'SourceAddressPrefix' -PluralName 'SourceAddressPrefixes')
+        SourceAsgs = @(Get-NormalizedScalarValue -SingularName 'SourceApplicationSecurityGroupId' `
+            -PluralName 'SourceApplicationSecurityGroupIds' -Reference)
+        DestinationPorts = @(Get-NormalizedScalarValue -SingularName 'DestinationPortRange' -PluralName 'DestinationPortRanges')
+        DestinationAddresses = @(Get-NormalizedScalarValue -SingularName 'DestinationAddressPrefix' -PluralName 'DestinationAddressPrefixes')
+        DestinationAsgs = @(Get-NormalizedScalarValue -SingularName 'DestinationApplicationSecurityGroupId' `
+            -PluralName 'DestinationApplicationSecurityGroupIds' -Reference)
+    }
+}
+
+function Test-WorkshopExactCustomRuleSet {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][object[]] $ExpectedRules,
+        [Parameter(Mandatory)][object[]] $ActualRules
+    )
+
+    $customRules = @($ActualRules | Where-Object {
+        -not ($_.PSObject.Properties.Name -contains 'ManagedByAzure' -and $_.ManagedByAzure -eq $true)
+    })
+    $expected = @($ExpectedRules | ForEach-Object { ConvertTo-WorkshopNormalizedRule -Rule $_ } |
+        Sort-Object Priority, Name)
+    $actual = @($customRules | ForEach-Object { ConvertTo-WorkshopNormalizedRule -Rule $_ } |
+        Sort-Object Priority, Name)
+    return $expected.Count -eq $actual.Count -and
+        (($expected | ConvertTo-Json -Depth 10 -Compress) -ceq ($actual | ConvertTo-Json -Depth 10 -Compress))
+}
+
 ${function:Test-WorkshopNetworkBoundary} = {
     [CmdletBinding()]
     param(
@@ -1748,8 +1952,20 @@ ${function:Test-WorkshopNetworkBoundary} = {
 
     if ($null -eq $Operations) { $Operations = Get-DefaultWorkshopNetworkOperationSet }
     Assert-WorkshopNetworkOperationSet -Operations $Operations -ReadOnly
-    $expectedSpecs = @(Get-WorkshopNetworkResourceSpecification -Config $Config -FacilitatorCidr $FacilitatorCidr)
     $checks = [System.Collections.Generic.List[object]]::new()
+    try {
+        $subscriptionId = [string] (& $Operations.GetSubscriptionId)
+        if ([string]::IsNullOrWhiteSpace($subscriptionId)) {
+            throw 'Network operations returned an empty subscription ID.'
+        }
+    }
+    catch {
+        Add-WorkshopBoundaryCheck -Checks $checks -Name 'Read subscription identity' -Passed $false `
+            -Detail (ConvertTo-WorkshopSafeDetail -Value $_.Exception.Message)
+        return [pscustomobject][ordered]@{ Passed = $false; Checks = $checks.ToArray() }
+    }
+    $expectedSpecs = @(Get-WorkshopNetworkResourceSpecification -Config $Config `
+        -FacilitatorCidr $FacilitatorCidr -SubscriptionId $subscriptionId)
     $actual = @{}
     foreach ($spec in $expectedSpecs) {
         try {
@@ -1776,13 +1992,45 @@ ${function:Test-WorkshopNetworkBoundary} = {
     $vnet = $actual["VirtualNetwork/$($Config.VNet.Name)"]
     $adminNic = $actual['NetworkInterface/nic-mcpsql-admin']
     $sqlNic = $actual['NetworkInterface/nic-mcpsql-sql']
-    $adminAsgId = $actual["ApplicationSecurityGroup/$($Config.AdminAsg)"].Id
-    $sqlAsgId = $actual["ApplicationSecurityGroup/$($Config.SqlAsg)"].Id
+    $expectedByKey = @{}
+    foreach ($spec in $expectedSpecs) { $expectedByKey["$($spec.Kind)/$($spec.Name)"] = $spec }
+    $adminAsgId = $expectedByKey["ApplicationSecurityGroup/$($Config.AdminAsg)"].Id
+    $sqlAsgId = $expectedByKey["ApplicationSecurityGroup/$($Config.SqlAsg)"].Id
 
+    $resourceIdentitiesPassed = $true
+    foreach ($key in $expectedByKey.Keys) {
+        $resourceIdentitiesPassed = $resourceIdentitiesPassed -and
+            (ConvertTo-WorkshopComparableValue $actual[$key].Id) -ceq
+                (ConvertTo-WorkshopComparableValue $expectedByKey[$key].Id)
+    }
+    Add-WorkshopBoundaryCheck -Checks $checks -Name 'Exact network resource identities' `
+        -Passed $resourceIdentitiesPassed `
+        -Detail 'Every network and private DNS object must have its approved full subscription-qualified resource ID.'
+
+    try {
+        $publicIpInventory = @(& $Operations.GetPublicIpInventory $Config.ResourceGroupName)
+        $expectedPublicIps = @(
+            $expectedByKey['PublicIpAddress/pip-mcpsql-admin'],
+            $expectedByKey['PublicIpAddress/pip-mcpsql-nat']
+        )
+        $actualPublicIps = @($publicIpInventory | Sort-Object Id)
+        $expectedPublicIps = @($expectedPublicIps | Sort-Object Id)
+        $publicIpInventoryPassed = $actualPublicIps.Count -eq 2 -and
+            (Test-WorkshopNetworkResourceMatch -Expected $expectedPublicIps[0] -Actual $actualPublicIps[0]) -and
+            (Test-WorkshopNetworkResourceMatch -Expected $expectedPublicIps[1] -Actual $actualPublicIps[1])
+    }
+    catch {
+        $publicIpInventory = @()
+        $publicIpInventoryPassed = $false
+    }
     Add-WorkshopBoundaryCheck -Checks $checks -Name 'Standard static public IP inventory' `
-        -Passed ($adminPip.Sku -eq 'Standard' -and $adminPip.AllocationMethod -eq 'Static' -and
-            $natPip.Sku -eq 'Standard' -and $natPip.AllocationMethod -eq 'Static') `
-        -Detail 'Only the approved administration-ingress and NAT-egress public IP resources are in the model.'
+        -Passed $publicIpInventoryPassed `
+        -Detail 'The target resource group must contain exactly the full-ID-matched Standard Static IPv4 administration and NAT public IP resources.'
+    Add-WorkshopBoundaryCheck -Checks $checks -Name 'NAT Gateway identity and SKU' `
+        -Passed ((ConvertTo-WorkshopComparableValue $nat.Id) -ceq
+            (ConvertTo-WorkshopComparableValue $expectedByKey['NatGateway/nat-mcpsql-workshop'].Id) -and
+            $nat.Sku -ceq 'Standard') `
+        -Detail 'NAT Gateway must have the exact subscription-qualified identity and Standard SKU.'
     Add-WorkshopBoundaryCheck -Checks $checks -Name 'NAT public IP association' `
         -Passed (@($nat.PublicIpAddressIds).Count -eq 1 -and
             (ConvertTo-WorkshopComparableValue $nat.PublicIpAddressIds[0]) -eq (ConvertTo-WorkshopComparableValue $natPip.Id)) `
@@ -1896,6 +2144,17 @@ ${function:Test-WorkshopNetworkBoundary} = {
     Add-WorkshopBoundaryCheck -Checks $checks -Name 'SQL VNet deny rule' -Passed $denyPassed `
         -Detail 'Other VNet traffic must be denied to the SQL ASG at priority 4000.'
 
+    Add-WorkshopBoundaryCheck -Checks $checks -Name 'Exact administration custom NSG rules' `
+        -Passed (Test-WorkshopExactCustomRuleSet `
+            -ExpectedRules @($expectedByKey['NetworkSecurityGroup/nsg-mcpsql-admin'].Rules) `
+            -ActualRules @($adminNsg.Rules)) `
+        -Detail 'Administration NSG custom rules must be exactly the approved canonical set; Azure-managed defaults are ignored.'
+    Add-WorkshopBoundaryCheck -Checks $checks -Name 'Exact SQL custom NSG rules' `
+        -Passed (Test-WorkshopExactCustomRuleSet `
+            -ExpectedRules @($expectedByKey['NetworkSecurityGroup/nsg-mcpsql-sql'].Rules) `
+            -ActualRules @($sqlNsg.Rules)) `
+        -Detail 'SQL NSG custom rules must be exactly the approved canonical set; every extra allow or deny rule is drift.'
+
     $publicSqlRule = @($sqlNsg.Rules + $adminNsg.Rules | Where-Object {
         $sourceAsgs = @(Get-WorkshopRulePropertyValue -Rule $_ `
             -SingularName 'SourceApplicationSecurityGroupId' -PluralName 'SourceApplicationSecurityGroupIds')
@@ -1913,8 +2172,8 @@ ${function:Test-WorkshopNetworkBoundary} = {
 
     $subnetsPassed = @($vnet.Subnets).Count -eq 2
     foreach ($expectedSubnet in @(
-        @{ Name = $Config.AdminSubnet.Name; Prefix = $Config.AdminSubnet.Prefix; Nsg = 'nsg-mcpsql-admin' },
-        @{ Name = $Config.SqlSubnet.Name; Prefix = $Config.SqlSubnet.Prefix; Nsg = 'nsg-mcpsql-sql' }
+        @{ Name = $Config.AdminSubnet.Name; Prefix = $Config.AdminSubnet.Prefix; Nsg = $expectedByKey['NetworkSecurityGroup/nsg-mcpsql-admin'].Id },
+        @{ Name = $Config.SqlSubnet.Name; Prefix = $Config.SqlSubnet.Prefix; Nsg = $expectedByKey['NetworkSecurityGroup/nsg-mcpsql-sql'].Id }
     )) {
         $subnet = @($vnet.Subnets | Where-Object Name -EQ $expectedSubnet.Name)
         $outboundVerified = $subnet.Count -eq 1 -and
@@ -1923,12 +2182,23 @@ ${function:Test-WorkshopNetworkBoundary} = {
         $subnetsPassed = $subnetsPassed -and $subnet.Count -eq 1 -and $outboundVerified -and
             $subnet[0].AddressPrefix -eq $expectedSubnet.Prefix -and
             $subnet[0].PrivateEndpointNetworkPolicies -eq 'Disabled' -and
-            -not [string]::IsNullOrWhiteSpace([string] $subnet[0].NatGatewayId) -and
-            $subnet[0].NatGatewayId -like "*/nat-mcpsql-workshop" -and
-            $subnet[0].NetworkSecurityGroupId -like "*/$($expectedSubnet.Nsg)"
+            (ConvertTo-WorkshopComparableValue $subnet[0].NatGatewayId) -ceq
+                (ConvertTo-WorkshopComparableValue $expectedByKey['NatGateway/nat-mcpsql-workshop'].Id) -and
+            (ConvertTo-WorkshopComparableValue $subnet[0].NetworkSecurityGroupId) -ceq
+                (ConvertTo-WorkshopComparableValue $expectedSubnet.Nsg)
     }
     Add-WorkshopBoundaryCheck -Checks $checks -Name 'Private subnet NAT and NSG associations' -Passed $subnetsPassed `
         -Detail 'Both private subnets require default outbound disabled plus the approved NAT Gateway and subnet NSG.'
+
+    foreach ($dnsKey in @(
+        "PrivateDnsZone/$($Config.PrivateDnsZone)",
+        "PrivateDnsVirtualNetworkLink/$($Config.PrivateDnsZone)/$($Config.VNet.Name)-link",
+        "PrivateDnsARecord/$($Config.PrivateDnsZone)/sql01"
+    )) {
+        Add-WorkshopBoundaryCheck -Checks $checks -Name "Exact $dnsKey" `
+            -Passed (Test-WorkshopNetworkResourceMatch -Expected $expectedByKey[$dnsKey] -Actual $actual[$dnsKey]) `
+            -Detail 'Private DNS resource identity and values must exactly match the approved private-only SQL name.'
+    }
 
     [pscustomobject][ordered]@{
         Passed = @($checks | Where-Object Status -EQ 'Failed').Count -eq 0
