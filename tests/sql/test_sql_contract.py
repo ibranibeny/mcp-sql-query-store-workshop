@@ -669,6 +669,57 @@ def test_numbers_generation_uses_bounded_top_cross_joins() -> None:
     assert not re.search(r"INSERT\s+.*?LAB\.NUMBERS.*?SELECT(?!\s+TOP).*?CROSS JOIN", text)
 
 
+def test_numbers_growth_is_guarded_before_setup_population_and_indexes() -> None:
+    text = normalized("03-CreateScaledLabData.sql")
+    numbers_create = text.index("CREATE TABLE LAB.NUMBERS")
+    numbers_insert = text.index("INSERT LAB.NUMBERS")
+    batch_loop = text.index("WHILE @NEXTID <= @TARGETROWS")
+    setup = text[:batch_loop]
+
+    capacity_read = setup.index("SYS.DM_OS_VOLUME_STATS", setup.index("@ESTIMATEDNUMBERSMB"))
+    guard_start = setup.rfind("SELECT TOP (1)", 0, capacity_read)
+    assert capacity_read < numbers_create < numbers_insert
+    assert "@NUMBERSWORSTCASEBYTESPERROW INT = 64" in setup[:capacity_read]
+    assert re.search(
+        r"@ESTIMATEDNUMBERSMB\s+DECIMAL\(19,4\)\s*=\s*CEILING\s*\(\s*"
+        r"CONVERT\(DECIMAL\(19,4\),\s*@TARGETROWS\)\s*\*\s*"
+        r"@NUMBERSWORSTCASEBYTESPERROW\s*/\s*1048576\.0\s*\)",
+        setup[:capacity_read],
+    )
+    guarded_region = setup[guard_start:numbers_insert]
+    assert "FILEPROPERTY(F.NAME, 'SPACEUSED')" in guarded_region
+    assert "F.GROWTH * 8.0 / 1024" in guarded_region
+    assert "F.IS_PERCENT_GROWTH" in guarded_region
+    assert "F.AVAILABLE_BYTES" not in guarded_region
+    assert "V.AVAILABLE_BYTES" in guarded_region
+    assert re.search(r"@SETUPISPERCENTGROWTH\s*=\s*1.*?THROW", guarded_region)
+    assert re.search(r"@SETUPUNALLOCATEDMB\s*=\s*@SETUPALLOCATEDMB\s*-\s*@SETUPUSEDMB", guarded_region)
+    assert re.search(
+        r"@SETUPREQUIREDPHYSICALGROWTHMB\s*=\s*CASE\s+WHEN\s+"
+        r"@ESTIMATEDNUMBERSMB\s*>\s*@SETUPUNALLOCATEDMB",
+        guarded_region,
+    )
+    assert re.search(
+        r"CEILING\s*\(\s*@SETUPREQUIREDPHYSICALGROWTHMB\s*/\s*"
+        r"@SETUPGROWTHINCREMENTMB\s*\)",
+        guarded_region,
+    )
+    assert re.search(
+        r"@SETUPAVAILABLESPACEMB\s*-\s*@SETUPROUNDEDGROWTHMB\s*<\s*"
+        r"@MINIMUMFREESPACEMB.*?THROW",
+        guarded_region,
+    )
+    assert re.search(
+        r"@SETUPALLOCATEDMB\s*\+\s*@SETUPROUNDEDGROWTHMB\s*>\s*"
+        r"@MAXIMUMDATAFILESIZEMB.*?THROW",
+        guarded_region,
+    )
+    assert "METADATA IS UNAVAILABLE" in guarded_region
+
+    for index_match in re.finditer(r"CREATE\s+(?:UNIQUE\s+)?(?:CLUSTERED\s+|NONCLUSTERED\s+)?INDEX\b", setup):
+        assert capacity_read < index_match.start()
+
+
 def test_fact_sales_schema_and_generation_are_deterministic() -> None:
     text = normalized("03-CreateScaledLabData.sql")
     for contract in (

@@ -72,6 +72,57 @@ DECLARE @FilePolicySql nvarchar(max) = N'ALTER DATABASE ' + QUOTENAME(DB_NAME())
     + N', FILEGROWTH = 512MB, MAXSIZE = ' + CONVERT(nvarchar(20), @MaximumDataFileSizeMB) + N'MB);';
 EXEC sys.sp_executesql @FilePolicySql;
 
+/* Guard the first potentially large setup allocation before lab.Numbers or its
+   clustered primary key can consume data-file space. Sixty-four bytes per row
+   conservatively covers the int key, record/page overhead, and index slack. */
+DECLARE @NumbersWorstCaseBytesPerRow int = 64;
+DECLARE @EstimatedNumbersMB decimal(19,4) = CEILING(
+    CONVERT(decimal(19,4), @TargetRows) * @NumbersWorstCaseBytesPerRow / 1048576.0
+);
+DECLARE @SetupAvailableSpaceMB bigint;
+DECLARE @SetupAllocatedMB decimal(19,4);
+DECLARE @SetupUsedMB decimal(19,4);
+DECLARE @SetupUnallocatedMB decimal(19,4);
+DECLARE @SetupGrowthIncrementMB decimal(19,4);
+DECLARE @SetupIsPercentGrowth bit;
+DECLARE @SetupRequiredPhysicalGrowthMB decimal(19,4);
+DECLARE @SetupRoundedGrowthMB decimal(19,4);
+
+SELECT TOP (1)
+    @SetupAllocatedMB = f.size * 8.0 / 1024,
+    @SetupUsedMB = FILEPROPERTY(f.name, 'SpaceUsed') * 8.0 / 1024,
+    @SetupGrowthIncrementMB = f.growth * 8.0 / 1024,
+    @SetupIsPercentGrowth = f.is_percent_growth,
+    @SetupAvailableSpaceMB = v.available_bytes / 1048576
+FROM sys.database_files AS f
+CROSS APPLY sys.dm_os_volume_stats(DB_ID(), f.file_id) AS v
+WHERE f.type_desc = N'ROWS'
+ORDER BY f.file_id;
+
+IF @SetupAllocatedMB IS NULL OR @SetupUsedMB IS NULL
+   OR @SetupGrowthIncrementMB IS NULL OR @SetupGrowthIncrementMB <= 0
+   OR @SetupIsPercentGrowth IS NULL OR @SetupAvailableSpaceMB IS NULL
+    THROW 51314, 'Setup data-file capacity metadata is unavailable.', 1;
+IF @SetupIsPercentGrowth = 1
+    THROW 51315, 'Percent data-file growth is not supported; configure a fixed increment.', 1;
+
+SET @SetupUnallocatedMB = @SetupAllocatedMB - @SetupUsedMB;
+IF @SetupUnallocatedMB < 0
+    THROW 51330, 'Setup data-file allocated and used metadata is inconsistent.', 1;
+SET @SetupRequiredPhysicalGrowthMB = CASE
+    WHEN @EstimatedNumbersMB > @SetupUnallocatedMB THEN @EstimatedNumbersMB - @SetupUnallocatedMB
+    ELSE 0
+END;
+SET @SetupRoundedGrowthMB = CASE
+    WHEN @SetupRequiredPhysicalGrowthMB = 0 THEN 0
+    ELSE CEILING(@SetupRequiredPhysicalGrowthMB / @SetupGrowthIncrementMB) * @SetupGrowthIncrementMB
+END;
+
+IF @SetupAvailableSpaceMB - @SetupRoundedGrowthMB < @MinimumFreeSpaceMB
+    THROW 51331, 'Worst-case rounded Numbers growth would violate the free-space floor.', 1;
+IF @SetupAllocatedMB + @SetupRoundedGrowthMB > @MaximumDataFileSizeMB
+    THROW 51332, 'Worst-case rounded Numbers growth would violate the data-file size cap.', 1;
+
 IF OBJECT_ID(N'lab.Numbers', N'U') IS NULL
 BEGIN
     CREATE TABLE lab.Numbers
