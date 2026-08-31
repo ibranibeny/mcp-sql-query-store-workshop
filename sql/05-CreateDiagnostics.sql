@@ -1,8 +1,8 @@
 :on error exit
 /*
 Creates the bounded evidence contract and the six least-privileged diagnostics used by
-Data API Builder. The bootstrap must pre-create the fixed server login. Procedures use
-EXECUTE AS OWNER as accepted by the workshop contract; no TRUSTWORTHY change is made.
+Data API Builder. The bootstrap must pre-create the fixed server login and database
+master key. Server-scoped DMV access is conveyed only through signed modules.
 */
 IF @@TRANCOUNT <> 0
     THROW 51600, 'Diagnostics setup cannot run inside an active transaction.', 1;
@@ -15,6 +15,7 @@ DECLARE @WorkshopSchemaVersion int = 1;
 DECLARE @WorkshopSetupName sysname = N'MCP SQL Query Store Workshop';
 DECLARE @WorkshopSetupHash varbinary(32) = 0xADA06F206D3DB321527A5AAB390FC814E28EBB59791967EB99841BF669E1B16B;
 DECLARE @DiagnosticsSetupAuthorized bit = TRY_CONVERT(bit, SESSION_CONTEXT(N'DiagnosticsSetupAuthorized'));
+DECLARE @DatabaseMasterKeyReady bit = TRY_CONVERT(bit, SESSION_CONTEXT(N'DatabaseMasterKeyReady'));
 
 IF @DiagnosticsSetupAuthorized <> 1
     THROW 51601, 'DiagnosticsSetupAuthorized session context must equal 1.', 1;
@@ -30,6 +31,17 @@ IF DB_NAME() <> N'AdventureWorks2022'
          AND SetupHash = @WorkshopSetupHash
    )
     THROW 51602, 'The workshop marker contract is invalid.', 1;
+IF @DatabaseMasterKeyReady <> 1
+   OR NOT EXISTS (SELECT 1 FROM sys.symmetric_keys WHERE name = N'##MS_DatabaseMasterKey##')
+    THROW 51605, 'Bootstrap must create the database master key and set DatabaseMasterKeyReady session context to 1.', 1;
+IF CONVERT(int, DATABASEPROPERTYEX(DB_NAME(), N'IsTrustworthyOn')) <> 0
+    THROW 51606, 'AdventureWorks2022 TRUSTWORTHY must remain OFF.', 1;
+
+IF (OBJECT_ID(N'lab.WorkshopRun') IS NOT NULL AND OBJECT_ID(N'lab.WorkshopRun', N'U') IS NULL)
+   OR (OBJECT_ID(N'lab.WorkshopSample') IS NOT NULL AND OBJECT_ID(N'lab.WorkshopSample', N'U') IS NULL)
+   OR (OBJECT_ID(N'lab.WorkshopRequestSample') IS NOT NULL AND OBJECT_ID(N'lab.WorkshopRequestSample', N'U') IS NULL)
+   OR (OBJECT_ID(N'lab.ValidationRun') IS NOT NULL AND OBJECT_ID(N'lab.ValidationRun', N'U') IS NULL)
+    THROW 51604, 'Existing evidence object is not a compatible table.', 1;
 
 IF OBJECT_ID(N'lab.WorkshopRun', N'U') IS NULL
 BEGIN
@@ -144,18 +156,6 @@ BEGIN
     );
 END;
 
-IF (SELECT COUNT(*) FROM sys.columns WHERE object_id = OBJECT_ID(N'lab.WorkshopRun')) <> 19
-   OR (SELECT COUNT(*) FROM sys.columns WHERE object_id = OBJECT_ID(N'lab.WorkshopSample')) <> 18
-   OR (SELECT COUNT(*) FROM sys.columns WHERE object_id = OBJECT_ID(N'lab.WorkshopRequestSample')) <> 14
-   OR COL_LENGTH(N'lab.WorkshopRun', N'FrozenSettingsJson') <> 8000
-   OR COL_LENGTH(N'lab.WorkshopRun', N'FrozenSettingsHash') <> 32
-   OR COL_LENGTH(N'lab.WorkshopSample', N'GrantUtilizationPercent') IS NULL
-   OR COL_LENGTH(N'lab.WorkshopRequestSample', N'MaxUsedMemoryKB') IS NULL
-   OR NOT EXISTS (SELECT 1 FROM sys.key_constraints WHERE parent_object_id = OBJECT_ID(N'lab.WorkshopRun') AND type = 'PK')
-   OR NOT EXISTS (SELECT 1 FROM sys.foreign_keys WHERE parent_object_id = OBJECT_ID(N'lab.WorkshopSample') AND referenced_object_id = OBJECT_ID(N'lab.WorkshopRun'))
-   OR NOT EXISTS (SELECT 1 FROM sys.foreign_keys WHERE parent_object_id = OBJECT_ID(N'lab.WorkshopRequestSample') AND referenced_object_id = OBJECT_ID(N'lab.WorkshopSample'))
-    THROW 51604, 'Existing evidence table contract is incompatible.', 1;
-
 /* Task 9 owns the same exact contract. Create it only when absent, then compare metadata exactly. */
 IF OBJECT_ID(N'lab.ValidationRun', N'U') IS NULL
 BEGIN
@@ -177,10 +177,11 @@ BEGIN
     );
 END;
 
-DECLARE @ExpectedValidationColumns table
+DECLARE @ExpectedColumns table
 (
+    table_name sysname NOT NULL,
     column_id int NOT NULL,
-    name sysname NOT NULL,
+    column_name sysname NOT NULL,
     type_name sysname NOT NULL,
     max_length smallint NOT NULL,
     precision tinyint NOT NULL,
@@ -188,40 +189,330 @@ DECLARE @ExpectedValidationColumns table
     is_nullable bit NOT NULL,
     is_identity bit NOT NULL
 );
-INSERT @ExpectedValidationColumns
-    (column_id, name, type_name, max_length, precision, scale, is_nullable, is_identity)
+INSERT @ExpectedColumns
+    (table_name, column_id, column_name, type_name, max_length, precision, scale, is_nullable, is_identity)
 VALUES
-    (1, N'ValidationRunID', N'bigint', 8, 19, 0, 0, 1),
-    (2, N'RunID', N'nvarchar', 256, 0, 0, 0, 0),
-    (3, N'ValidationCaseName', N'nvarchar', 256, 0, 0, 0, 0),
-    (4, N'StartDate', N'date', 3, 10, 0, 0, 0),
-    (5, N'EndDateExclusive', N'date', 3, 10, 0, 0, 0),
-    (6, N'TerritoryID', N'int', 4, 10, 0, 1, 0),
-    (7, N'TopCount', N'int', 4, 10, 0, 0, 0),
-    (8, N'BaselineRowCount', N'bigint', 8, 19, 0, 0, 0),
-    (9, N'OptimizedRowCount', N'bigint', 8, 19, 0, 0, 0),
-    (10, N'BaselineHash', N'varbinary', 32, 0, 0, 0, 0),
-    (11, N'OptimizedHash', N'varbinary', 32, 0, 0, 0, 0),
-    (12, N'Passed', N'bit', 1, 1, 0, 0, 0),
-    (13, N'ValidatedAtUtc', N'datetime2', 6, 19, 0, 0, 0);
+    (N'WorkshopRun', 1, N'RunID', N'uniqueidentifier', 16, 0, 0, 0, 0),
+    (N'WorkshopRun', 2, N'ParentComparisonID', N'uniqueidentifier', 16, 0, 0, 1, 0),
+    (N'WorkshopRun', 3, N'EvidenceClassification', N'varchar', 24, 0, 0, 0, 0),
+    (N'WorkshopRun', 4, N'Phase', N'varchar', 16, 0, 0, 0, 0),
+    (N'WorkshopRun', 5, N'RunStatus', N'varchar', 16, 0, 0, 0, 0),
+    (N'WorkshopRun', 6, N'Outcome', N'varchar', 24, 0, 0, 1, 0),
+    (N'WorkshopRun', 7, N'StartedAtUtc', N'datetime2', 7, 23, 3, 0, 0),
+    (N'WorkshopRun', 8, N'CompletedAtUtc', N'datetime2', 7, 23, 3, 1, 0),
+    (N'WorkshopRun', 9, N'FrozenSettingsHash', N'varbinary', 32, 0, 0, 0, 0),
+    (N'WorkshopRun', 10, N'FrozenSettingsJson', N'nvarchar', 8000, 0, 0, 0, 0),
+    (N'WorkshopRun', 11, N'BaselineQueryID', N'bigint', 8, 19, 0, 1, 0),
+    (N'WorkshopRun', 12, N'BaselinePlanID', N'bigint', 8, 19, 0, 1, 0),
+    (N'WorkshopRun', 13, N'OptimizedQueryID', N'bigint', 8, 19, 0, 1, 0),
+    (N'WorkshopRun', 14, N'OptimizedPlanID', N'bigint', 8, 19, 0, 1, 0),
+    (N'WorkshopRun', 15, N'DurationMs', N'bigint', 8, 19, 0, 1, 0),
+    (N'WorkshopRun', 16, N'CpuMs', N'bigint', 8, 19, 0, 1, 0),
+    (N'WorkshopRun', 17, N'LogicalReads', N'bigint', 8, 19, 0, 1, 0),
+    (N'WorkshopRun', 18, N'Spills', N'bigint', 8, 19, 0, 1, 0),
+    (N'WorkshopRun', 19, N'WaitTimeMs', N'bigint', 8, 19, 0, 1, 0),
+    (N'WorkshopSample', 1, N'RunID', N'uniqueidentifier', 16, 0, 0, 0, 0),
+    (N'WorkshopSample', 2, N'SampleSequence', N'int', 4, 10, 0, 0, 0),
+    (N'WorkshopSample', 3, N'SampledAtUtc', N'datetime2', 7, 23, 3, 0, 0),
+    (N'WorkshopSample', 4, N'Phase', N'varchar', 16, 0, 0, 0, 0),
+    (N'WorkshopSample', 5, N'PoolTotalMemoryKB', N'bigint', 8, 19, 0, 0, 0),
+    (N'WorkshopSample', 6, N'PoolGrantedMemoryKB', N'bigint', 8, 19, 0, 0, 0),
+    (N'WorkshopSample', 7, N'PoolUsedMemoryKB', N'bigint', 8, 19, 0, 0, 0),
+    (N'WorkshopSample', 8, N'PoolAvailableMemoryKB', N'bigint', 8, 19, 0, 0, 0),
+    (N'WorkshopSample', 9, N'GrantUtilizationPercent', N'decimal', 5, 6, 2, 0, 0),
+    (N'WorkshopSample', 10, N'GranteeCount', N'int', 4, 10, 0, 0, 0),
+    (N'WorkshopSample', 11, N'WaiterCount', N'int', 4, 10, 0, 0, 0),
+    (N'WorkshopSample', 12, N'HostAvailableMemoryKB', N'bigint', 8, 19, 0, 0, 0),
+    (N'WorkshopSample', 13, N'HostUsedMemoryKB', N'bigint', 8, 19, 0, 0, 0),
+    (N'WorkshopSample', 14, N'ProcessPhysicalMemoryKB', N'bigint', 8, 19, 0, 0, 0),
+    (N'WorkshopSample', 15, N'TotalServerMemoryKB', N'bigint', 8, 19, 0, 0, 0),
+    (N'WorkshopSample', 16, N'TargetServerMemoryKB', N'bigint', 8, 19, 0, 0, 0),
+    (N'WorkshopSample', 17, N'SystemLowMemorySignal', N'bit', 1, 1, 0, 0, 0),
+    (N'WorkshopSample', 18, N'ProcessLowMemorySignal', N'bit', 1, 1, 0, 0, 0),
+    (N'WorkshopRequestSample', 1, N'RunID', N'uniqueidentifier', 16, 0, 0, 0, 0),
+    (N'WorkshopRequestSample', 2, N'SampleSequence', N'int', 4, 10, 0, 0, 0),
+    (N'WorkshopRequestSample', 3, N'SessionID', N'smallint', 2, 5, 0, 0, 0),
+    (N'WorkshopRequestSample', 4, N'RequestID', N'int', 4, 10, 0, 0, 0),
+    (N'WorkshopRequestSample', 5, N'RequestedMemoryKB', N'bigint', 8, 19, 0, 0, 0),
+    (N'WorkshopRequestSample', 6, N'GrantedMemoryKB', N'bigint', 8, 19, 0, 0, 0),
+    (N'WorkshopRequestSample', 7, N'RequiredMemoryKB', N'bigint', 8, 19, 0, 0, 0),
+    (N'WorkshopRequestSample', 8, N'IdealMemoryKB', N'bigint', 8, 19, 0, 0, 0),
+    (N'WorkshopRequestSample', 9, N'UsedMemoryKB', N'bigint', 8, 19, 0, 0, 0),
+    (N'WorkshopRequestSample', 10, N'MaxUsedMemoryKB', N'bigint', 8, 19, 0, 0, 0),
+    (N'WorkshopRequestSample', 11, N'WaitOrder', N'int', 4, 10, 0, 1, 0),
+    (N'WorkshopRequestSample', 12, N'WaitTimeMs', N'bigint', 8, 19, 0, 0, 0),
+    (N'WorkshopRequestSample', 13, N'QueryID', N'bigint', 8, 19, 0, 1, 0),
+    (N'WorkshopRequestSample', 14, N'PlanID', N'bigint', 8, 19, 0, 1, 0),
+    (N'ValidationRun', 1, N'ValidationRunID', N'bigint', 8, 19, 0, 0, 1),
+    (N'ValidationRun', 2, N'RunID', N'nvarchar', 256, 0, 0, 0, 0),
+    (N'ValidationRun', 3, N'ValidationCaseName', N'sysname', 256, 0, 0, 0, 0),
+    (N'ValidationRun', 4, N'StartDate', N'date', 3, 10, 0, 0, 0),
+    (N'ValidationRun', 5, N'EndDateExclusive', N'date', 3, 10, 0, 0, 0),
+    (N'ValidationRun', 6, N'TerritoryID', N'int', 4, 10, 0, 1, 0),
+    (N'ValidationRun', 7, N'TopCount', N'int', 4, 10, 0, 0, 0),
+    (N'ValidationRun', 8, N'BaselineRowCount', N'bigint', 8, 19, 0, 0, 0),
+    (N'ValidationRun', 9, N'OptimizedRowCount', N'bigint', 8, 19, 0, 0, 0),
+    (N'ValidationRun', 10, N'BaselineHash', N'varbinary', 32, 0, 0, 0, 0),
+    (N'ValidationRun', 11, N'OptimizedHash', N'varbinary', 32, 0, 0, 0, 0),
+    (N'ValidationRun', 12, N'Passed', N'bit', 1, 1, 0, 0, 0),
+    (N'ValidationRun', 13, N'ValidatedAtUtc', N'datetime2', 6, 19, 0, 0, 0);
 
 IF EXISTS
 (
-    SELECT column_id, name, type_name, max_length, precision, scale, is_nullable, is_identity
-    FROM @ExpectedValidationColumns
+    SELECT table_name, column_id, column_name, type_name, max_length, precision, scale, is_nullable, is_identity
+    FROM @ExpectedColumns
     EXCEPT
-    SELECT column_id, name, TYPE_NAME(system_type_id), max_length, precision, scale, is_nullable, is_identity
-    FROM sys.columns WHERE object_id = OBJECT_ID(N'lab.ValidationRun')
+    SELECT OBJECT_NAME(c.object_id), c.column_id, c.name, TYPE_NAME(c.user_type_id),
+           c.max_length, c.precision, c.scale, c.is_nullable, c.is_identity
+    FROM sys.columns AS c
+    WHERE c.object_id IN (OBJECT_ID(N'lab.WorkshopRun'), OBJECT_ID(N'lab.WorkshopSample'),
+                          OBJECT_ID(N'lab.WorkshopRequestSample'), OBJECT_ID(N'lab.ValidationRun'))
 )
 OR EXISTS
 (
-    SELECT column_id, name, TYPE_NAME(system_type_id), max_length, precision, scale, is_nullable, is_identity
-    FROM sys.columns WHERE object_id = OBJECT_ID(N'lab.ValidationRun')
+    SELECT OBJECT_NAME(c.object_id), c.column_id, c.name, TYPE_NAME(c.user_type_id),
+           c.max_length, c.precision, c.scale, c.is_nullable, c.is_identity
+    FROM sys.columns AS c
+    WHERE c.object_id IN (OBJECT_ID(N'lab.WorkshopRun'), OBJECT_ID(N'lab.WorkshopSample'),
+                          OBJECT_ID(N'lab.WorkshopRequestSample'), OBJECT_ID(N'lab.ValidationRun'))
     EXCEPT
-    SELECT column_id, name, type_name, max_length, precision, scale, is_nullable, is_identity
-    FROM @ExpectedValidationColumns
+    SELECT table_name, column_id, column_name, type_name, max_length, precision, scale, is_nullable, is_identity
+    FROM @ExpectedColumns
 )
-    THROW 51603, 'ValidationRun table does not match the Task 9 contract.', 1;
+    THROW 51604, 'Existing evidence table column contract is incompatible.', 1;
+
+DECLARE @ExpectedIdentityColumns table
+(
+    table_name sysname NOT NULL, column_name sysname NOT NULL,
+    identity_seed decimal(38,0) NOT NULL, identity_increment decimal(38,0) NOT NULL
+);
+INSERT @ExpectedIdentityColumns VALUES
+    (N'ValidationRun', N'ValidationRunID', CONVERT(decimal(38,0), 1), CONVERT(decimal(38,0), 1));
+IF EXISTS
+(
+    SELECT * FROM @ExpectedIdentityColumns
+    EXCEPT
+    SELECT OBJECT_NAME(identity_column.object_id), identity_column.name,
+           CONVERT(decimal(38,0), identity_column.seed_value),
+           CONVERT(decimal(38,0), identity_column.increment_value)
+    FROM sys.identity_columns AS identity_column
+    WHERE identity_column.object_id IN (OBJECT_ID(N'lab.WorkshopRun'), OBJECT_ID(N'lab.WorkshopSample'),
+                                        OBJECT_ID(N'lab.WorkshopRequestSample'), OBJECT_ID(N'lab.ValidationRun'))
+)
+OR EXISTS
+(
+    SELECT OBJECT_NAME(identity_column.object_id), identity_column.name,
+           CONVERT(decimal(38,0), identity_column.seed_value),
+           CONVERT(decimal(38,0), identity_column.increment_value)
+    FROM sys.identity_columns AS identity_column
+    WHERE identity_column.object_id IN (OBJECT_ID(N'lab.WorkshopRun'), OBJECT_ID(N'lab.WorkshopSample'),
+                                        OBJECT_ID(N'lab.WorkshopRequestSample'), OBJECT_ID(N'lab.ValidationRun'))
+    EXCEPT SELECT * FROM @ExpectedIdentityColumns
+)
+    THROW 51604, 'Existing evidence table identity contract is incompatible.', 1;
+
+DECLARE @ExpectedPrimaryKeyColumns table
+(
+    constraint_name sysname NOT NULL, table_name sysname NOT NULL,
+    column_name sysname NOT NULL, key_ordinal tinyint NOT NULL
+);
+INSERT @ExpectedPrimaryKeyColumns VALUES
+    (N'PK_WorkshopRun', N'WorkshopRun', N'RunID', 1),
+    (N'PK_WorkshopSample', N'WorkshopSample', N'RunID', 1),
+    (N'PK_WorkshopSample', N'WorkshopSample', N'SampleSequence', 2),
+    (N'PK_WorkshopRequestSample', N'WorkshopRequestSample', N'RunID', 1),
+    (N'PK_WorkshopRequestSample', N'WorkshopRequestSample', N'SampleSequence', 2),
+    (N'PK_WorkshopRequestSample', N'WorkshopRequestSample', N'SessionID', 3),
+    (N'PK_WorkshopRequestSample', N'WorkshopRequestSample', N'RequestID', 4),
+    (N'PK_ValidationRun', N'ValidationRun', N'ValidationRunID', 1);
+
+IF EXISTS
+(
+    SELECT constraint_name, table_name, column_name, key_ordinal FROM @ExpectedPrimaryKeyColumns
+    EXCEPT
+    SELECT kc.name, OBJECT_NAME(kc.parent_object_id), c.name, CONVERT(tinyint, ic.key_ordinal)
+    FROM sys.key_constraints AS kc
+    INNER JOIN sys.index_columns AS ic ON ic.object_id = kc.parent_object_id AND ic.index_id = kc.unique_index_id
+    INNER JOIN sys.columns AS c ON c.object_id = ic.object_id AND c.column_id = ic.column_id
+    WHERE kc.type = N'PK' AND kc.parent_object_id IN
+        (OBJECT_ID(N'lab.WorkshopRun'), OBJECT_ID(N'lab.WorkshopSample'),
+         OBJECT_ID(N'lab.WorkshopRequestSample'), OBJECT_ID(N'lab.ValidationRun'))
+)
+OR EXISTS
+(
+    SELECT kc.name, OBJECT_NAME(kc.parent_object_id), c.name, CONVERT(tinyint, ic.key_ordinal)
+    FROM sys.key_constraints AS kc
+    INNER JOIN sys.index_columns AS ic ON ic.object_id = kc.parent_object_id AND ic.index_id = kc.unique_index_id
+    INNER JOIN sys.columns AS c ON c.object_id = ic.object_id AND c.column_id = ic.column_id
+    WHERE kc.type = N'PK' AND kc.parent_object_id IN
+        (OBJECT_ID(N'lab.WorkshopRun'), OBJECT_ID(N'lab.WorkshopSample'),
+         OBJECT_ID(N'lab.WorkshopRequestSample'), OBJECT_ID(N'lab.ValidationRun'))
+    EXCEPT
+    SELECT constraint_name, table_name, column_name, key_ordinal FROM @ExpectedPrimaryKeyColumns
+)
+    THROW 51604, 'Existing evidence table primary-key contract is incompatible.', 1;
+
+DECLARE @ExpectedForeignKeyColumns table
+(
+    constraint_name sysname NOT NULL, parent_table sysname NOT NULL, parent_column sysname NOT NULL,
+    referenced_table sysname NOT NULL, referenced_column sysname NOT NULL, constraint_column_id int NOT NULL,
+    delete_referential_action_desc nvarchar(60) NOT NULL, is_disabled bit NOT NULL, is_not_trusted bit NOT NULL
+);
+INSERT @ExpectedForeignKeyColumns VALUES
+    (N'FK_WorkshopSample_WorkshopRun', N'WorkshopSample', N'RunID', N'WorkshopRun', N'RunID', 1, N'NO_ACTION', 0, 0),
+    (N'FK_WorkshopRequestSample_WorkshopSample', N'WorkshopRequestSample', N'RunID', N'WorkshopSample', N'RunID', 1, N'NO_ACTION', 0, 0),
+    (N'FK_WorkshopRequestSample_WorkshopSample', N'WorkshopRequestSample', N'SampleSequence', N'WorkshopSample', N'SampleSequence', 2, N'NO_ACTION', 0, 0);
+
+IF EXISTS
+(
+    SELECT * FROM @ExpectedForeignKeyColumns
+    EXCEPT
+    SELECT fk.name, OBJECT_NAME(fk.parent_object_id), pc.name, OBJECT_NAME(fk.referenced_object_id), rc.name,
+           fkc.constraint_column_id, fk.delete_referential_action_desc, fk.is_disabled, fk.is_not_trusted
+    FROM sys.foreign_keys AS fk
+    INNER JOIN sys.foreign_key_columns AS fkc ON fkc.constraint_object_id = fk.object_id
+    INNER JOIN sys.columns AS pc ON pc.object_id = fkc.parent_object_id AND pc.column_id = fkc.parent_column_id
+    INNER JOIN sys.columns AS rc ON rc.object_id = fkc.referenced_object_id AND rc.column_id = fkc.referenced_column_id
+    WHERE fk.parent_object_id IN (OBJECT_ID(N'lab.WorkshopRun'), OBJECT_ID(N'lab.WorkshopSample'),
+                                  OBJECT_ID(N'lab.WorkshopRequestSample'), OBJECT_ID(N'lab.ValidationRun'))
+)
+OR EXISTS
+(
+    SELECT fk.name, OBJECT_NAME(fk.parent_object_id), pc.name, OBJECT_NAME(fk.referenced_object_id), rc.name,
+           fkc.constraint_column_id, fk.delete_referential_action_desc, fk.is_disabled, fk.is_not_trusted
+    FROM sys.foreign_keys AS fk
+    INNER JOIN sys.foreign_key_columns AS fkc ON fkc.constraint_object_id = fk.object_id
+    INNER JOIN sys.columns AS pc ON pc.object_id = fkc.parent_object_id AND pc.column_id = fkc.parent_column_id
+    INNER JOIN sys.columns AS rc ON rc.object_id = fkc.referenced_object_id AND rc.column_id = fkc.referenced_column_id
+    WHERE fk.parent_object_id IN (OBJECT_ID(N'lab.WorkshopRun'), OBJECT_ID(N'lab.WorkshopSample'),
+                                  OBJECT_ID(N'lab.WorkshopRequestSample'), OBJECT_ID(N'lab.ValidationRun'))
+    EXCEPT SELECT * FROM @ExpectedForeignKeyColumns
+)
+    THROW 51604, 'Existing evidence table foreign-key contract is incompatible.', 1;
+
+DECLARE @ExpectedUniqueIndexColumns table
+(
+    index_name sysname NOT NULL, table_name sysname NOT NULL, type_desc nvarchar(60) NOT NULL,
+    is_primary_key bit NOT NULL, is_unique_constraint bit NOT NULL, column_name sysname NOT NULL,
+    key_ordinal tinyint NOT NULL, is_descending_key bit NOT NULL, filter_definition nvarchar(4000) NULL
+);
+INSERT @ExpectedUniqueIndexColumns VALUES
+    (N'PK_WorkshopRun', N'WorkshopRun', N'CLUSTERED', 1, 0, N'RunID', 1, 0, NULL),
+    (N'PK_WorkshopSample', N'WorkshopSample', N'CLUSTERED', 1, 0, N'RunID', 1, 0, NULL),
+    (N'PK_WorkshopSample', N'WorkshopSample', N'CLUSTERED', 1, 0, N'SampleSequence', 2, 0, NULL),
+    (N'PK_WorkshopRequestSample', N'WorkshopRequestSample', N'CLUSTERED', 1, 0, N'RunID', 1, 0, NULL),
+    (N'PK_WorkshopRequestSample', N'WorkshopRequestSample', N'CLUSTERED', 1, 0, N'SampleSequence', 2, 0, NULL),
+    (N'PK_WorkshopRequestSample', N'WorkshopRequestSample', N'CLUSTERED', 1, 0, N'SessionID', 3, 0, NULL),
+    (N'PK_WorkshopRequestSample', N'WorkshopRequestSample', N'CLUSTERED', 1, 0, N'RequestID', 4, 0, NULL),
+    (N'PK_ValidationRun', N'ValidationRun', N'CLUSTERED', 1, 0, N'ValidationRunID', 1, 0, NULL);
+
+IF EXISTS
+(
+    SELECT * FROM @ExpectedUniqueIndexColumns
+    EXCEPT
+    SELECT i.name, OBJECT_NAME(i.object_id), i.type_desc, i.is_primary_key, i.is_unique_constraint,
+           c.name, CONVERT(tinyint, ic.key_ordinal), ic.is_descending_key, i.filter_definition
+    FROM sys.indexes AS i
+    INNER JOIN sys.index_columns AS ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id AND ic.key_ordinal > 0
+    INNER JOIN sys.columns AS c ON c.object_id = ic.object_id AND c.column_id = ic.column_id
+    WHERE i.is_unique = 1 AND i.object_id IN (OBJECT_ID(N'lab.WorkshopRun'), OBJECT_ID(N'lab.WorkshopSample'),
+                                              OBJECT_ID(N'lab.WorkshopRequestSample'), OBJECT_ID(N'lab.ValidationRun'))
+)
+OR EXISTS
+(
+    SELECT i.name, OBJECT_NAME(i.object_id), i.type_desc, i.is_primary_key, i.is_unique_constraint,
+           c.name, CONVERT(tinyint, ic.key_ordinal), ic.is_descending_key, i.filter_definition
+    FROM sys.indexes AS i
+    INNER JOIN sys.index_columns AS ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id AND ic.key_ordinal > 0
+    INNER JOIN sys.columns AS c ON c.object_id = ic.object_id AND c.column_id = ic.column_id
+    WHERE i.is_unique = 1 AND i.object_id IN (OBJECT_ID(N'lab.WorkshopRun'), OBJECT_ID(N'lab.WorkshopSample'),
+                                              OBJECT_ID(N'lab.WorkshopRequestSample'), OBJECT_ID(N'lab.ValidationRun'))
+    EXCEPT SELECT * FROM @ExpectedUniqueIndexColumns
+)
+    THROW 51604, 'Existing evidence table unique-index contract is incompatible.', 1;
+
+DECLARE @ExpectedDefaults table
+(
+    table_name sysname NOT NULL, column_name sysname NOT NULL,
+    constraint_name sysname NOT NULL, normalized_definition nvarchar(4000) NOT NULL
+);
+IF EXISTS (SELECT * FROM @ExpectedDefaults)
+   OR EXISTS
+   (
+       SELECT OBJECT_NAME(dc.parent_object_id), c.name, dc.name,
+              UPPER(REPLACE(REPLACE(REPLACE(REPLACE(dc.definition, N' ', N''), CHAR(9), N''), CHAR(10), N''), CHAR(13), N''))
+       FROM sys.default_constraints AS dc
+       INNER JOIN sys.columns AS c ON c.object_id = dc.parent_object_id AND c.column_id = dc.parent_column_id
+       WHERE dc.parent_object_id IN (OBJECT_ID(N'lab.WorkshopRun'), OBJECT_ID(N'lab.WorkshopSample'),
+                                     OBJECT_ID(N'lab.WorkshopRequestSample'), OBJECT_ID(N'lab.ValidationRun'))
+       EXCEPT SELECT * FROM @ExpectedDefaults
+   )
+    THROW 51604, 'Existing evidence table default contract is incompatible.', 1;
+
+DECLARE @ExpectedChecks table
+(
+    table_name sysname NOT NULL, constraint_name sysname NOT NULL,
+    normalized_definition nvarchar(4000) NOT NULL, is_disabled bit NOT NULL, is_not_trusted bit NOT NULL
+);
+INSERT @ExpectedChecks VALUES
+    (N'WorkshopRun', N'CK_WorkshopRun_EvidenceClassification', N'EVIDENCECLASSIFICATIONIN''DOC-VERIFIED'',''SUBSCRIPTION-VALIDATED'',''LAB-MEASURED'',''ASSUMPTION'',''TARGET'',''ILLUSTRATIVE''', 0, 0),
+    (N'WorkshopRun', N'CK_WorkshopRun_Phase', N'PHASEIN''BASELINE'',''OPTIMIZED'',''COMPARISON''', 0, 0),
+    (N'WorkshopRun', N'CK_WorkshopRun_Status', N'RUNSTATUSIN''PENDING'',''RUNNING'',''COMPLETED'',''FAILED'',''STOPPED''', 0, 0),
+    (N'WorkshopRun', N'CK_WorkshopRun_Outcome', N'OUTCOMEISNULLOROUTCOMEIN''IMPROVED'',''INCONCLUSIVE'',''REGRESSED'',''FAILED''', 0, 0),
+    (N'WorkshopRun', N'CK_WorkshopRun_Timestamps', N'COMPLETEDATUTCISNULLORCOMPLETEDATUTC>=STARTEDATUTC', 0, 0),
+    (N'WorkshopRun', N'CK_WorkshopRun_FrozenSettingsJson', N'LENFROZENSETTINGSJSONBETWEEN2AND4000ANDISJSONFROZENSETTINGSJSON=1', 0, 0),
+    (N'WorkshopRun', N'CK_WorkshopRun_BaselineIdentifiers', N'BASELINEQUERYIDISNULLANDBASELINEPLANIDISNULLORBASELINEQUERYID>0ANDBASELINEPLANID>0', 0, 0),
+    (N'WorkshopRun', N'CK_WorkshopRun_OptimizedIdentifiers', N'OPTIMIZEDQUERYIDISNULLANDOPTIMIZEDPLANIDISNULLOROPTIMIZEDQUERYID>0ANDOPTIMIZEDPLANID>0', 0, 0),
+    (N'WorkshopRun', N'CK_WorkshopRun_Metrics', N'DURATIONMSISNULLORDURATIONMS>=0ANDCPUMSISNULLORCPUMS>=0ANDLOGICALREADSISNULLORLOGICALREADS>=0ANDSPILLSISNULLORSPILLS>=0ANDWAITTIMEMSISNULLORWAITTIMEMS>=0', 0, 0),
+    (N'WorkshopSample', N'CK_WorkshopSample_Sequence', N'SAMPLESEQUENCE>0', 0, 0),
+    (N'WorkshopSample', N'CK_WorkshopSample_Phase', N'PHASEIN''BASELINE'',''OPTIMIZED''', 0, 0),
+    (N'WorkshopSample', N'CK_WorkshopSample_PoolMemory', N'POOLTOTALMEMORYKB>=0ANDPOOLGRANTEDMEMORYKB>=0ANDPOOLUSEDMEMORYKB>=0ANDPOOLAVAILABLEMEMORYKB>=0', 0, 0),
+    (N'WorkshopSample', N'CK_WorkshopSample_Utilization', N'GRANTUTILIZATIONPERCENTBETWEEN0AND100', 0, 0),
+    (N'WorkshopSample', N'CK_WorkshopSample_Counts', N'GRANTEECOUNT>=0ANDWAITERCOUNT>=0', 0, 0),
+    (N'WorkshopSample', N'CK_WorkshopSample_HostMemory', N'HOSTAVAILABLEMEMORYKB>=0ANDHOSTUSEDMEMORYKB>=0', 0, 0),
+    (N'WorkshopSample', N'CK_WorkshopSample_ProcessMemory', N'PROCESSPHYSICALMEMORYKB>=0', 0, 0),
+    (N'WorkshopSample', N'CK_WorkshopSample_ServerMemory', N'TOTALSERVERMEMORYKB>=0ANDTARGETSERVERMEMORYKB>=0', 0, 0),
+    (N'WorkshopRequestSample', N'CK_WorkshopRequestSample_Identifiers', N'SAMPLESEQUENCE>0ANDSESSIONID>0ANDREQUESTID>=0', 0, 0),
+    (N'WorkshopRequestSample', N'CK_WorkshopRequestSample_Memory', N'REQUESTEDMEMORYKB>=0ANDGRANTEDMEMORYKB>=0ANDREQUIREDMEMORYKB>=0ANDIDEALMEMORYKB>=0ANDUSEDMEMORYKB>=0ANDMAXUSEDMEMORYKB>=0', 0, 0),
+    (N'WorkshopRequestSample', N'CK_WorkshopRequestSample_Wait', N'WAITORDERISNULLORWAITORDER>=0ANDWAITTIMEMS>=0', 0, 0),
+    (N'WorkshopRequestSample', N'CK_WorkshopRequestSample_QueryIdentifiers', N'QUERYIDISNULLANDPLANIDISNULLORQUERYID>0ANDPLANID>0', 0, 0);
+
+IF EXISTS
+(
+    SELECT * FROM @ExpectedChecks
+    EXCEPT
+    SELECT OBJECT_NAME(cc.parent_object_id), cc.name,
+           UPPER(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(cc.definition,
+               N' ', N''), CHAR(9), N''), CHAR(10), N''), CHAR(13), N''), N'[', N''), N']', N''), N'(', N''), N')', N'')),
+           cc.is_disabled, cc.is_not_trusted
+    FROM sys.check_constraints AS cc
+    WHERE cc.parent_object_id IN (OBJECT_ID(N'lab.WorkshopRun'), OBJECT_ID(N'lab.WorkshopSample'),
+                                  OBJECT_ID(N'lab.WorkshopRequestSample'), OBJECT_ID(N'lab.ValidationRun'))
+)
+OR EXISTS
+(
+    SELECT OBJECT_NAME(cc.parent_object_id), cc.name,
+           UPPER(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(cc.definition,
+               N' ', N''), CHAR(9), N''), CHAR(10), N''), CHAR(13), N''), N'[', N''), N']', N''), N'(', N''), N')', N'')),
+           cc.is_disabled, cc.is_not_trusted
+    FROM sys.check_constraints AS cc
+    WHERE cc.parent_object_id IN (OBJECT_ID(N'lab.WorkshopRun'), OBJECT_ID(N'lab.WorkshopSample'),
+                                  OBJECT_ID(N'lab.WorkshopRequestSample'), OBJECT_ID(N'lab.ValidationRun'))
+    EXCEPT SELECT * FROM @ExpectedChecks
+)
+    THROW 51604, 'Existing evidence table CHECK contract is incompatible.', 1;
+
+IF NOT EXISTS (SELECT 1 FROM sys.certificates WHERE name = N'mcp_workshop_diagnostics_certificate')
+    CREATE CERTIFICATE [mcp_workshop_diagnostics_certificate]
+        WITH SUBJECT = N'MCP workshop server DMV module signing', EXPIRY_DATE = '2099-12-31';
+IF NOT EXISTS
+(
+    SELECT 1 FROM sys.certificates
+    WHERE name = N'mcp_workshop_diagnostics_certificate'
+      AND subject = N'MCP workshop server DMV module signing'
+      AND pvt_key_encryption_type_desc = N'ENCRYPTED_BY_MASTER_KEY'
+)
+    THROW 51607, 'The diagnostics signing certificate contract is invalid.', 1;
 GO
 
 CREATE OR ALTER VIEW lab.vw_WorkshopRunSummary
@@ -611,12 +902,39 @@ BEGIN
             baseline.Spills AS BaselineSpills,
             optimized.Spills AS OptimizedSpills,
             baseline.WaitTimeMs AS BaselineWaitTimeMs,
-            optimized.WaitTimeMs AS OptimizedWaitTimeMs
+            optimized.WaitTimeMs AS OptimizedWaitTimeMs,
+            CONVERT(bit, CASE
+                WHEN EXISTS
+                (
+                    SELECT 1 FROM lab.ValidationRun AS validation
+                    WHERE validation.RunID = CONVERT(nvarchar(128), optimized.RunID)
+                )
+                 AND NOT EXISTS
+                (
+                    SELECT 1 FROM lab.ValidationRun AS validation
+                    WHERE validation.RunID = CONVERT(nvarchar(128), optimized.RunID)
+                      AND validation.Passed = 0
+                ) THEN 1 ELSE 0 END) AS CorrectnessPassed
         FROM lab.WorkshopRun AS baseline
         INNER JOIN lab.WorkshopRun AS optimized ON optimized.RunID = @OptimizedRunID
         LEFT JOIN SampleMetrics AS baselineSample ON baselineSample.RunID = baseline.RunID
         LEFT JOIN SampleMetrics AS optimizedSample ON optimizedSample.RunID = optimized.RunID
         WHERE baseline.RunID = @BaselineRunID
+    ), EvaluatedComparison AS
+    (
+        SELECT *, CONVERT(bit, CASE
+            WHEN (BaselineDurationMs = 0 AND OptimizedDurationMs > 0)
+              OR (BaselineDurationMs > 0 AND CONVERT(decimal(38,4), OptimizedDurationMs) > CONVERT(decimal(38,4), BaselineDurationMs) * 1.10)
+              OR (BaselineCpuMs = 0 AND OptimizedCpuMs > 0)
+              OR (BaselineCpuMs > 0 AND CONVERT(decimal(38,4), OptimizedCpuMs) > CONVERT(decimal(38,4), BaselineCpuMs) * 1.10)
+              OR (BaselineLogicalReads = 0 AND OptimizedLogicalReads > 0)
+              OR (BaselineLogicalReads > 0 AND CONVERT(decimal(38,4), OptimizedLogicalReads) > CONVERT(decimal(38,4), BaselineLogicalReads) * 1.10)
+              OR (BaselineSpills = 0 AND OptimizedSpills > 0)
+              OR (BaselineSpills > 0 AND CONVERT(decimal(38,4), OptimizedSpills) > CONVERT(decimal(38,4), BaselineSpills) * 1.10)
+              OR (BaselineWaitTimeMs = 0 AND OptimizedWaitTimeMs > 0)
+              OR (BaselineWaitTimeMs > 0 AND CONVERT(decimal(38,4), OptimizedWaitTimeMs) > CONVERT(decimal(38,4), BaselineWaitTimeMs) * 1.10)
+            THEN 1 ELSE 0 END) AS HasMaterialRegression
+        FROM Comparison
     )
     SELECT
         BaselineRunID,
@@ -637,20 +955,159 @@ BEGIN
         OptimizedWaitTimeMs,
         CONVERT(decimal(6,2), BaselineMedianGrantUtilizationPercent - OptimizedMedianGrantUtilizationPercent)
             AS MedianUtilizationReductionPoints,
-        CONVERT(varchar(16), CASE
-            WHEN OptimizedMedianGrantUtilizationPercent <= BaselineMedianGrantUtilizationPercent - 10.00
-             AND (OptimizedDurationMs IS NULL OR BaselineDurationMs IS NULL OR OptimizedDurationMs <= BaselineDurationMs * 1.10)
-             AND (OptimizedCpuMs IS NULL OR BaselineCpuMs IS NULL OR OptimizedCpuMs <= BaselineCpuMs * 1.10)
-                THEN N'Improved'
-            WHEN OptimizedMedianGrantUtilizationPercent > BaselineMedianGrantUtilizationPercent + 5.00
-              OR (OptimizedDurationMs IS NOT NULL AND BaselineDurationMs IS NOT NULL AND OptimizedDurationMs > BaselineDurationMs * 1.10)
-              OR (OptimizedCpuMs IS NOT NULL AND BaselineCpuMs IS NOT NULL AND OptimizedCpuMs > BaselineCpuMs * 1.10)
-                THEN N'Regressed'
-            ELSE N'Inconclusive'
+        CONVERT(varchar(24), CASE
+            WHEN CorrectnessPassed = 0 THEN N'Failed'
+            WHEN BaselinePeakGrantUtilizationPercent NOT BETWEEN 75.00 AND 85.00
+                THEN N'BaselineTargetNotReached'
+            WHEN HasMaterialRegression = 1 THEN N'NoMaterialImprovement'
+            WHEN BaselinePeakGrantUtilizationPercent BETWEEN 75.00 AND 85.00
+             AND OptimizedPeakGrantUtilizationPercent BETWEEN 35.00 AND 45.00
+                THEN N'TargetMet'
+            WHEN BaselinePeakGrantUtilizationPercent - OptimizedPeakGrantUtilizationPercent >= 25.00
+                THEN N'ImprovedOutsideTarget'
+            ELSE N'NoMaterialImprovement'
         END) AS OutcomeBand
-    FROM Comparison;
+    FROM EvaluatedComparison;
 END;
 GO
+
+DECLARE @DatabaseCertificateThumbprint varbinary(32) =
+(
+    SELECT thumbprint FROM sys.certificates WHERE name = N'mcp_workshop_diagnostics_certificate'
+);
+IF @DatabaseCertificateThumbprint IS NULL
+    THROW 51675, 'The database diagnostics signing certificate is missing.', 1;
+IF EXISTS
+(
+    SELECT 1 FROM master.sys.certificates
+    WHERE name = N'mcp_workshop_diagnostics_certificate'
+      AND thumbprint <> @DatabaseCertificateThumbprint
+)
+    THROW 51676, 'The master diagnostics certificate does not match the database certificate.', 1;
+
+IF NOT EXISTS (SELECT 1 FROM master.sys.certificates WHERE name = N'mcp_workshop_diagnostics_certificate')
+BEGIN
+    DECLARE @DefaultBackupPath nvarchar(4000) =
+        CONVERT(nvarchar(4000), SERVERPROPERTY(N'InstanceDefaultBackupPath'));
+    IF @DefaultBackupPath IS NULL OR LEN(@DefaultBackupPath) = 0 OR LEN(@DefaultBackupPath) > 3500
+        THROW 51677, 'InstanceDefaultBackupPath is unavailable or too long for certificate export.', 1;
+    IF RIGHT(@DefaultBackupPath, 1) NOT IN (N'\', N'/')
+        SET @DefaultBackupPath += N'\';
+
+    DECLARE @CertificateFile nvarchar(4000) = @DefaultBackupPath
+        + N'mcp_workshop_diagnostics_'
+        + CONVERT(nvarchar(64), @DatabaseCertificateThumbprint, 2)
+        + N'_' + REPLACE(CONVERT(nvarchar(36), NEWID()), N'-', N'') + N'.cer';
+    DECLARE @EscapedCertificateFile nvarchar(4000) = REPLACE(@CertificateFile, N'''', N'''''''');
+    DECLARE @CertificateSql nvarchar(max) =
+        N'BACKUP CERTIFICATE [mcp_workshop_diagnostics_certificate] TO FILE = N'''
+        + @EscapedCertificateFile + N''';';
+    EXEC sys.sp_executesql @CertificateSql;
+
+    SET @CertificateSql = N'USE [master]; CREATE CERTIFICATE [mcp_workshop_diagnostics_certificate] FROM FILE = N'''
+        + @EscapedCertificateFile + N''';';
+    EXEC master.sys.sp_executesql @CertificateSql;
+
+    /* Certificate export is public, contains no private key, and must be deleted by bootstrap cleanup. */
+    PRINT N'Certificate export is public; bootstrap cleanup must delete: ' + @CertificateFile;
+END;
+
+IF SUSER_ID(N'mcp_workshop_diagnostics_certificate_login') IS NULL
+    EXEC master.sys.sp_executesql
+        N'CREATE LOGIN [mcp_workshop_diagnostics_certificate_login]
+          FROM CERTIFICATE [mcp_workshop_diagnostics_certificate];';
+IF NOT EXISTS
+(
+    SELECT 1
+    FROM master.sys.server_principals AS principal
+    INNER JOIN master.sys.certificates AS certificate ON certificate.sid = principal.sid
+    WHERE principal.name = N'mcp_workshop_diagnostics_certificate_login'
+      AND certificate.name = N'mcp_workshop_diagnostics_certificate'
+)
+    THROW 51678, 'The diagnostics certificate login mapping is invalid.', 1;
+
+GRANT VIEW SERVER PERFORMANCE STATE TO [mcp_workshop_diagnostics_certificate_login];
+REVOKE VIEW SERVER STATE FROM [mcp_workshop_diagnostics_certificate_login];
+
+IF EXISTS
+(
+    SELECT 1
+    FROM master.sys.server_role_members AS membership
+    WHERE membership.member_principal_id = SUSER_ID(N'mcp_workshop_diagnostics_certificate_login')
+)
+   OR EXISTS
+   (
+       SELECT permission_name, state
+       FROM master.sys.server_permissions
+       WHERE grantee_principal_id = SUSER_ID(N'mcp_workshop_diagnostics_certificate_login')
+       EXCEPT SELECT N'VIEW SERVER PERFORMANCE STATE', N'G'
+   )
+   OR EXISTS
+   (
+       SELECT N'VIEW SERVER PERFORMANCE STATE', N'G'
+       EXCEPT
+       SELECT permission_name, state
+       FROM master.sys.server_permissions
+       WHERE grantee_principal_id = SUSER_ID(N'mcp_workshop_diagnostics_certificate_login')
+   )
+    THROW 51679, 'The diagnostics certificate login must have only VIEW SERVER PERFORMANCE STATE.', 1;
+
+IF EXISTS
+(
+    SELECT 1
+    FROM sys.crypt_properties AS crypt
+    INNER JOIN sys.certificates AS certificate ON certificate.thumbprint = crypt.thumbprint
+    WHERE crypt.class_desc = N'OBJECT_OR_COLUMN'
+      AND crypt.major_id = OBJECT_ID(N'lab.usp_GetMemorySnapshot', N'P')
+      AND certificate.name = N'mcp_workshop_diagnostics_certificate'
+)
+    DROP SIGNATURE FROM OBJECT::lab.usp_GetMemorySnapshot
+        BY CERTIFICATE [mcp_workshop_diagnostics_certificate];
+ADD SIGNATURE TO OBJECT::lab.usp_GetMemorySnapshot
+    BY CERTIFICATE [mcp_workshop_diagnostics_certificate];
+
+IF EXISTS
+(
+    SELECT 1
+    FROM sys.crypt_properties AS crypt
+    INNER JOIN sys.certificates AS certificate ON certificate.thumbprint = crypt.thumbprint
+    WHERE crypt.class_desc = N'OBJECT_OR_COLUMN'
+      AND crypt.major_id = OBJECT_ID(N'lab.usp_GetActiveWorkshopGrants', N'P')
+      AND certificate.name = N'mcp_workshop_diagnostics_certificate'
+)
+    DROP SIGNATURE FROM OBJECT::lab.usp_GetActiveWorkshopGrants
+        BY CERTIFICATE [mcp_workshop_diagnostics_certificate];
+ADD SIGNATURE TO OBJECT::lab.usp_GetActiveWorkshopGrants
+    BY CERTIFICATE [mcp_workshop_diagnostics_certificate];
+
+DECLARE @ExpectedSignedObjects table
+(
+    object_id int NOT NULL, thumbprint varbinary(32) NOT NULL,
+    crypt_type_desc nvarchar(60) NOT NULL
+);
+INSERT @ExpectedSignedObjects VALUES
+    (OBJECT_ID(N'lab.usp_GetMemorySnapshot', N'P'), @DatabaseCertificateThumbprint, N'SIGNATURE BY CERTIFICATE'),
+    (OBJECT_ID(N'lab.usp_GetActiveWorkshopGrants', N'P'), @DatabaseCertificateThumbprint, N'SIGNATURE BY CERTIFICATE');
+IF EXISTS
+(
+    SELECT object_id, thumbprint, crypt_type_desc FROM @ExpectedSignedObjects
+    EXCEPT
+    SELECT crypt.major_id, crypt.thumbprint, crypt.crypt_type_desc
+    FROM sys.crypt_properties AS crypt
+    WHERE crypt.class_desc = N'OBJECT_OR_COLUMN'
+      AND crypt.major_id IN (OBJECT_ID(N'lab.usp_GetMemorySnapshot', N'P'),
+                             OBJECT_ID(N'lab.usp_GetActiveWorkshopGrants', N'P'))
+)
+OR EXISTS
+(
+    SELECT crypt.major_id, crypt.thumbprint, crypt.crypt_type_desc
+    FROM sys.crypt_properties AS crypt
+    WHERE crypt.class_desc = N'OBJECT_OR_COLUMN'
+      AND crypt.major_id IN (OBJECT_ID(N'lab.usp_GetMemorySnapshot', N'P'),
+                             OBJECT_ID(N'lab.usp_GetActiveWorkshopGrants', N'P'))
+    EXCEPT SELECT object_id, thumbprint, crypt_type_desc FROM @ExpectedSignedObjects
+)
+    THROW 51680, 'The server DMV procedure signature contract is invalid.', 1;
 
 IF SUSER_ID(N'mcp_workshop_reader') IS NULL
     THROW 51670, 'The bootstrap must provision server principal mcp_workshop_reader.', 1;
@@ -665,22 +1122,28 @@ IF NOT EXISTS
       AND type = 'S'
 )
     THROW 51672, 'The database user is not mapped to the expected server principal.', 1;
-IF IS_ROLEMEMBER(N'db_owner', N'mcp_workshop_reader') = 1
-   OR IS_ROLEMEMBER(N'db_securityadmin', N'mcp_workshop_reader') = 1
-   OR IS_ROLEMEMBER(N'db_accessadmin', N'mcp_workshop_reader') = 1
-   OR IS_ROLEMEMBER(N'db_ddladmin', N'mcp_workshop_reader') = 1
-   OR IS_ROLEMEMBER(N'db_datareader', N'mcp_workshop_reader') = 1
-   OR IS_ROLEMEMBER(N'db_datawriter', N'mcp_workshop_reader') = 1
-    THROW 51673, 'The reader must not belong to a privileged database role.', 1;
-IF IS_SRVROLEMEMBER(N'sysadmin', N'mcp_workshop_reader') = 1
-   OR IS_SRVROLEMEMBER(N'securityadmin', N'mcp_workshop_reader') = 1
-   OR IS_SRVROLEMEMBER(N'serveradmin', N'mcp_workshop_reader') = 1
-   OR IS_SRVROLEMEMBER(N'setupadmin', N'mcp_workshop_reader') = 1
-   OR IS_SRVROLEMEMBER(N'processadmin', N'mcp_workshop_reader') = 1
-   OR IS_SRVROLEMEMBER(N'diskadmin', N'mcp_workshop_reader') = 1
-   OR IS_SRVROLEMEMBER(N'dbcreator', N'mcp_workshop_reader') = 1
-   OR IS_SRVROLEMEMBER(N'bulkadmin', N'mcp_workshop_reader') = 1
-    THROW 51674, 'The reader must not belong to a privileged server role.', 1;
+IF EXISTS
+(
+    SELECT 1
+    FROM sys.database_role_members AS membership
+    INNER JOIN sys.database_principals AS member ON member.principal_id = membership.member_principal_id
+    WHERE member.name = N'mcp_workshop_reader'
+)
+    THROW 51673, 'The reader must not belong to any custom or fixed database role; public is implicit.', 1;
+IF EXISTS
+(
+    SELECT 1
+    FROM master.sys.server_role_members AS membership
+    WHERE membership.member_principal_id = SUSER_ID(N'mcp_workshop_reader')
+)
+    THROW 51674, 'The reader must not belong to any custom or fixed server role; public is implicit.', 1;
+IF EXISTS
+(
+    SELECT 1 FROM master.sys.server_permissions
+    WHERE grantee_principal_id = SUSER_ID(N'mcp_workshop_reader')
+      AND state IN (N'G', N'W')
+)
+    THROW 51681, 'The reader login must not hold any direct server grant.', 1;
 
 GRANT CONNECT TO [mcp_workshop_reader];
 GRANT EXECUTE ON OBJECT::lab.usp_GetMemorySnapshot TO [mcp_workshop_reader];
@@ -695,25 +1158,99 @@ DENY INSERT ON SCHEMA::lab TO [mcp_workshop_reader];
 DENY UPDATE ON SCHEMA::lab TO [mcp_workshop_reader];
 DENY DELETE ON SCHEMA::lab TO [mcp_workshop_reader];
 DENY ALTER ON SCHEMA::lab TO [mcp_workshop_reader];
-DENY CONTROL ON SCHEMA::lab TO [mcp_workshop_reader];
+DENY TAKE OWNERSHIP ON SCHEMA::lab TO [mcp_workshop_reader];
+DENY VIEW DEFINITION ON SCHEMA::lab TO [mcp_workshop_reader];
 DENY ALTER ON DATABASE::[AdventureWorks2022] TO [mcp_workshop_reader];
-DENY CONTROL ON DATABASE::[AdventureWorks2022] TO [mcp_workshop_reader];
+DENY TAKE OWNERSHIP ON DATABASE::[AdventureWorks2022] TO [mcp_workshop_reader];
+DENY VIEW DEFINITION ON DATABASE::[AdventureWorks2022] TO [mcp_workshop_reader];
+DENY IMPERSONATE ANY USER TO [mcp_workshop_reader];
+
+DECLARE @ExpectedReaderPermissions table
+(
+    class tinyint NOT NULL, major_id int NOT NULL, minor_id int NOT NULL,
+    permission_name nvarchar(128) NOT NULL, state char(1) NOT NULL
+);
+INSERT @ExpectedReaderPermissions VALUES
+    (0, 0, 0, N'CONNECT', N'G'),
+    (0, 0, 0, N'ALTER', N'D'),
+    (0, 0, 0, N'TAKE OWNERSHIP', N'D'),
+    (0, 0, 0, N'VIEW DEFINITION', N'D'),
+    (0, 0, 0, N'IMPERSONATE ANY USER', N'D'),
+    (3, SCHEMA_ID(N'lab'), 0, N'INSERT', N'D'),
+    (3, SCHEMA_ID(N'lab'), 0, N'UPDATE', N'D'),
+    (3, SCHEMA_ID(N'lab'), 0, N'DELETE', N'D'),
+    (3, SCHEMA_ID(N'lab'), 0, N'ALTER', N'D'),
+    (3, SCHEMA_ID(N'lab'), 0, N'TAKE OWNERSHIP', N'D'),
+    (3, SCHEMA_ID(N'lab'), 0, N'VIEW DEFINITION', N'D'),
+    (1, OBJECT_ID(N'lab.usp_GetMemorySnapshot'), 0, N'EXECUTE', N'G'),
+    (1, OBJECT_ID(N'lab.usp_GetActiveWorkshopGrants'), 0, N'EXECUTE', N'G'),
+    (1, OBJECT_ID(N'lab.usp_GetQueryStoreTopQueries'), 0, N'EXECUTE', N'G'),
+    (1, OBJECT_ID(N'lab.usp_GetQueryStoreWaits'), 0, N'EXECUTE', N'G'),
+    (1, OBJECT_ID(N'lab.usp_GetProcedurePlanSummary'), 0, N'EXECUTE', N'G'),
+    (1, OBJECT_ID(N'lab.usp_CompareWorkshopRuns'), 0, N'EXECUTE', N'G'),
+    (1, OBJECT_ID(N'lab.vw_WorkshopRunSummary'), 0, N'SELECT', N'G'),
+    (1, OBJECT_ID(N'lab.vw_WorkshopSampleSummary'), 0, N'SELECT', N'G');
+
+IF EXISTS
+(
+    SELECT class, major_id, minor_id, permission_name, state FROM @ExpectedReaderPermissions
+    EXCEPT
+    SELECT permission.class, permission.major_id, permission.minor_id, permission.permission_name, permission.state
+    FROM sys.database_permissions AS permission
+    WHERE permission.grantee_principal_id = USER_ID(N'mcp_workshop_reader')
+)
+OR EXISTS
+(
+    SELECT permission.class, permission.major_id, permission.minor_id, permission.permission_name, permission.state
+    FROM sys.database_permissions AS permission
+    WHERE permission.grantee_principal_id = USER_ID(N'mcp_workshop_reader')
+      AND permission.state_desc IN (N'GRANT', N'GRANT_WITH_GRANT_OPTION', N'DENY')
+    EXCEPT
+    SELECT class, major_id, minor_id, permission_name, state FROM @ExpectedReaderPermissions
+)
+    THROW 51682, 'The reader direct database permission set is not exact.', 1;
 
 DECLARE @PermissionFailure nvarchar(2048) = N'';
+DECLARE @Impersonated bit = 0;
 BEGIN TRY
     EXECUTE AS USER = N'mcp_workshop_reader';
-    IF HAS_PERMS_BY_NAME(N'lab.WorkshopRun', N'OBJECT', N'INSERT') <> 0
+    SET @Impersonated = 1;
+    IF HAS_PERMS_BY_NAME(DB_NAME(), N'DATABASE', N'CONNECT') <> 1
+       OR HAS_PERMS_BY_NAME(N'lab.WorkshopRun', N'OBJECT', N'INSERT') <> 0
        OR HAS_PERMS_BY_NAME(N'lab.WorkshopRun', N'OBJECT', N'UPDATE') <> 0
        OR HAS_PERMS_BY_NAME(N'lab.WorkshopRun', N'OBJECT', N'DELETE') <> 0
+       OR HAS_PERMS_BY_NAME(N'lab.WorkshopSample', N'OBJECT', N'INSERT') <> 0
+       OR HAS_PERMS_BY_NAME(N'lab.WorkshopSample', N'OBJECT', N'UPDATE') <> 0
+       OR HAS_PERMS_BY_NAME(N'lab.WorkshopSample', N'OBJECT', N'DELETE') <> 0
+       OR HAS_PERMS_BY_NAME(N'lab.WorkshopRequestSample', N'OBJECT', N'INSERT') <> 0
+       OR HAS_PERMS_BY_NAME(N'lab.WorkshopRequestSample', N'OBJECT', N'UPDATE') <> 0
+       OR HAS_PERMS_BY_NAME(N'lab.WorkshopRequestSample', N'OBJECT', N'DELETE') <> 0
+       OR HAS_PERMS_BY_NAME(N'lab.ValidationRun', N'OBJECT', N'INSERT') <> 0
+       OR HAS_PERMS_BY_NAME(N'lab.ValidationRun', N'OBJECT', N'UPDATE') <> 0
+       OR HAS_PERMS_BY_NAME(N'lab.ValidationRun', N'OBJECT', N'DELETE') <> 0
        OR HAS_PERMS_BY_NAME(N'lab', N'SCHEMA', N'ALTER') <> 0
+       OR HAS_PERMS_BY_NAME(N'lab', N'SCHEMA', N'CONTROL') <> 0
+       OR HAS_PERMS_BY_NAME(N'lab', N'SCHEMA', N'TAKE OWNERSHIP') <> 0
+       OR HAS_PERMS_BY_NAME(N'lab', N'SCHEMA', N'VIEW DEFINITION') <> 0
        OR HAS_PERMS_BY_NAME(DB_NAME(), N'DATABASE', N'CONTROL') <> 0
+       OR HAS_PERMS_BY_NAME(DB_NAME(), N'DATABASE', N'ALTER') <> 0
+       OR HAS_PERMS_BY_NAME(DB_NAME(), N'DATABASE', N'TAKE OWNERSHIP') <> 0
+       OR HAS_PERMS_BY_NAME(DB_NAME(), N'DATABASE', N'VIEW DEFINITION') <> 0
+       OR HAS_PERMS_BY_NAME(N'dbo', N'USER', N'IMPERSONATE') <> 0
        OR HAS_PERMS_BY_NAME(N'lab.vw_WorkshopRunSummary', N'OBJECT', N'SELECT') <> 1
+       OR HAS_PERMS_BY_NAME(N'lab.vw_WorkshopSampleSummary', N'OBJECT', N'SELECT') <> 1
        OR HAS_PERMS_BY_NAME(N'lab.usp_GetMemorySnapshot', N'OBJECT', N'EXECUTE') <> 1
+       OR HAS_PERMS_BY_NAME(N'lab.usp_GetActiveWorkshopGrants', N'OBJECT', N'EXECUTE') <> 1
+       OR HAS_PERMS_BY_NAME(N'lab.usp_GetQueryStoreTopQueries', N'OBJECT', N'EXECUTE') <> 1
+       OR HAS_PERMS_BY_NAME(N'lab.usp_GetQueryStoreWaits', N'OBJECT', N'EXECUTE') <> 1
+       OR HAS_PERMS_BY_NAME(N'lab.usp_GetProcedurePlanSummary', N'OBJECT', N'EXECUTE') <> 1
+       OR HAS_PERMS_BY_NAME(N'lab.usp_CompareWorkshopRuns', N'OBJECT', N'EXECUTE') <> 1
         SET @PermissionFailure = N'Least-privilege verification failed for mcp_workshop_reader.';
     REVERT;
+    SET @Impersonated = 0;
 END TRY
 BEGIN CATCH
-    IF USER_NAME() = N'mcp_workshop_reader'
+    IF @Impersonated = 1
         REVERT;
     THROW;
 END CATCH;
