@@ -686,14 +686,6 @@ git commit -m "feat: add non-destructive Azure workshop preflight"
 - Modify: `tests/powershell/Workshop.Azure.Tests.ps1`
 - Create: `tests/powershell/EntryScripts.Tests.ps1`
 
-### Final quality finding: private-subnet Az.Network capability
-
-- Verified implementation scope: `deploy/Workshop.Azure.psm1` declares Az.Network 7.0.0 while its default network mutation path calls `New-AzVirtualNetworkSubnetConfig -DefaultOutboundAccess`.
-- Verified local authoritative metadata: installed Az.Network 8.0.0 exposes `DefaultOutboundAccess`; use 8.0.0 as the conservative known-supported minimum.
-- Test-first requirements: Az.Network 7.27.0 and older must fail the module prerequisite check, 8.0.0 must pass, and an injected unsupported command-capability result must stop `New-WorkshopNetwork` before its first create operation.
-- Implementation pattern: add an injectable network operation that reports whether `New-AzVirtualNetworkSubnetConfig` contains the `DefaultOutboundAccess` parameter; the default operation must inspect command metadata, and operation validation must require it before mutation.
-- Validation: run focused Pester tests, PSScriptAnalyzer, and the strict aggregate repository validation without live Azure access.
-
 - [ ] **Step 1: Add failing tests for network resource calls and confirmation**
 
 Mock Az cmdlets and assert that `New-WorkshopNetwork` creates two private subnets, one NAT Gateway, two ASGs, separate subnet NSGs, one administration public IP, and no SQL public IP. Assert that a deny rule with priority lower than 65000 blocks other VNet traffic to the SQL subnet after the explicit admin rules. Assert that `Deploy-WorkshopEnvironment.ps1` requires both `-WindowsClientLicenseAttested` and `-ApproveBillableDeployment`.
