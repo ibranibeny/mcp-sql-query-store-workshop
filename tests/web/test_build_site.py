@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -34,6 +35,37 @@ def page(**overrides: object) -> dict[str, object]:
         "durationMinutes": 15,
         **overrides,
     }
+
+
+def make_site_root(tmp_path: Path) -> Path:
+    root = tmp_path / "repo"
+    (root / "web" / "templates").mkdir(parents=True)
+    for template in ("base.html", "page.html"):
+        (root / "web" / "templates" / template).write_text(
+            (ROOT / "web" / "templates" / template).read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+    (root / "content.md").write_text("# Content", encoding="utf-8")
+    write_manifest(root / "web" / "site-manifest.json", [page()])
+    return root
+
+
+def make_directory_link(link: Path, target: Path, *, junction: bool = False) -> None:
+    if junction:
+        result = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(link), str(target)],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode:
+            pytest.skip(f"Windows junction creation is unavailable: {result.stderr}")
+        return
+
+    try:
+        link.symlink_to(target, target_is_directory=True)
+    except OSError as error:
+        pytest.skip(f"Directory symlink creation is unavailable: {error}")
 
 
 def test_manifest_has_unique_ordered_routes_and_existing_sources() -> None:
@@ -95,6 +127,25 @@ def test_missing_source_is_rejected(tmp_path: Path) -> None:
     ],
 )
 def test_duplicate_or_unsafe_routes_are_rejected(tmp_path: Path, routes: list[str]) -> None:
+    (tmp_path / "content.md").write_text("# Content", encoding="utf-8")
+    pages = [page(route=route, title=f"Page {index}") for index, route in enumerate(routes)]
+    path = write_manifest(tmp_path / "manifest.json", pages)
+
+    with pytest.raises(ValueError, match="route"):
+        load_manifest(path, root=tmp_path)
+
+
+@pytest.mark.parametrize(
+    "routes",
+    [
+        ["index.html", "index.html/child.html"],
+        ["index.html", "GUIDES/Page.html", "guides/page.html"],
+        ["index.html", "assets/page.html"],
+    ],
+)
+def test_route_tree_collisions_and_reserved_assets_namespace_are_rejected(
+    tmp_path: Path, routes: list[str],
+) -> None:
     (tmp_path / "content.md").write_text("# Content", encoding="utf-8")
     pages = [page(route=route, title=f"Page {index}") for index, route in enumerate(routes)]
     path = write_manifest(tmp_path / "manifest.json", pages)
@@ -230,6 +281,101 @@ def test_build_removes_stale_destination_content(tmp_path: Path) -> None:
 
     assert not (destination / "obsolete.html").exists()
     assert not (destination / "assets" / "obsolete.js").exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows read-only directory regression")
+def test_build_removes_ordinary_read_only_destination(tmp_path: Path) -> None:
+    destination = tmp_path / "site"
+    destination.mkdir()
+    (destination / "obsolete.html").write_text("stale", encoding="utf-8")
+    subprocess.run(["attrib", "+R", str(destination)], check=True)
+
+    build_site(ROOT, destination)
+
+    assert not (destination / "obsolete.html").exists()
+    assert (destination / "index.html").is_file()
+
+
+def test_build_rejects_symlink_in_destination_ancestors_without_deleting_target(
+    tmp_path: Path,
+) -> None:
+    external = tmp_path / "external"
+    destination_target = external / "site"
+    destination_target.mkdir(parents=True)
+    keep = destination_target / "keep.txt"
+    keep.write_text("DO-NOT-DELETE", encoding="utf-8")
+    link = tmp_path / "site-link"
+    make_directory_link(link, external)
+
+    with pytest.raises(ValueError, match="destination"):
+        build_site(ROOT, link / "site")
+
+    assert keep.read_text(encoding="utf-8") == "DO-NOT-DELETE"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows junction regression")
+def test_build_rejects_junction_in_destination_ancestors_without_deleting_target(
+    tmp_path: Path,
+) -> None:
+    external = tmp_path / "external"
+    destination_target = external / "site"
+    destination_target.mkdir(parents=True)
+    keep = destination_target / "keep.txt"
+    keep.write_text("DO-NOT-DELETE", encoding="utf-8")
+    junction = tmp_path / "site-junction"
+    make_directory_link(junction, external, junction=True)
+
+    with pytest.raises(ValueError, match="destination"):
+        build_site(ROOT, junction / "site")
+
+    assert keep.read_text(encoding="utf-8") == "DO-NOT-DELETE"
+
+
+def test_build_rejects_symlinked_asset_file_without_copying_external_content(
+    tmp_path: Path,
+) -> None:
+    root = make_site_root(tmp_path)
+    assets = root / "web" / "assets"
+    assets.mkdir()
+    external = tmp_path / "secret.txt"
+    external.write_text("EXTERNAL", encoding="utf-8")
+    try:
+        (assets / "linked.txt").symlink_to(external)
+    except OSError as error:
+        pytest.skip(f"File symlink creation is unavailable: {error}")
+    destination = tmp_path / "site"
+    destination.mkdir()
+    stale = destination / "keep.txt"
+    stale.write_text("DO-NOT-DELETE", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="asset"):
+        build_site(root, destination)
+
+    assert not (destination / "assets" / "linked.txt").exists()
+    assert stale.read_text(encoding="utf-8") == "DO-NOT-DELETE"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows junction regression")
+def test_build_rejects_junctioned_asset_directory_without_copying_external_content(
+    tmp_path: Path,
+) -> None:
+    root = make_site_root(tmp_path)
+    assets = root / "web" / "assets"
+    assets.mkdir()
+    external = tmp_path / "external-assets"
+    external.mkdir()
+    (external / "keep.txt").write_text("EXTERNAL", encoding="utf-8")
+    make_directory_link(assets / "linked", external, junction=True)
+    destination = tmp_path / "site"
+    destination.mkdir()
+    stale = destination / "keep.txt"
+    stale.write_text("DO-NOT-DELETE", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="asset"):
+        build_site(root, destination)
+
+    assert not (destination / "assets" / "linked" / "keep.txt").exists()
+    assert stale.read_text(encoding="utf-8") == "DO-NOT-DELETE"
 
 
 @pytest.mark.parametrize("relative_destination", ["web", "workshop", "docs"])

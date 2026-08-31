@@ -6,6 +6,7 @@ import json
 import os
 import re
 import shutil
+import stat
 from html.parser import HTMLParser
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -70,6 +71,76 @@ def _validate_route(route_value: Any) -> str:
     return route
 
 
+def _is_link_or_reparse_point(path: Path) -> bool:
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return False
+    attributes = getattr(metadata, "st_file_attributes", 0)
+    reparse_attribute = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    return stat.S_ISLNK(metadata.st_mode) or bool(attributes & reparse_attribute)
+
+
+def _reject_linked_path_components(path: Path, description: str) -> Path:
+    absolute = Path(os.path.abspath(path))
+    for component in reversed((absolute, *absolute.parents)):
+        if _is_link_or_reparse_point(component):
+            raise ValueError(f"{description} must not use a symbolic link or reparse point: {component}")
+    return absolute
+
+
+def _validate_asset_path(path: Path, canonical_root: Path) -> None:
+    if _is_link_or_reparse_point(path):
+        raise ValueError(f"Asset source must not use a symbolic link or reparse point: {path}")
+    try:
+        path.resolve(strict=True).relative_to(canonical_root)
+    except (FileNotFoundError, ValueError) as error:
+        raise ValueError(f"Asset source escapes the assets root: {path}") from error
+
+
+def _validate_asset_tree(assets: Path) -> Path:
+    if _is_link_or_reparse_point(assets):
+        raise ValueError(f"Asset source must not use a symbolic link or reparse point: {assets}")
+    canonical_root = assets.resolve(strict=True)
+    _validate_asset_path(assets, canonical_root)
+    pending = [assets]
+    while pending:
+        directory = pending.pop()
+        for entry in os.scandir(directory):
+            path = Path(entry.path)
+            _validate_asset_path(path, canonical_root)
+            if entry.is_dir(follow_symlinks=False):
+                pending.append(path)
+    return canonical_root
+
+
+def _copy_asset_tree(source: Path, destination: Path, canonical_root: Path) -> None:
+    _validate_asset_path(source, canonical_root)
+    destination.mkdir()
+    for entry in os.scandir(source):
+        source_path = Path(entry.path)
+        destination_path = destination / entry.name
+        _validate_asset_path(source_path, canonical_root)
+        if entry.is_dir(follow_symlinks=False):
+            _copy_asset_tree(source_path, destination_path, canonical_root)
+        elif entry.is_file(follow_symlinks=False):
+            shutil.copy2(source_path, destination_path, follow_symlinks=False)
+        else:
+            raise ValueError(f"Unsupported asset source entry: {source_path}")
+
+
+def _remove_destination(path: Path) -> None:
+    def remove_read_only(
+        operation: Any, failed_path: str | bytes | os.PathLike[str], error: OSError,
+    ) -> None:
+        if not isinstance(error, PermissionError):
+            raise error
+        os.chmod(failed_path, stat.S_IWRITE)
+        operation(failed_path)
+
+    shutil.rmtree(path, onexc=remove_read_only)
+
+
 def load_manifest(path: Path, root: Path | None = None) -> dict[str, Any]:
     manifest = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(manifest, dict):
@@ -86,7 +157,7 @@ def load_manifest(path: Path, root: Path | None = None) -> dict[str, Any]:
         raise ValueError("Manifest pages must be a nonempty array")
 
     repository_root = (root or path.parents[1]).resolve()
-    routes: set[str] = set()
+    routes: set[tuple[str, ...]] = set()
     for index, page in enumerate(pages):
         if not isinstance(page, dict):
             raise ValueError(f"pages[{index}] must be an object")
@@ -96,9 +167,17 @@ def load_manifest(path: Path, root: Path | None = None) -> dict[str, Any]:
 
         _resolve_source(repository_root, page["source"])
         route = _validate_route(page["route"])
-        route_key = route.casefold()
+        route_key = tuple(part.casefold() for part in PurePosixPath(route).parts)
+        if route_key[0] == "assets":
+            raise ValueError(f"Invalid route in reserved assets namespace: {route}")
         if route_key in routes:
             raise ValueError(f"Duplicate route: {route}")
+        if any(
+            route_key[: len(existing)] == existing
+            or existing[: len(route_key)] == route_key
+            for existing in routes
+        ):
+            raise ValueError(f"Invalid route tree collision: {route}")
         routes.add(route_key)
 
         _require_nonempty_string(page["title"], f"pages[{index}].title")
@@ -215,9 +294,7 @@ def _relative_href(current_route: str, target_route: str) -> str:
 
 def build_site(root: Path, destination: Path) -> None:
     root = root.resolve()
-    if destination.is_symlink():
-        raise ValueError("Site destination must not be a symbolic link")
-    destination = destination.resolve()
+    destination = _reject_linked_path_components(destination, "Site destination")
     if destination == root or root.is_relative_to(destination):
         raise ValueError("Site destination must not contain the repository root")
     manifest_path = root / "web" / "site-manifest.json"
@@ -228,7 +305,9 @@ def build_site(root: Path, destination: Path) -> None:
         *((root / page["source"]).resolve() for page in manifest["pages"]),
     ]
     assets = root / "web" / "assets"
-    if assets.exists():
+    canonical_assets = None
+    if os.path.lexists(assets):
+        canonical_assets = _validate_asset_tree(assets)
         protected_paths.append(assets.resolve())
     if any(
         protected == destination or protected.is_relative_to(destination)
@@ -245,10 +324,10 @@ def build_site(root: Path, destination: Path) -> None:
     if destination.exists():
         if not destination.is_dir():
             raise ValueError("Site destination must be a directory")
-        shutil.rmtree(destination)
+        _remove_destination(destination)
     destination.mkdir(parents=True)
-    if assets.is_dir():
-        shutil.copytree(assets, destination / "assets", dirs_exist_ok=True)
+    if canonical_assets is not None:
+        _copy_asset_tree(assets, destination / "assets", canonical_assets)
 
     pages = manifest["pages"]
     for index, page in enumerate(pages):
@@ -279,7 +358,7 @@ def main() -> int:
     parser.add_argument("--root", type=Path, default=Path.cwd())
     parser.add_argument("--output", type=Path, default=Path("site"))
     args = parser.parse_args()
-    build_site(args.root.resolve(), args.output.resolve())
+    build_site(args.root.resolve(), args.output)
     return 0
 
 
