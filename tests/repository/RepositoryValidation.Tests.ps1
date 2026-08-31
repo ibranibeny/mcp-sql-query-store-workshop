@@ -207,6 +207,44 @@ SET @MasterKeySql = N'CREATE MASTER KEY ENCRYPTION BY $passwordKeyword = N'''
         ($findings | Out-String) | Should -Not -Match 'not-a-real-secret|prefix-'
     }
 
+    It 'detects nonempty literals concatenated after comments without returning values' -ForEach @(
+        @{ Template = "{0} = @GeneratedPassword /* split */ + N'embedded-secret'" }
+        @{ Template = "{0}=@GeneratedPassword -- split`n + N'embedded-secret'" }
+    ) {
+        $passwordKeyword = 'PASS' + 'WORD'
+        $content = $Template -f $passwordKeyword
+
+        $findings = @(Find-RepositorySecret -Path 'fixture.sql' -Content $content)
+
+        $findings.Count | Should -Be 1
+        $findings[0].Type | Should -Be 'Password assignment'
+        $findings[0].Line | Should -Be 1
+        $findings[0].PSObject.Properties.Name | Should -Be @('Path', 'Type', 'Line')
+        ($findings | Out-String) | Should -Not -Match 'embedded-secret'
+    }
+
+    It 'ignores fake literal concatenations contained entirely in SQL comments' -ForEach @(
+        @{ Suffix = " /* fake + N'secret' */" }
+        @{ Suffix = " -- fake + N'secret'" }
+        @{ Suffix = "`n/* fake + N'secret' */" }
+        @{ Suffix = "`n-- fake + N'secret'" }
+    ) {
+        $passwordKeyword = 'PASS' + 'WORD'
+        $content = "$passwordKeyword = @GeneratedPassword$Suffix"
+
+        @(Find-RepositorySecret -Path 'fixture.sql' -Content $content) |
+            Should -BeNullOrEmpty
+    }
+
+    It 'does not flag the safe SQL runner' {
+        $runnerPath = Join-Path $script:RepositoryRoot 'deploy/Invoke-WorkshopSqlScripts.ps1'
+
+        @(Find-RepositorySecret -Path 'deploy/Invoke-WorkshopSqlScripts.ps1' -Content (
+            Get-Content -LiteralPath $runnerPath -Raw
+        )) |
+            Should -BeNullOrEmpty
+    }
+
     It 'detects a complete quoted SQL password literal without returning its value' {
         $passwordKeyword = 'PASS' + 'WORD'
         $content = "SET @MasterKeySql = N'CREATE MASTER KEY ENCRYPTION BY $passwordKeyword = N''literal-secret''';"

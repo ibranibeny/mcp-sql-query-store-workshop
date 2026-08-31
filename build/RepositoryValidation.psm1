@@ -95,6 +95,102 @@ function Test-ApprovedPasswordValue {
     )
 }
 
+function Get-RepositoryPasswordExpression {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [AllowEmptyString()]
+        [string] $InitialValue,
+
+        [Parameter(Mandatory)]
+        [AllowEmptyCollection()]
+        [AllowEmptyString()]
+        [string[]] $ContentLines,
+
+        [Parameter(Mandatory)]
+        [int] $NextLineIndex
+    )
+
+    $expression = [System.Text.StringBuilder]::new()
+    $inBlockComment = $false
+    $lines = @($InitialValue)
+    if ($NextLineIndex -lt $ContentLines.Count) {
+        $lines += $ContentLines[$NextLineIndex..($ContentLines.Count - 1)]
+    }
+
+    for ($lineIndex = 0; $lineIndex -lt $lines.Count; $lineIndex++) {
+        $line = $lines[$lineIndex]
+        $code = [System.Text.StringBuilder]::new()
+        $quote = [char] 0
+        $index = 0
+        while ($index -lt $line.Length) {
+            if ($inBlockComment) {
+                if ($index + 1 -lt $line.Length -and $line.Substring($index, 2) -eq '*/') {
+                    $inBlockComment = $false
+                    $index += 2
+                }
+                else {
+                    $index++
+                }
+                continue
+            }
+
+            $character = $line[$index]
+            if ($quote -ne [char] 0) {
+                [void] $code.Append($character)
+                if ($character -eq $quote) {
+                    if ($index + 1 -lt $line.Length -and $line[$index + 1] -eq $quote) {
+                        [void] $code.Append($line[$index + 1])
+                        $index += 2
+                        continue
+                    }
+                    $quote = [char] 0
+                }
+                $index++
+                continue
+            }
+
+            if ($character -eq "'" -or $character -eq '"') {
+                $quote = $character
+                [void] $code.Append($character)
+                $index++
+                continue
+            }
+            if ($index + 1 -lt $line.Length) {
+                $pair = $line.Substring($index, 2)
+                if ($pair -eq '--') {
+                    break
+                }
+                if ($pair -eq '/*') {
+                    $inBlockComment = $true
+                    $index += 2
+                    continue
+                }
+            }
+
+            [void] $code.Append($character)
+            $index++
+        }
+
+        $cleanedLine = $code.ToString().Trim()
+        if ($lineIndex -eq 0) {
+            [void] $expression.Append($cleanedLine)
+            continue
+        }
+        if ([string]::IsNullOrWhiteSpace($cleanedLine)) {
+            continue
+        }
+        if ($cleanedLine -notmatch '^\+') {
+            break
+        }
+
+        [void] $expression.Append(' ')
+        [void] $expression.Append($cleanedLine)
+    }
+
+    return $expression.ToString()
+}
+
 function Find-RepositorySecret {
     [CmdletBinding()]
     param(
@@ -182,15 +278,10 @@ function Find-RepositorySecret {
 
         foreach ($pattern in $patterns) {
             foreach ($match in [regex]::Matches($line, $pattern)) {
-                $valueForApproval = $match.Groups['value'].Value
-                $continuationIndex = $lineNumber
-                while (
-                    $continuationIndex -lt $contentLines.Count -and
-                    $contentLines[$continuationIndex] -match '^\s*\+'
-                ) {
-                    $valueForApproval += ' ' + $contentLines[$continuationIndex].Trim()
-                    $continuationIndex++
-                }
+                $valueForApproval = Get-RepositoryPasswordExpression `
+                    -InitialValue $match.Groups['value'].Value `
+                    -ContentLines $contentLines `
+                    -NextLineIndex $lineNumber
                 $passwordToken = [regex]::Match($match.Value, '(?i)(?:password|pwd)')
                 $assignmentIndex = if ($passwordToken.Success) {
                     $match.Index + $passwordToken.Index
