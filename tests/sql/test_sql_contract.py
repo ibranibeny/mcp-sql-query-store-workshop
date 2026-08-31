@@ -1085,6 +1085,212 @@ def test_task9_scripts_avoid_sqlcmd_injection_and_unbounded_or_destructive_opera
     assert "DROP DATABASE" not in upper
 
 
+DIAGNOSTIC_PROCEDURES = (
+    "lab.usp_GetMemorySnapshot",
+    "lab.usp_GetActiveWorkshopGrants",
+    "lab.usp_GetQueryStoreTopQueries",
+    "lab.usp_GetQueryStoreWaits",
+    "lab.usp_GetProcedurePlanSummary",
+    "lab.usp_CompareWorkshopRuns",
+)
+
+
+def diagnostic_batch(procedure: str) -> str:
+    expression = re.compile(
+        rf"^CREATE\s+OR\s+ALTER\s+PROCEDURE\s+{re.escape(procedure)}\b",
+        re.IGNORECASE,
+    )
+    return next(batch for batch in batches("05-CreateDiagnostics.sql") if expression.search(batch))
+
+
+def test_diagnostics_require_exact_database_marker_and_no_user_transaction() -> None:
+    text = normalized("05-CreateDiagnostics.sql")
+    transaction_guard = re.search(
+        r"IF\s+@@TRANCOUNT\s*<>\s*0\s+THROW\s+51600,\s*'[^']*TRANSACTION[^']*'",
+        text,
+    )
+    assert transaction_guard
+    for contract in (
+        "DB_NAME() <> N'ADVENTUREWORKS2022'",
+        "68A70D6E-62D8-4A77-8F0A-9DA7934DBA7C",
+        "N'MCP SQL QUERY STORE WORKSHOP'",
+        "0XADA06F206D3DB321527A5AAB390FC814E28EBB59791967EB99841BF669E1B16B",
+        "SESSION_CONTEXT(N'DIAGNOSTICSSETUPAUTHORIZED')",
+    ):
+        assert contract in text
+    first_side_effect = min(
+        text.index("SET NOCOUNT ON"),
+        text.index("CREATE TABLE LAB.WORKSHOPRUN"),
+    )
+    assert transaction_guard.start() < first_side_effect
+    assert not re.search(r"\$\(\w+\)", sql("05-CreateDiagnostics.sql"))
+
+
+def test_evidence_tables_are_exact_idempotent_and_constrained() -> None:
+    text = normalized("05-CreateDiagnostics.sql")
+    for table in ("WORKSHOPRUN", "WORKSHOPSAMPLE", "WORKSHOPREQUESTSAMPLE"):
+        assert f"IF OBJECT_ID(N'LAB.{table}', N'U') IS NULL" in text
+        assert f"CREATE TABLE LAB.{table}" in text
+    for contract in (
+        "RUNID UNIQUEIDENTIFIER NOT NULL",
+        "CONSTRAINT PK_WORKSHOPRUN PRIMARY KEY",
+        "EVIDENCECLASSIFICATION",
+        "FROZENSETTINGSHASH VARBINARY(32)",
+        "FROZENSETTINGSJSON NVARCHAR(4000)",
+        "BASELINEQUERYID BIGINT",
+        "OPTIMIZEDQUERYID BIGINT",
+        "CONSTRAINT FK_WORKSHOPSAMPLE_WORKSHOPRUN FOREIGN KEY",
+        "CONSTRAINT FK_WORKSHOPREQUESTSAMPLE_WORKSHOPSAMPLE FOREIGN KEY",
+        "POOLTOTALMEMORYKB BIGINT",
+        "POOLGRANTEDMEMORYKB BIGINT",
+        "POOLUSEDMEMORYKB BIGINT",
+        "POOLAVAILABLEMEMORYKB BIGINT",
+        "GRANTUTILIZATIONPERCENT DECIMAL(6,2)",
+        "REQUESTEDMEMORYKB BIGINT",
+        "GRANTEDMEMORYKB BIGINT",
+        "REQUIREDMEMORYKB BIGINT",
+        "IDEALMEMORYKB BIGINT",
+        "USEDMEMORYKB BIGINT",
+        "MAXUSEDMEMORYKB BIGINT",
+        "QUERYID BIGINT",
+        "PLANID BIGINT",
+    ):
+        assert contract in text
+    assert "CHECK (GRANTUTILIZATIONPERCENT BETWEEN 0 AND 100)" in text
+    assert text.count("CHECK (") >= 12
+    assert "EXISTING EVIDENCE TABLE CONTRACT IS INCOMPATIBLE" in text
+    assert text.count("FROM SYS.COLUMNS") >= 4
+    assert "SQLTEXT" not in text and "QUERYSQLTEXT" not in text
+
+
+def test_validation_run_contract_is_task9_compatible_and_verified() -> None:
+    text = normalized("05-CreateDiagnostics.sql")
+    for contract in (
+        "VALIDATIONRUNID BIGINT IDENTITY(1,1)",
+        "RUNID NVARCHAR(128) NOT NULL",
+        "VALIDATIONCASENAME SYSNAME NOT NULL",
+        "BASELINEHASH VARBINARY(32) NOT NULL",
+        "OPTIMIZEDHASH VARBINARY(32) NOT NULL",
+        "VALIDATEDATUTC DATETIME2(0) NOT NULL",
+        "@EXPECTEDVALIDATIONCOLUMNS",
+        "FROM SYS.COLUMNS WHERE OBJECT_ID = OBJECT_ID(N'LAB.VALIDATIONRUN')",
+        "EXCEPT",
+        "VALIDATIONRUN TABLE DOES NOT MATCH THE TASK 9 CONTRACT",
+    ):
+        assert contract in text
+
+
+def test_six_diagnostic_procedures_are_separate_stable_owner_batches() -> None:
+    text = normalized("05-CreateDiagnostics.sql")
+    assert text.count("CREATE OR ALTER PROCEDURE LAB.USP_") == 6
+    for procedure in DIAGNOSTIC_PROCEDURES:
+        batch = re.sub(r"\s+", " ", diagnostic_batch(procedure)).upper()
+        assert "WITH EXECUTE AS OWNER" in batch
+        assert "SET NOCOUNT ON" in batch
+        assert "SELECT" in batch
+    assert len(batches("05-CreateDiagnostics.sql")) >= 10
+
+
+def test_live_memory_diagnostics_are_bounded_filtered_and_secret_free() -> None:
+    snapshot = re.sub(r"\s+", " ", diagnostic_batch("lab.usp_GetMemorySnapshot")).upper()
+    assert "SYS.DM_RESOURCE_GOVERNOR_RESOURCE_POOLS" in snapshot
+    assert "SYS.DM_EXEC_QUERY_RESOURCE_SEMAPHORES" in snapshot
+    assert "RP.NAME = N'MCP_SQL_WORKSHOP_POOL'" in snapshot
+    assert "RS.RESOURCE_SEMAPHORE_ID = 0" in snapshot
+    assert "CAST(100.0 * RS.GRANTED_MEMORY_KB / NULLIF(RS.TOTAL_MEMORY_KB, 0) AS DECIMAL(6,2))" in snapshot
+    assert "RS.TOTAL_MEMORY_KB - RS.GRANTED_MEMORY_KB" in snapshot
+    assert "SYS.DM_OS_SYS_MEMORY" in snapshot and "SYS.DM_OS_PROCESS_MEMORY" in snapshot
+    assert "SYS.DM_OS_PERFORMANCE_COUNTERS" in snapshot
+    assert "THROW" in snapshot and "POOL" in snapshot
+    assert "MEMORY SNAPSHOT SOURCES ARE UNAVAILABLE" in snapshot
+
+    grants = re.sub(r"\s+", " ", diagnostic_batch("lab.usp_GetActiveWorkshopGrants")).upper()
+    assert "@TOP INT = 20" in grants and "@TOP NOT BETWEEN 1 AND 100" in grants
+    assert "SELECT TOP (@TOP)" in grants and "ORDER BY" in grants
+    assert "S.PROGRAM_NAME LIKE N'MCP-SQL-WORKSHOP%'" in grants
+    assert "SESSION_CONTEXT(N'WORKSHOPRUNID')" in grants
+    assert "LAB.WORKSHOPREQUESTSAMPLE" in grants
+    assert "CONTEXT_INFO" not in grants
+    assert "SYS.DM_EXEC_QUERY_MEMORY_GRANTS" in grants
+    assert "SYS.DM_EXEC_REQUESTS" in grants and "SYS.DM_EXEC_SESSIONS" in grants
+    assert "DM_EXEC_SQL_TEXT" not in grants and "SQL_HANDLE" not in grants
+
+
+def test_query_store_diagnostics_validate_windows_scope_and_safe_procedure_enum() -> None:
+    for procedure in ("lab.usp_GetQueryStoreTopQueries", "lab.usp_GetQueryStoreWaits"):
+        body = re.sub(r"\s+", " ", diagnostic_batch(procedure)).upper()
+        assert "@STARTUTC DATETIME2(0)" in body and "@ENDUTC DATETIME2(0)" in body
+        assert "@TOP INT = 20" in body and "@TOP NOT BETWEEN 1 AND 100" in body
+        assert "DATEDIFF(MINUTE, @STARTUTC, @ENDUTC) > 1440" in body
+        assert "SELECT TOP (@TOP)" in body and "ORDER BY" in body
+        assert "SYS.QUERY_STORE_QUERY" in body and "SYS.QUERY_STORE_RUNTIME_STATS_INTERVAL" in body
+        assert "OBJECT_ID(N'LAB.USP_MONTHENDSALESBASELINE')" in body
+        assert "OBJECT_ID(N'LAB.USP_MONTHENDSALESOPTIMIZED')" in body
+    top = re.sub(r"\s+", " ", diagnostic_batch("lab.usp_GetQueryStoreTopQueries")).upper()
+    for metric in ("AVG_DURATION", "AVG_CPU_TIME", "AVG_LOGICAL_IO_READS", "COUNT_EXECUTIONS", "AVG_QUERY_MAX_USED_MEMORY"):
+        assert metric in top
+    waits = re.sub(r"\s+", " ", diagnostic_batch("lab.usp_GetQueryStoreWaits")).upper()
+    assert "SYS.QUERY_STORE_WAIT_STATS" in waits
+    assert "WAIT_CATEGORY_DESC" in waits and "TOTAL_QUERY_WAIT_TIME_MS" in waits
+
+    plans = re.sub(r"\s+", " ", diagnostic_batch("lab.usp_GetProcedurePlanSummary")).upper()
+    assert "@PROCEDURENAME SYSNAME" in plans
+    assert "@PROCEDURENAME NOT IN (N'LAB.USP_MONTHENDSALESBASELINE', N'LAB.USP_MONTHENDSALESOPTIMIZED')" in plans
+    assert "OBJECT_ID(@PROCEDURENAME, N'P')" in plans
+    assert "QUERY_SQL_TEXT" not in plans
+    assert not re.search(r"SELECT\s+(?:TOP\s*\([^)]*\)\s+)?[^;]*\bP\.QUERY_PLAN\s+(?:AS\s+)?QUERYPLAN", plans)
+    assert "HASHBYTES('SHA2_256'" in plans
+    assert "SP_EXECUTESQL" not in plans and "EXEC(" not in plans
+
+
+def test_run_comparison_uses_window_median_aggregates_and_truthful_bands() -> None:
+    body = re.sub(r"\s+", " ", diagnostic_batch("lab.usp_CompareWorkshopRuns")).upper()
+    assert "@BASELINERUNID UNIQUEIDENTIFIER = NULL" in body
+    assert "@OPTIMIZEDRUNID UNIQUEIDENTIFIER = NULL" in body
+    assert "@PARENTCOMPARISONID UNIQUEIDENTIFIER = NULL" in body
+    assert "ROW_NUMBER() OVER (PARTITION BY" in body
+    assert "COUNT_BIG(*) OVER (PARTITION BY" in body
+    assert "PEAKGRANTUTILIZATIONPERCENT" in body
+    assert "MEDIANGRANTUTILIZATIONPERCENT" in body
+    for metric in ("DURATIONMS", "CPUMS", "LOGICALREADS", "SPILLS", "WAITTIMEMS"):
+        assert metric in body
+    for band in ("IMPROVED", "INCONCLUSIVE", "REGRESSED"):
+        assert f"N'{band}'" in body
+    assert body.count("THROW") >= 3
+    assert "FROZENSETTINGSHASH" in body and "RUNSTATUS = 'COMPLETED'" in body
+    assert "NO MEMORY SAMPLES" in body
+
+
+def test_summary_views_and_reader_permissions_are_least_privileged_and_verified() -> None:
+    text = normalized("05-CreateDiagnostics.sql")
+    views = re.findall(r"CREATE OR ALTER VIEW (LAB\.VW_\w+)", text)
+    assert set(views) == {"LAB.VW_WORKSHOPRUNSUMMARY", "LAB.VW_WORKSHOPSAMPLESUMMARY"}
+    assert "FROZENSETTINGSJSON" not in " ".join(
+        re.sub(r"\s+", " ", batch).upper()
+        for batch in batches("05-CreateDiagnostics.sql")
+        if re.match(r"CREATE\s+OR\s+ALTER\s+VIEW", batch, re.IGNORECASE)
+    )
+    assert "SUSER_ID(N'MCP_WORKSHOP_READER') IS NULL" in text
+    assert "CREATE USER [MCP_WORKSHOP_READER] FOR LOGIN [MCP_WORKSHOP_READER]" in text
+    assert not re.search(r"\bCREATE\s+LOGIN\b", text) and "WITH PASSWORD" not in text
+    assert "GRANT CONNECT TO [MCP_WORKSHOP_READER]" in text
+    for procedure in DIAGNOSTIC_PROCEDURES:
+        assert f"GRANT EXECUTE ON OBJECT::{procedure.upper()} TO [MCP_WORKSHOP_READER]" in text
+    for view in views:
+        assert f"GRANT SELECT ON OBJECT::{view} TO [MCP_WORKSHOP_READER]" in text
+    for permission in ("INSERT", "UPDATE", "DELETE"):
+        assert f"DENY {permission} ON SCHEMA::LAB TO [MCP_WORKSHOP_READER]" in text
+    assert "DENY ALTER ON SCHEMA::LAB TO [MCP_WORKSHOP_READER]" in text
+    assert "DENY CONTROL ON DATABASE::[ADVENTUREWORKS2022] TO [MCP_WORKSHOP_READER]" in text
+    assert "EXECUTE AS USER = N'MCP_WORKSHOP_READER'" in text
+    assert "DATABASE_PRINCIPALS" in text and "SUSER_SID" in text
+    assert "SERVER ROLE" in text and "DATABASE ROLE" in text
+    assert "HAS_PERMS_BY_NAME" in text and "REVERT" in text
+    assert "BEGIN TRY" in text and "BEGIN CATCH" in text
+    for forbidden in ("SP_ADDROLEMEMBER", "SP_ADDSRVROLEMEMBER", "ALTER SERVER ROLE", "ADD MEMBER", "TRUSTWORTHY ON"):
+        assert forbidden not in text
+
+
 def test_all_sql_is_bounded_and_avoids_destructive_or_public_network_commands() -> None:
     combined = "\n".join(normalized(path.name) for path in SQL_DIR.glob("*.sql"))
     forbidden = (
