@@ -62,6 +62,14 @@ function Test-Python {
     )
 }
 
+function Test-Pester {
+    $testPath = Join-Path $script:RepositoryRoot 'tests'
+    $result = Invoke-Pester -Path $testPath -PassThru
+    if ($result.FailedCount -gt 0) {
+        throw "Pester reported $($result.FailedCount) failed test(s)."
+    }
+}
+
 function Test-PowerShellSyntax {
     $parseErrors = [System.Collections.Generic.List[string]]::new()
 
@@ -213,6 +221,7 @@ function Invoke-PowerShellAnalyzerGate {
 Push-Location $script:RepositoryRoot
 try {
     Invoke-ValidationGate -Name 'Python tests' -Validation { Test-Python }
+    Invoke-ValidationGate -Name 'Pester tests' -Validation { Test-Pester }
     Invoke-ValidationGate -Name 'PowerShell syntax' -Validation { Test-PowerShellSyntax }
     Invoke-PowerShellAnalyzerGate
     Invoke-ValidationGate -Name 'JSON parsing' -Validation { Test-JsonFile }

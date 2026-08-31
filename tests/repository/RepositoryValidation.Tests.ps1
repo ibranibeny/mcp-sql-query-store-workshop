@@ -66,6 +66,35 @@ Describe 'Find-RepositorySecret' {
         ($findings | Out-String) | Should -Not -Match 'actual-secret-123'
     }
 
+    It 'detects multiline JSON password assignments without returning the value' {
+        $content = @'
+{
+  "password":
+    "multiline-secret-456"
+}
+'@ # repository-secret-scan: allow-test-fixture
+
+        $findings = @(Find-RepositorySecret -Path 'fixture.json' -Content $content)
+
+        $findings.Count | Should -Be 1
+        $findings[0].Type | Should -Be 'Password assignment'
+        $findings[0].Line | Should -Be 2
+        $findings[0].PSObject.Properties.Name | Should -Be @('Path', 'Type', 'Line')
+        ($findings | Out-String) | Should -Not -Match 'multiline-secret-456'
+    }
+
+    It 'detects password literals in inline YAML mappings without returning the value' {
+        $content = 'database: { user: workshop, password: inline-secret-789 }' # repository-secret-scan: allow-test-fixture
+
+        $findings = @(Find-RepositorySecret -Path 'fixture.yaml' -Content $content)
+
+        $findings.Count | Should -Be 1
+        $findings[0].Type | Should -Be 'Password assignment'
+        $findings[0].Line | Should -Be 1
+        $findings[0].PSObject.Properties.Name | Should -Be @('Path', 'Type', 'Line')
+        ($findings | Out-String) | Should -Not -Match 'inline-secret-789'
+    }
+
     It 'allows approved placeholders and non-literal PowerShell password handling' -ForEach @(
         '{"password": "SET_LOCALLY_ON_ADMIN_VM"}', # repository-secret-scan: allow-test-fixture
         'Password=<password>', # repository-secret-scan: allow-test-fixture
@@ -80,9 +109,50 @@ Describe 'Find-RepositorySecret' {
         @(Find-RepositorySecret -Path 'fixture.txt' -Content $_) | Should -BeNullOrEmpty
     }
 
-    It 'does not flag the scanner implementation itself' {
-        @(Find-RepositorySecret -Path $script:ModulePath -Content (Get-Content -LiteralPath $script:ModulePath -Raw)) |
+    It 'allows supported generated, SQLCMD, environment, and variable references' -ForEach @(
+        '-Password @GeneratedPassword',
+        'password: $(DatabasePassword)',
+        'Password=$(DatabasePassword);Encrypt=True',
+        '{ password: @env(DATABASE_PASSWORD) }',
+        "Password = [Environment]::GetEnvironmentVariable('DATABASE_PASSWORD')",
+        'Password = [System.Environment]::GetEnvironmentVariable("DATABASE_PASSWORD")',
+        '-Password $DatabasePassword'
+    ) {
+        @(Find-RepositorySecret -Path 'fixture.txt' -Content $_) | Should -BeNullOrEmpty
+    }
+
+    It 'does not honor the fixture bypass outside designated test paths' {
+        $content = 'password: bypassed-literal # repository-secret-scan: allow-test-fixture'
+
+        $findings = @(Find-RepositorySecret -Path 'src/config.yaml' -Content $content)
+
+        $findings.Count | Should -Be 1
+        $findings[0].Type | Should -Be 'Password assignment'
+    }
+
+    It 'honors the fixture bypass in designated test paths' {
+        $content = 'password: intentional-fixture # repository-secret-scan: allow-test-fixture'
+
+        @(Find-RepositorySecret -Path 'tests/fixtures/config.yaml' -Content $content) |
             Should -BeNullOrEmpty
+    }
+
+    It 'does not flag the scanner implementation itself' {
+        @(Find-RepositorySecret -Path 'build/RepositoryValidation.psm1' -Content (
+            Get-Content -LiteralPath $script:ModulePath -Raw
+        )) |
+            Should -BeNullOrEmpty
+    }
+
+    It 'scans a nested file with the same basename as the scanner implementation' {
+        $content = 'password: nested-file-secret' # repository-secret-scan: allow-test-fixture
+
+        $findings = @(
+            Find-RepositorySecret -Path 'samples/nested/RepositoryValidation.psm1' -Content $content
+        )
+
+        $findings.Count | Should -Be 1
+        $findings[0].Type | Should -Be 'Password assignment'
     }
 }
 

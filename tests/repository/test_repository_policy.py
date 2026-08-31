@@ -4,6 +4,7 @@ import subprocess
 
 ROOT = Path(__file__).resolve().parents[2]
 VALIDATION_MODULE = ROOT / "build" / "RepositoryValidation.psm1"
+REPOSITORY_TEST_SCRIPT = ROOT / "build" / "Test-Repository.ps1"
 
 
 def run_powershell(command: str, *, environment: dict[str, str]) -> subprocess.CompletedProcess[str]:
@@ -70,6 +71,15 @@ if ($result.Message -ne 'SKIP: PSScriptAnalyzer (not installed; run build/Instal
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_repository_validation_has_named_recursive_pester_gate() -> None:
+    script = REPOSITORY_TEST_SCRIPT.read_text(encoding="utf-8")
+
+    assert "function Test-Pester" in script
+    assert "Invoke-Pester" in script
+    assert "-PassThru" in script
+    assert "Invoke-ValidationGate -Name 'Pester tests' -Validation { Test-Pester }" in script
 
 
 def test_json_validation_skips_node_modules(tmp_path: Path) -> None:

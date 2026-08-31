@@ -79,8 +79,11 @@ function Test-ApprovedPasswordValue {
         [string]::IsNullOrWhiteSpace($candidate) -or
         $candidate -match '^(?i:SET_LOCALLY_ON_ADMIN_VM|WORKSHOP-PLACEHOLDER|<password>)$' -or
         $candidate -match '^\$\{[^}]+\}$' -or
+        $candidate -match '^\$\([A-Za-z_][A-Za-z0-9_.-]*\)$' -or
         $candidate -match '^@env\([^)]+\)$' -or
+        $candidate -match '^@[A-Za-z_][A-Za-z0-9_]*$' -or
         $candidate -match '^\$(?:env:)?[A-Za-z_][A-Za-z0-9_:]*$' -or
+        $candidate -match '^\[(?:System\.)?Environment\]::GetEnvironmentVariable\((?:''[^'']+''|"[^"]+")\)$' -or
         $candidate -match '^(?i:Read-Host)\b'
     )
 }
@@ -97,7 +100,16 @@ function Find-RepositorySecret {
     )
 
     $normalizedPath = $Path.Replace('\', '/')
-    if ([System.IO.Path]::GetFileName($normalizedPath) -eq 'RepositoryValidation.psm1') {
+    if ($normalizedPath -ieq 'build/RepositoryValidation.psm1') {
+        return
+    }
+
+    $fixtureBypassIsAllowed = (
+        $normalizedPath -match '^(?i:tests/fixtures/)' -or
+        $normalizedPath -ieq 'tests/repository/RepositoryValidation.Tests.ps1'
+    )
+    if ($fixtureBypassIsAllowed -and
+        $Content -match 'repository-secret-scan:\s*allow-test-fixture') {
         return
     }
 
@@ -106,16 +118,29 @@ function Find-RepositorySecret {
         '(?i)"(?:password|pwd)"\s*:\s*(?<value>"(?:\\.|[^"\\])*")',
         '(?i)(?:^|[;\s])(?:password|pwd)\s*=\s*(?<value>[^;\r\n]+)',
         '(?i)^\s*(?:password|pwd)\s*:\s*(?<value>[^#\r\n]+)',
+        '(?i)(?:^|[,{])\s*(?:password|pwd)\s*:\s*(?<value>''[^'']*''|"[^"]*"|\$\{[^}]+\}|[^#,}\r\n]+)',
         '(?i)-(?:password|pwd)\s+(?<value>''[^'']*''|"[^"]*"|[^\s;,)]+)',
         '(?i)(?:^|[;{])\s*(?:password|pwd)\s*=\s*(?<value>''[^'']*''|"[^"]*"|[^;},\r\n]+)',
         '(?i)^\s*\$(?:password|pwd)\s*=\s*(?<value>''[^'']*''|"[^"]*"|[^;\r\n]+)',
         '(?i)ConvertTo-SecureString\s+(?<value>''[^'']*''|"[^"]*")'
     )
 
+    $multilineJsonPattern = '(?im)"(?:password|pwd)"\s*:\s*\r?\n\s*(?<value>"(?:\\.|[^"\\])*")'
+    foreach ($match in [regex]::Matches($Content, $multilineJsonPattern)) {
+        if (-not (Test-ApprovedPasswordValue -Value $match.Groups['value'].Value)) {
+            [pscustomobject]@{
+                Path = $Path
+                Type = 'Password assignment'
+                Line = 1 + ([regex]::Matches($Content.Substring(0, $match.Index), '\r?\n')).Count
+            }
+        }
+    }
+
     $lineNumber = 0
     foreach ($line in ($Content -split '\r?\n')) {
         $lineNumber++
-        if ($line -match 'repository-secret-scan:\s*allow-test-fixture') {
+        if ($fixtureBypassIsAllowed -and
+            $line -match 'repository-secret-scan:\s*allow-test-fixture') {
             continue
         }
         if ($line -match $privateKeyPattern) {
