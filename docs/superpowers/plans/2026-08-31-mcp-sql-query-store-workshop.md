@@ -686,15 +686,6 @@ git commit -m "feat: add non-destructive Azure workshop preflight"
 - Modify: `tests/powershell/Workshop.Azure.Tests.ps1`
 - Create: `tests/powershell/EntryScripts.Tests.ps1`
 
-### Compliance remediation findings (2026-08-31)
-
-- The deployed boundary currently validates selected NSG rules but does not reject every extra custom allow or deny rule. Compare canonical custom-rule tuples against the exact approved admin and SQL sets while ignoring Azure-managed default rules.
-- Public-IP verification currently reads only the two expected resources. The read-only operation contract must enumerate the entire target resource-group inventory and require exactly the full-ID-matched admin and NAT Standard/Static/IPv4 resources.
-- Resource-ID comparison currently discards the subscription segment, and subnet checks use suffix matching. Preserve and normalize complete resource IDs for NAT, NSG, NIC, ASG, public-IP, subnet, and DNS associations; verify exact NAT and public-IP SKUs.
-- The configuration names a private DNS zone, but the network specification and creation order omit its VNet link and SQL A record. Add idempotent native Az.PrivateDns get/create/readback paths for `mcpworkshop.internal`, registration-disabled VNet link, and `sql01` mapped only to `10.20.2.10`.
-- The deployment credential is optional and prompted after approval. Make it mandatory, validate its nonempty username and SecureString password before plan output or `ShouldProcess`, never display it, and retain it only for later VM creation.
-- Preserve fail-closed reads, exact deployment phrase, preflight ordering, positive readbacks, resumable checkpoints, no automatic deletion or rollback, and unit-only execution with all Azure calls mocked.
-
 - [ ] **Step 1: Add failing tests for network resource calls and confirmation**
 
 Mock Az cmdlets and assert that `New-WorkshopNetwork` creates two private subnets, one NAT Gateway, two ASGs, separate subnet NSGs, one administration public IP, and no SQL public IP. Assert that a deny rule with priority lower than 65000 blocks other VNet traffic to the SQL subnet after the explicit admin rules. Assert that `Deploy-WorkshopEnvironment.ps1` requires both `-WindowsClientLicenseAttested` and `-ApproveBillableDeployment`.
