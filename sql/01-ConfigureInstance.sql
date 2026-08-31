@@ -357,23 +357,16 @@ BEGIN
         )
                 SET @LockedMarkerValid = 1;
 
-        IF OBJECTPROPERTYEX(@LockedWorkshopClassifierId, N'IsSchemaBound') <> 1
+        IF @LockedDefinition IS NULL
+             OR @LockedHash IS NULL
+             OR @LockedStoredHash IS NULL
+             OR @LockedOwnershipState IS NULL
+             OR ISNULL(OBJECTPROPERTYEX(@LockedWorkshopClassifierId, N'IsSchemaBound'), 0) <> 1
              OR @LockedHash <> @ExpectedClassifierHash
              OR @LockedStoredHash <> @ExpectedClassifierHash
-             OR @LockedOwnershipState NOT IN ('Pending', 'Active')
-             OR (@LockedOwnershipState = 'Active' AND @LockedMarkerValid <> 1)
+             OR @LockedOwnershipState <> 'Active'
+             OR @LockedMarkerValid <> 1
                 THROW 51106, 'The existing workshop classifier name has an unexpected function definition or ownership.', 1;
-
-        IF @LockedOwnershipState = 'Pending' AND @LockedMarkerValid = 0
-                EXEC sys.sp_addextendedproperty
-                        @name = N'MCP_SQL_WORKSHOP', @value = @WorkshopMarker,
-                        @level0type = N'SCHEMA', @level0name = N'dbo',
-                        @level1type = N'FUNCTION', @level1name = N'mcp_sql_workshop_classifier';
-
-        UPDATE WorkshopAdmin.dbo.ResourceGovernorObjectOwnership
-        SET OwnershipState = 'Active', DefinitionHash = @ExpectedClassifierHash, UpdatedAtUtc = SYSUTCDATETIME()
-        WHERE MarkerId = @WorkshopMarker AND SchemaVersion = @WorkshopSchemaVersion
-            AND ObjectType = 'CLASSIFIER' AND ObjectName = N'mcp_sql_workshop_classifier';
 END;
 
 IF EXISTS
@@ -382,17 +375,18 @@ IF EXISTS
     FROM sys.resource_governor_resource_pools
     WHERE name = N'mcp_sql_workshop_pool'
 )
-AND NOT EXISTS
-(
-    SELECT 1
-    FROM WorkshopAdmin.dbo.ResourceGovernorObjectOwnership
-    WHERE MarkerId = @WorkshopMarker
-      AND SchemaVersion = @WorkshopSchemaVersion
-      AND ObjectType = 'POOL'
-      AND ObjectName = N'mcp_sql_workshop_pool'
-)
 BEGIN
-    THROW 51115, 'A Resource Governor pool with the workshop name exists without workshop ownership metadata.', 1;
+    IF NOT EXISTS
+    (
+        SELECT 1
+        FROM WorkshopAdmin.dbo.ResourceGovernorObjectOwnership
+        WHERE MarkerId = @WorkshopMarker
+          AND SchemaVersion = @WorkshopSchemaVersion
+          AND ObjectType = 'POOL'
+          AND ObjectName = N'mcp_sql_workshop_pool'
+          AND OwnershipState IN ('Pending', 'Active')
+    )
+        THROW 51115, 'A Resource Governor pool with the workshop name exists without workshop ownership metadata.', 1;
 END;
 
 IF EXISTS
@@ -401,53 +395,101 @@ IF EXISTS
     FROM sys.resource_governor_workload_groups
     WHERE name = N'mcp_sql_workshop_group'
 )
-AND NOT EXISTS
-(
-    SELECT 1
-    FROM WorkshopAdmin.dbo.ResourceGovernorObjectOwnership
-    WHERE MarkerId = @WorkshopMarker
-      AND SchemaVersion = @WorkshopSchemaVersion
-      AND ObjectType = 'GROUP'
-      AND ObjectName = N'mcp_sql_workshop_group'
-)
 BEGIN
-    THROW 51116, 'A Resource Governor workload group with the workshop name exists without workshop ownership metadata.', 1;
+    IF NOT EXISTS
+    (
+        SELECT 1
+        FROM WorkshopAdmin.dbo.ResourceGovernorObjectOwnership
+        WHERE MarkerId = @WorkshopMarker
+          AND SchemaVersion = @WorkshopSchemaVersion
+          AND ObjectType = 'GROUP'
+          AND ObjectName = N'mcp_sql_workshop_group'
+          AND OwnershipState IN ('Pending', 'Active')
+    )
+        THROW 51116, 'A Resource Governor workload group with the workshop name exists without workshop ownership metadata.', 1;
 END;
 
 IF EXISTS
 (
+    SELECT 1 FROM sys.resource_governor_resource_pools
+    WHERE name = N'mcp_sql_workshop_pool'
+)
+AND NOT EXISTS
+(
     SELECT 1
-    FROM WorkshopAdmin.dbo.ResourceGovernorObjectOwnership AS ownership
-    INNER JOIN sys.resource_governor_resource_pools AS resource_pool
-        ON resource_pool.name = ownership.ObjectName
+    FROM sys.resource_governor_resource_pools AS resource_pool
+    INNER JOIN WorkshopAdmin.dbo.ResourceGovernorObjectOwnership AS ownership
+        ON ownership.ObjectName = resource_pool.name
     WHERE ownership.MarkerId = @WorkshopMarker
       AND ownership.SchemaVersion = @WorkshopSchemaVersion
       AND ownership.ObjectType = 'POOL'
       AND ownership.ObjectName = N'mcp_sql_workshop_pool'
-      AND ownership.OwnershipState = 'Pending'
-      AND (resource_pool.min_memory_percent <> 0 OR resource_pool.max_memory_percent <> 50)
+      AND (ownership.OwnershipState = 'Active' OR ownership.OwnershipState = 'Pending')
+      AND resource_pool.min_memory_percent = 0
+      AND resource_pool.max_memory_percent = 50
 )
-    THROW 51117, 'Pending pool does not match the workshop contract; refusing to alter it.', 1;
+    THROW 51117, 'Existing workshop pool does not match the owned Active contract; refusing configuration changes.', 1;
 
 IF EXISTS
 (
+    SELECT 1 FROM sys.resource_governor_workload_groups
+    WHERE name = N'mcp_sql_workshop_group'
+)
+AND NOT EXISTS
+(
     SELECT 1
-    FROM WorkshopAdmin.dbo.ResourceGovernorObjectOwnership AS ownership
-    INNER JOIN sys.resource_governor_workload_groups AS workload_group
-        ON workload_group.name = ownership.ObjectName
+    FROM sys.resource_governor_workload_groups AS workload_group
     INNER JOIN sys.resource_governor_resource_pools AS resource_pool
         ON resource_pool.pool_id = workload_group.pool_id
+    INNER JOIN WorkshopAdmin.dbo.ResourceGovernorObjectOwnership AS ownership
+        ON ownership.ObjectName = workload_group.name
     WHERE ownership.MarkerId = @WorkshopMarker
       AND ownership.SchemaVersion = @WorkshopSchemaVersion
       AND ownership.ObjectType = 'GROUP'
       AND ownership.ObjectName = N'mcp_sql_workshop_group'
-      AND ownership.OwnershipState = 'Pending'
-      AND (workload_group.request_max_memory_grant_percent <> 40
-           OR workload_group.max_dop <> 4
-           OR workload_group.group_max_requests <> 4
-           OR resource_pool.name <> N'mcp_sql_workshop_pool')
+      AND (ownership.OwnershipState = 'Active' OR ownership.OwnershipState = 'Pending')
+      AND workload_group.request_max_memory_grant_percent = 40
+      AND workload_group.max_dop = 4
+      AND workload_group.group_max_requests = 4
+      AND resource_pool.name = N'mcp_sql_workshop_pool'
 )
-    THROW 51118, 'Pending workload group does not match the workshop contract; refusing to alter it.', 1;
+    THROW 51118, 'Existing workshop workload group does not match the owned Active contract; refusing configuration changes.', 1;
+
+UPDATE WorkshopAdmin.dbo.ResourceGovernorObjectOwnership
+SET OwnershipState = 'Active', UpdatedAtUtc = SYSUTCDATETIME()
+WHERE MarkerId = @WorkshopMarker
+  AND SchemaVersion = @WorkshopSchemaVersion
+  AND ObjectType = 'POOL'
+  AND ObjectName = N'mcp_sql_workshop_pool'
+  AND OwnershipState = 'Pending'
+  AND EXISTS
+  (
+      SELECT 1
+      FROM sys.resource_governor_resource_pools
+      WHERE name = N'mcp_sql_workshop_pool'
+        AND min_memory_percent = 0
+        AND max_memory_percent = 50
+  );
+
+UPDATE WorkshopAdmin.dbo.ResourceGovernorObjectOwnership
+SET OwnershipState = 'Active', UpdatedAtUtc = SYSUTCDATETIME()
+WHERE MarkerId = @WorkshopMarker
+  AND SchemaVersion = @WorkshopSchemaVersion
+  AND ObjectType = 'GROUP'
+  AND ObjectName = N'mcp_sql_workshop_group'
+  AND OwnershipState = 'Pending'
+  AND EXISTS
+  (
+      SELECT 1
+      FROM sys.resource_governor_workload_groups AS workload_group
+      INNER JOIN sys.resource_governor_resource_pools AS resource_pool
+          ON resource_pool.pool_id = workload_group.pool_id
+      WHERE workload_group.name = N'mcp_sql_workshop_group'
+        AND workload_group.request_max_memory_grant_percent = 40
+        AND workload_group.max_dop = 4
+        AND workload_group.group_max_requests = 4
+        AND resource_pool.name = N'mcp_sql_workshop_pool'
+  );
 
 EXEC sys.sp_configure N'show advanced options', 1;
 RECONFIGURE;
@@ -501,21 +543,6 @@ BEGIN
         MAX_MEMORY_PERCENT = 50
     );
     SET @CreatedPool = 1;
-END
-ELSE IF EXISTS
-(
-    SELECT 1
-    FROM sys.resource_governor_resource_pools
-    WHERE name = N'mcp_sql_workshop_pool'
-      AND (min_memory_percent <> 0 OR max_memory_percent <> 50)
-)
-BEGIN
-    ALTER RESOURCE POOL [mcp_sql_workshop_pool]
-    WITH
-    (
-        MIN_MEMORY_PERCENT = 0,
-        MAX_MEMORY_PERCENT = 50
-    );
 END;
 
 UPDATE WorkshopAdmin.dbo.ResourceGovernorObjectOwnership
@@ -552,31 +579,6 @@ BEGIN
     )
     USING [mcp_sql_workshop_pool];
     SET @CreatedGroup = 1;
-END
-ELSE IF EXISTS
-(
-    SELECT 1
-    FROM sys.resource_governor_workload_groups AS workload_group
-    INNER JOIN sys.resource_governor_resource_pools AS resource_pool
-        ON resource_pool.pool_id = workload_group.pool_id
-    WHERE workload_group.name = N'mcp_sql_workshop_group'
-      AND
-      (
-          workload_group.request_max_memory_grant_percent <> 40
-          OR workload_group.max_dop <> 4
-          OR workload_group.group_max_requests <> 4
-          OR resource_pool.name <> N'mcp_sql_workshop_pool'
-      )
-)
-BEGIN
-    ALTER WORKLOAD GROUP [mcp_sql_workshop_group]
-    WITH
-    (
-        REQUEST_MAX_MEMORY_GRANT_PERCENT = 40,
-        MAX_DOP = 4,
-        GROUP_MAX_REQUESTS = 4
-    )
-    USING [mcp_sql_workshop_pool];
 END;
 
 UPDATE WorkshopAdmin.dbo.ResourceGovernorObjectOwnership
@@ -663,9 +665,6 @@ EXEC sys.sp_releaseapplock
     @LockOwner = N'Session';
 END TRY
 BEGIN CATCH
-    DECLARE @OriginalErrorNumber int = ERROR_NUMBER();
-    DECLARE @OriginalErrorMessage nvarchar(2048) = ERROR_MESSAGE();
-    DECLARE @OriginalErrorState tinyint = ERROR_STATE();
     IF XACT_STATE() <> 0 ROLLBACK TRANSACTION;
 
     BEGIN TRY
@@ -680,7 +679,7 @@ BEGIN CATCH
         ALTER RESOURCE GOVERNOR RECONFIGURE;
     END TRY
     BEGIN CATCH
-        SET @RestorationErrors += N' classifier: ' + ERROR_MESSAGE();
+        SET @RestorationErrors += CONCAT(N' classifier (error ', ERROR_NUMBER(), N');');
     END CATCH;
 
     BEGIN TRY
@@ -705,7 +704,7 @@ BEGIN CATCH
         END;
     END TRY
     BEGIN CATCH
-        SET @RestorationErrors += N' group: ' + ERROR_MESSAGE();
+        SET @RestorationErrors += CONCAT(N' group (error ', ERROR_NUMBER(), N');');
     END CATCH;
 
     BEGIN TRY
@@ -727,7 +726,7 @@ BEGIN CATCH
         END;
     END TRY
     BEGIN CATCH
-        SET @RestorationErrors += N' pool: ' + ERROR_MESSAGE();
+        SET @RestorationErrors += CONCAT(N' pool (error ', ERROR_NUMBER(), N');');
     END CATCH;
 
     BEGIN TRY
@@ -742,7 +741,7 @@ BEGIN CATCH
         END;
     END TRY
     BEGIN CATCH
-        SET @RestorationErrors += N' classifier object: ' + ERROR_MESSAGE();
+        SET @RestorationErrors += CONCAT(N' classifier object (error ', ERROR_NUMBER(), N');');
     END CATCH;
 
     BEGIN TRY
@@ -757,7 +756,7 @@ BEGIN CATCH
         END;
     END TRY
     BEGIN CATCH
-        SET @RestorationErrors += N' memory grant feedback: ' + ERROR_MESSAGE();
+        SET @RestorationErrors += CONCAT(N' memory grant feedback (error ', ERROR_NUMBER(), N');');
     END CATCH;
 
     BEGIN TRY
@@ -771,7 +770,7 @@ BEGIN CATCH
         RECONFIGURE;
     END TRY
     BEGIN CATCH
-        SET @RestorationErrors += N' server memory: ' + ERROR_MESSAGE();
+        SET @RestorationErrors += CONCAT(N' server memory (error ', ERROR_NUMBER(), N');');
     END CATCH;
 
     BEGIN TRY
@@ -781,7 +780,7 @@ BEGIN CATCH
             ALTER RESOURCE GOVERNOR RECONFIGURE;
     END TRY
     BEGIN CATCH
-        SET @RestorationErrors += N' Resource Governor state: ' + ERROR_MESSAGE();
+        SET @RestorationErrors += CONCAT(N' Resource Governor state (error ', ERROR_NUMBER(), N');');
     END CATCH;
 
     BEGIN TRY
@@ -790,12 +789,13 @@ BEGIN CATCH
             @LockOwner = N'Session';
     END TRY
     BEGIN CATCH
-        SET @RestorationErrors += N' application lock: ' + ERROR_MESSAGE();
+        SET @RestorationErrors += CONCAT(N' application lock (error ', ERROR_NUMBER(), N');');
     END CATCH;
 
     IF @RestorationErrors <> N''
-        PRINT N'Restoration warnings (original error preserved):' + @RestorationErrors;
-    THROW @OriginalErrorNumber, @OriginalErrorMessage, @OriginalErrorState;
+        PRINT N'Restoration warnings (original error preserved): '
+            + LEFT(REPLACE(REPLACE(@RestorationErrors, NCHAR(13), N' '), NCHAR(10), N' '), 1800);
+    THROW;
 END CATCH;
 
 SELECT N'ConfigurationApplied' AS ConfigurationStatus,

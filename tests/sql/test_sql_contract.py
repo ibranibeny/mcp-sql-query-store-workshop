@@ -202,10 +202,10 @@ def test_resource_governor_objects_have_exact_limits_and_idempotency_guards() ->
     assert re.search(r"RESOURCE_GOVERNOR_RESOURCE_POOLS.*?NOT EXISTS.*?RESOURCEGOVERNOROBJECTOWNERSHIP.*?THROW", text)
     assert re.search(r"RESOURCE_GOVERNOR_WORKLOAD_GROUPS.*?NOT EXISTS.*?RESOURCEGOVERNOROBJECTOWNERSHIP.*?THROW", text)
     assert "CREATE RESOURCE POOL [MCP_SQL_WORKSHOP_POOL]" in text
-    assert "ALTER RESOURCE POOL [MCP_SQL_WORKSHOP_POOL]" in text
+    assert "ALTER RESOURCE POOL [MCP_SQL_WORKSHOP_POOL]" not in text
     assert "MIN_MEMORY_PERCENT = 0" in text and "MAX_MEMORY_PERCENT = 50" in text
     assert "CREATE WORKLOAD GROUP [MCP_SQL_WORKSHOP_GROUP]" in text
-    assert "ALTER WORKLOAD GROUP [MCP_SQL_WORKSHOP_GROUP]" in text
+    assert "ALTER WORKLOAD GROUP [MCP_SQL_WORKSHOP_GROUP]" not in text
     assert "REQUEST_MAX_MEMORY_GRANT_PERCENT = 40" in text
     assert "MAX_DOP = 4" in text and "GROUP_MAX_REQUESTS = 4" in text
     assert "SYS.RESOURCE_GOVERNOR_RESOURCE_POOLS" in text
@@ -216,12 +216,31 @@ def test_resource_governor_collisions_are_rejected_before_mutating_configuration
     text = normalized("01-ConfigureInstance.sql")
     pool_collision = text.index("A RESOURCE GOVERNOR POOL WITH THE WORKSHOP NAME EXISTS")
     group_collision = text.index("A RESOURCE GOVERNOR WORKLOAD GROUP WITH THE WORKSHOP NAME EXISTS")
+    pool_drift = text.index("EXISTING WORKSHOP POOL DOES NOT MATCH THE OWNED ACTIVE CONTRACT")
+    group_drift = text.index("EXISTING WORKSHOP WORKLOAD GROUP DOES NOT MATCH THE OWNED ACTIVE CONTRACT")
     server_memory_change = text.index("SP_CONFIGURE N'MAX SERVER MEMORY (MB)', 49152")
     feedback_change = text.index("ALTER DATABASE SCOPED CONFIGURATION SET ROW_MODE_MEMORY_GRANT_FEEDBACK = OFF")
-    assert pool_collision < server_memory_change
-    assert group_collision < server_memory_change
-    assert pool_collision < feedback_change
-    assert group_collision < feedback_change
+    for guard in (pool_collision, group_collision, pool_drift, group_drift):
+        assert guard < server_memory_change
+        assert guard < feedback_change
+
+
+def test_existing_resource_governor_objects_require_exact_owned_state_before_mutation() -> None:
+    text = normalized("01-ConfigureInstance.sql")
+    preflight = text[:text.index("SP_CONFIGURE N'SHOW ADVANCED OPTIONS', 1")]
+    assert re.search(
+        r"RESOURCE_GOVERNOR_RESOURCE_POOLS.*?OWNERSHIPSTATE\s*=\s*'ACTIVE'.*?"
+        r"MIN_MEMORY_PERCENT\s*=\s*0.*?MAX_MEMORY_PERCENT\s*=\s*50.*?THROW",
+        preflight,
+    )
+    assert re.search(
+        r"RESOURCE_GOVERNOR_WORKLOAD_GROUPS.*?OWNERSHIPSTATE\s*=\s*'ACTIVE'.*?"
+        r"REQUEST_MAX_MEMORY_GRANT_PERCENT\s*=\s*40.*?MAX_DOP\s*=\s*4.*?"
+        r"GROUP_MAX_REQUESTS\s*=\s*4.*?RESOURCE_POOL\.NAME\s*=\s*N'MCP_SQL_WORKSHOP_POOL'.*?THROW",
+        preflight,
+    )
+    assert "ALTER RESOURCE POOL [MCP_SQL_WORKSHOP_POOL]" not in text
+    assert "ALTER WORKLOAD GROUP [MCP_SQL_WORKSHOP_GROUP]" not in text
 
 
 def test_resource_governor_ownership_is_pending_before_ddl_and_activated_after_success() -> None:
@@ -248,8 +267,8 @@ def test_pending_resource_governor_ownership_is_recoverable_and_foreign_objects_
     assert "DROP WORKLOAD GROUP [MCP_SQL_WORKSHOP_GROUP]" in text
     assert "IF @CREATEDPOOL = 1" in text
     assert "DROP RESOURCE POOL [MCP_SQL_WORKSHOP_POOL]" in text
-    assert "PENDING POOL DOES NOT MATCH THE WORKSHOP CONTRACT" in text
-    assert "PENDING WORKLOAD GROUP DOES NOT MATCH THE WORKSHOP CONTRACT" in text
+    assert "EXISTING WORKSHOP POOL DOES NOT MATCH THE OWNED ACTIVE CONTRACT" in text
+    assert "EXISTING WORKSHOP WORKLOAD GROUP DOES NOT MATCH THE OWNED ACTIVE CONTRACT" in text
 
 
 def test_classifier_is_schema_bound_exact_and_preserves_non_workshop_classifier() -> None:
@@ -276,6 +295,25 @@ def test_classifier_requires_exact_normalized_hash_and_dual_ownership_markers() 
     assert "NOT LIKE N'%APP_NAME" not in text
 
 
+def test_existing_classifier_rejects_null_or_non_active_ownership_without_adoption() -> None:
+    text = normalized("01-ConfigureInstance.sql")
+    start = text.index("IF @LOCKEDWORKSHOPCLASSIFIERID IS NOT NULL")
+    existing = text[
+        start:
+        text.index("IF EXISTS ( SELECT 1 FROM SYS.RESOURCE_GOVERNOR_RESOURCE_POOLS", start)
+    ]
+    for required_guard in (
+        "@LOCKEDDEFINITION IS NULL",
+        "@LOCKEDHASH IS NULL",
+        "@LOCKEDSTOREDHASH IS NULL",
+        "@LOCKEDOWNERSHIPSTATE IS NULL",
+        "@LOCKEDOWNERSHIPSTATE <> 'ACTIVE'",
+        "@LOCKEDMARKERVALID <> 1",
+    ):
+        assert required_guard in existing
+    assert "@LOCKEDOWNERSHIPSTATE = 'PENDING'" not in existing
+
+
 def test_post_applock_work_is_globally_guarded_and_restores_on_failure() -> None:
     text = normalized("01-ConfigureInstance.sql")
     lock = text.index("SP_GETAPPLOCK")
@@ -293,7 +331,18 @@ def test_post_applock_work_is_globally_guarded_and_restores_on_failure() -> None
     assert "CLASSIFIER_FUNCTION" in catch
     assert "ALTER RESOURCE GOVERNOR DISABLE" in catch
     assert "@RESTORATIONERRORS" in catch
-    assert re.search(r"THROW\s+@ORIGINALERRORNUMBER\s*,\s*@ORIGINALERRORMESSAGE\s*,\s*@ORIGINALERRORSTATE", catch)
+    assert "THROW @ORIGINALERRORNUMBER" not in catch
+    assert re.search(r"PRINT\s+N'RESTORATION WARNINGS.*?THROW\s*;\s*END CATCH", catch)
+
+
+def test_outer_catch_prints_sanitized_restoration_diagnostics_and_bare_rethrows() -> None:
+    text = normalized("01-ConfigureInstance.sql")
+    catch = text[text.index("BEGIN CATCH", text.index("SP_GETAPPLOCK")):]
+    assert "ERROR_NUMBER()" in catch
+    assert "ERROR_MESSAGE()" not in catch
+    assert "REPLACE(@RESTORATIONERRORS, NCHAR(13), N' ')" in catch
+    assert "REPLACE(" in catch and "NCHAR(10), N' ')" in catch
+    assert re.search(r"PRINT\s+N'RESTORATION WARNINGS.*?THROW\s*;\s*END CATCH", catch)
 
 
 def test_catch_compensation_proves_exact_current_state_before_drop() -> None:
