@@ -245,6 +245,30 @@ def test_build_emits_title_mermaid_target_and_navigation(tmp_path: Path) -> None
     assert (tmp_path / "facilitator-guide.html").is_file()
 
 
+def test_generated_text_files_have_no_trailing_whitespace(tmp_path: Path) -> None:
+    manifest = load_manifest(MANIFEST_PATH)
+    build_site(ROOT, tmp_path)
+    generated_text_files = [tmp_path / entry["route"] for entry in manifest["pages"]]
+
+    for source in (ROOT / "web" / "assets").rglob("*"):
+        if not source.is_file():
+            continue
+        try:
+            source.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            continue
+        generated_text_files.append(tmp_path / "assets" / source.relative_to(ROOT / "web" / "assets"))
+
+    violations = []
+    for path in generated_text_files:
+        relative_path = path.relative_to(tmp_path)
+        for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+            if line != line.rstrip(" \t"):
+                violations.append(f"{relative_path}:{line_number}")
+
+    assert not violations, "Trailing whitespace in generated text: " + ", ".join(violations)
+
+
 def test_build_escapes_manifest_values_creates_nested_routes_and_needs_no_assets(tmp_path: Path) -> None:
     root = tmp_path / "repo"
     (root / "web" / "templates").mkdir(parents=True)

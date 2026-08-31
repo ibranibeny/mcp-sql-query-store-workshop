@@ -23,6 +23,7 @@ MERMAID_FENCE_RE = re.compile(
     r"^```mermaid[ \t]*\r?\n(?P<diagram>.*?)^```[ \t]*$",
     re.MULTILINE | re.DOTALL,
 )
+TRAILING_WHITESPACE_RE = re.compile(r"[ \t]+(?=\r?$)", re.MULTILINE)
 REQUIRED_SITE_PROPERTIES = ("title", "description", "language")
 REQUIRED_PAGE_PROPERTIES = ("source", "route", "title", "phase", "durationMinutes")
 ALLOWED_URL_SCHEMES = {"", "http", "https", "mailto"}
@@ -292,6 +293,10 @@ def _relative_href(current_route: str, target_route: str) -> str:
     return os.path.relpath(target_route, start=current_directory).replace("\\", "/")
 
 
+def _normalize_generated_text(text: str) -> str:
+    return TRAILING_WHITESPACE_RE.sub("", text)
+
+
 def build_site(root: Path, destination: Path) -> None:
     root = root.resolve()
     destination = _reject_linked_path_components(
@@ -361,7 +366,7 @@ def build_site(root: Path, destination: Path) -> None:
         )
         output_path = destination / route
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_text(output, encoding="utf-8")
+        output_path.write_text(_normalize_generated_text(output), encoding="utf-8")
 
 
 def main() -> int:
