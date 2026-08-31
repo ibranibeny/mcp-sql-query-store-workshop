@@ -881,6 +881,29 @@ def test_baseline_contains_bounded_natural_antipatterns() -> None:
     assert "CROSS JOIN" not in body
 
 
+def test_baseline_defers_optional_territory_filter_until_after_wide_materialization() -> None:
+    body = procedure_body("04-CreateBaselineProcedure.sql", "lab.usp_MonthEndSalesBaseline")
+    materialization = body[body.index("INSERT @WIDEWORK"):body.index("DECLARE @ORDERSTATS")]
+    assert "CONVERT(DATE, FS.ORDERDATE) >= @STARTDATE" in materialization
+    assert "CONVERT(DATE, FS.ORDERDATE) < @ENDDATEEXCLUSIVE" in materialization
+    assert "@TERRITORYID IS NULL OR FS.TERRITORYID = @TERRITORYID" not in materialization
+
+    aggregation = body[body.index("INSERT @ORDERSTATS"):body.index("DECLARE @PRICESTATS")]
+    assert "FROM @WIDEWORK AS W" in aggregation
+    assert "WHERE (@TERRITORYID IS NULL OR W.TERRITORYID = @TERRITORYID)" in aggregation
+    assert body.index("INSERT @WIDEWORK") < body.index("WHERE (@TERRITORYID IS NULL OR W.TERRITORYID = @TERRITORYID)")
+
+
+def test_baseline_carries_wide_payload_through_the_ranking_sort() -> None:
+    body = procedure_body("04-CreateBaselineProcedure.sql", "lab.usp_MonthEndSalesBaseline")
+    ranked = body[body.index(";WITH RANKED AS"):body.index("INSERT @RESULTS")]
+    ranking_order = re.search(r"ROW_NUMBER\(\)\s+OVER\s*\(\s*ORDER BY(?P<order>.*?)\)\s+AS SALESRANK", ranked)
+    assert ranking_order
+    assert "ORDERS.CARRIEDPAYLOAD" in ranked
+    assert "ORDERS.CARRIEDPAYLOAD" in ranking_order.group("order")
+    assert ranking_order.group("order").index("ORDERS.PRODUCTID") < ranking_order.group("order").index("ORDERS.CARRIEDPAYLOAD")
+
+
 def test_optimized_has_one_narrow_sargable_fact_access_and_exact_index() -> None:
     text = normalized("06-CreateOptimizedProcedure.sql")
     body = procedure_body("06-CreateOptimizedProcedure.sql", "lab.usp_MonthEndSalesOptimized")
@@ -944,6 +967,47 @@ def test_equivalence_harness_checks_metadata_rows_sets_hashes_order_and_errors()
     assert "LAB.VALIDATIONRUN" in text
 
 
+def test_equivalence_failures_have_bounded_case_specific_count_diagnostics() -> None:
+    text = normalized("07-ValidateEquivalence.sql")
+    for case_name in ("VALIDATIONRUN-METADATA", "PROCEDURE-METADATA", "TERRITORY-CARDINALITY"):
+        assert case_name in text
+    for label in ("EXPECTEDCOUNT=", "ACTUALCOUNT=", "DIFFERENCECOUNT="):
+        assert label in text
+    for message in (
+        "@ROWCOUNTMESSAGE",
+        "@DIFFERENCEMESSAGE",
+        "@HASHMESSAGE",
+        "@ORDERMESSAGE",
+        "@ERRORMESSAGE",
+    ):
+        assert f"THROW 515" in text
+        assert re.search(rf"SET\s+{re.escape(message)}\s*=\s*LEFT\(", text)
+    assert "EXPECTEDHASH=" in text and "ACTUALHASH=" in text
+    assert re.search(r"@HASHMESSAGE.*?EXPECTEDCOUNT=.*?@BASELINEROWCOUNT.*?ACTUALCOUNT=.*?@OPTIMIZEDROWCOUNT", text)
+    assert "EXPECTEDERRORNUMBER=" in text and "BASELINEERRORNUMBER=" in text
+    assert "OPTIMIZEDERRORNUMBER=" in text and "EXPECTEDERRORMESSAGE=" in text
+    assert "BASELINEERRORMESSAGE=" in text and "OPTIMIZEDERRORMESSAGE=" in text
+    assert re.search(r"@ERRORMESSAGE.*?EXPECTEDCOUNT=1.*?ACTUALCOUNT=.*?@INVALIDCASEMATCHED.*?DIFFERENCECOUNT=1", text)
+
+
+def test_cardinality_matrix_uses_fact_row_counts_not_territory_id_proxies() -> None:
+    text = normalized("07-ValidateEquivalence.sql")
+    assert "FROM LAB.FACTSALES" in text
+    assert "GROUP BY TERRITORYID" in text
+    assert "COUNT_BIG(*) AS EXPECTEDROWCOUNT" in text
+    assert "ROW_NUMBER() OVER (ORDER BY EXPECTEDROWCOUNT, TERRITORYID)" in text
+    assert "LOW" in text and "MEDIUM" in text and "HIGH" in text
+    assert "@LOWEXPECTEDROWCOUNT" in text
+    assert "@MEDIUMEXPECTEDROWCOUNT" in text
+    assert "@HIGHEXPECTEDROWCOUNT" in text
+    assert "@DISTINCTTERRITORYCOUNT < 3" in text
+    assert "@SELECTEDTERRITORYCOUNT <> 3" in text
+    assert "CARDINALITYLABEL" in text and "EXPECTEDTERRITORYROWCOUNT" in text
+    assert "ACTUALTERRITORYROWCOUNT" in text
+    assert "PRINT" in text and "TERRITORY CARDINALITY" in text
+    assert "MIN(TERRITORYID)" not in text and "MAX(TERRITORYID)" not in text
+
+
 def test_equivalence_matrix_has_at_least_eight_deterministic_cases() -> None:
     text = normalized("07-ValidateEquivalence.sql")
     values = re.search(r"INSERT\s+@CASES.*?VALUES(?P<values>.*?);", text)
@@ -954,6 +1018,7 @@ def test_equivalence_matrix_has_at_least_eight_deterministic_cases() -> None:
         "NARROW-NULL-TERRITORY",
         "BROAD-NULL-TERRITORY",
         "LOW-TERRITORY",
+        "MEDIUM-TERRITORY",
         "HIGH-TERRITORY",
         "TOP-MINIMUM",
         "TOP-MAXIMUM",
@@ -961,7 +1026,6 @@ def test_equivalence_matrix_has_at_least_eight_deterministic_cases() -> None:
         "DATE-BOUNDARY",
     ):
         assert required in case_names
-    assert "MIN(TERRITORYID)" in text and "MAX(TERRITORYID)" in text
     assert "2018-01-01" in text and "2024-01-01" in text
 
 

@@ -100,8 +100,7 @@ BEGIN
         fs.WidePayload
     FROM lab.FactSales AS fs
     WHERE CONVERT(date, fs.OrderDate) >= @StartDate
-      AND CONVERT(date, fs.OrderDate) < @EndDateExclusive
-      AND (@TerritoryID IS NULL OR fs.TerritoryID = @TerritoryID);
+            AND CONVERT(date, fs.OrderDate) < @EndDateExclusive;
 
     DECLARE @OrderStats table
     (
@@ -126,6 +125,7 @@ BEGIN
         CONVERT(decimal(38,4), SUM(CONVERT(decimal(38,4), w.SalesAmount))),
         MAX(w.WidePayload)
     FROM @WideWork AS w
+    WHERE (@TerritoryID IS NULL OR w.TerritoryID = @TerritoryID)
     GROUP BY w.TerritoryID, w.CustomerID, w.ProductID;
 
     DECLARE @PriceStats table
@@ -148,8 +148,7 @@ BEGIN
             NULLIF(SUM(CONVERT(decimal(38,4), fs.OrderQty)), 0))
     FROM lab.FactSales AS fs
     WHERE CONVERT(date, fs.OrderDate) >= @StartDate
-      AND CONVERT(date, fs.OrderDate) < @EndDateExclusive
-      AND (@TerritoryID IS NULL OR fs.TerritoryID = @TerritoryID)
+            AND CONVERT(date, fs.OrderDate) < @EndDateExclusive
     GROUP BY fs.TerritoryID, fs.CustomerID, fs.ProductID;
 
     DECLARE @Results table
@@ -174,13 +173,17 @@ BEGIN
             orders.TotalQuantity,
             orders.TotalSales,
             prices.AverageUnitPrice,
+                orders.CarriedPayload,
             ROW_NUMBER() OVER
             (
                 ORDER BY orders.TotalSales DESC,
                     CASE WHEN orders.TerritoryID IS NULL THEN 0 ELSE 1 END,
                     orders.TerritoryID,
                     orders.CustomerID,
-                    orders.ProductID
+                    orders.ProductID,
+                    /* Grouping keys above are unique, so this forces wide internal sort
+                       carriage without changing the contractual rank or output order. */
+                    orders.CarriedPayload
             ) AS SalesRank
         FROM @OrderStats AS orders
         INNER JOIN @PriceStats AS prices

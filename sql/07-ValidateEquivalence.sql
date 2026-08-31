@@ -91,7 +91,38 @@ OR EXISTS
     SELECT column_id, name, type_name, max_length, precision, scale, is_nullable, is_identity
     FROM @ExpectedValidationColumns
 )
-    THROW 51502, 'Existing lab.ValidationRun does not match the validation contract.', 1;
+BEGIN
+    DECLARE @ExpectedValidationColumnCount bigint = (SELECT COUNT_BIG(*) FROM @ExpectedValidationColumns);
+    DECLARE @ActualValidationColumnCount bigint =
+        (SELECT COUNT_BIG(*) FROM sys.columns WHERE object_id = OBJECT_ID(N'lab.ValidationRun'));
+    DECLARE @ValidationContractDifferenceCount bigint =
+    (
+        SELECT COUNT_BIG(*) FROM
+        (
+            SELECT column_id, name, type_name, max_length, precision, scale, is_nullable, is_identity
+            FROM @ExpectedValidationColumns
+            EXCEPT
+            SELECT column_id, name, TYPE_NAME(system_type_id), max_length, precision, scale, is_nullable, is_identity
+            FROM sys.columns WHERE object_id = OBJECT_ID(N'lab.ValidationRun')
+        ) AS ExpectedExceptActual
+    ) +
+    (
+        SELECT COUNT_BIG(*) FROM
+        (
+            SELECT column_id, name, TYPE_NAME(system_type_id), max_length, precision, scale, is_nullable, is_identity
+            FROM sys.columns WHERE object_id = OBJECT_ID(N'lab.ValidationRun')
+            EXCEPT
+            SELECT column_id, name, type_name, max_length, precision, scale, is_nullable, is_identity
+            FROM @ExpectedValidationColumns
+        ) AS ActualExceptExpected
+    );
+    DECLARE @ValidationContractMessage nvarchar(2048);
+    SET @ValidationContractMessage = LEFT(N'Case VALIDATIONRUN-METADATA mismatch: ExpectedCount='
+        + CONVERT(nvarchar(30), @ExpectedValidationColumnCount) + N', ActualCount='
+        + CONVERT(nvarchar(30), @ActualValidationColumnCount) + N', DifferenceCount='
+        + CONVERT(nvarchar(30), @ValidationContractDifferenceCount) + N'.', 2048);
+    THROW 51502, @ValidationContractMessage, 1;
+END;
 
 DECLARE @ExpectedMetadata table
 (
@@ -141,7 +172,16 @@ WHERE is_hidden = 0;
 
 IF EXISTS (SELECT 1 FROM @BaselineMetadata WHERE error_number IS NOT NULL)
    OR EXISTS (SELECT 1 FROM @OptimizedMetadata WHERE error_number IS NOT NULL)
-    THROW 51503, 'Procedure result metadata could not be described.', 1;
+BEGIN
+    DECLARE @MetadataDescribeErrorCount bigint =
+        (SELECT COUNT_BIG(*) FROM @BaselineMetadata WHERE error_number IS NOT NULL)
+        + (SELECT COUNT_BIG(*) FROM @OptimizedMetadata WHERE error_number IS NOT NULL);
+    DECLARE @MetadataDescribeMessage nvarchar(2048);
+    SET @MetadataDescribeMessage = LEFT(N'Case PROCEDURE-METADATA-DESCRIBE failed: ExpectedCount=0, ActualCount='
+        + CONVERT(nvarchar(30), @MetadataDescribeErrorCount) + N', DifferenceCount='
+        + CONVERT(nvarchar(30), @MetadataDescribeErrorCount) + N'.', 2048);
+    THROW 51503, @MetadataDescribeMessage, 1;
+END;
 
 IF EXISTS
 (
@@ -167,34 +207,119 @@ OR EXISTS
     EXCEPT
     SELECT column_ordinal, name, system_type_name, is_nullable FROM @BaselineMetadata
 )
-    THROW 51504, 'Procedure result metadata differs from the exact shared contract.', 1;
+BEGIN
+    DECLARE @ExpectedProcedureMetadataCount bigint = (SELECT COUNT_BIG(*) FROM @ExpectedMetadata) * 2;
+    DECLARE @ActualProcedureMetadataCount bigint =
+        (SELECT COUNT_BIG(*) FROM @BaselineMetadata) + (SELECT COUNT_BIG(*) FROM @OptimizedMetadata);
+    DECLARE @ProcedureMetadataDifferenceCount bigint =
+    (
+        SELECT COUNT_BIG(*) FROM
+        (
+            SELECT column_ordinal, name, system_type_name, is_nullable FROM @ExpectedMetadata
+            EXCEPT SELECT column_ordinal, name, system_type_name, is_nullable FROM @BaselineMetadata
+        ) AS ExpectedExceptBaseline
+    ) +
+    (
+        SELECT COUNT_BIG(*) FROM
+        (
+            SELECT column_ordinal, name, system_type_name, is_nullable FROM @BaselineMetadata
+            EXCEPT SELECT column_ordinal, name, system_type_name, is_nullable FROM @ExpectedMetadata
+        ) AS BaselineExceptExpected
+    ) +
+    (
+        SELECT COUNT_BIG(*) FROM
+        (
+            SELECT column_ordinal, name, system_type_name, is_nullable FROM @ExpectedMetadata
+            EXCEPT SELECT column_ordinal, name, system_type_name, is_nullable FROM @OptimizedMetadata
+        ) AS ExpectedExceptOptimized
+    ) +
+    (
+        SELECT COUNT_BIG(*) FROM
+        (
+            SELECT column_ordinal, name, system_type_name, is_nullable FROM @OptimizedMetadata
+            EXCEPT SELECT column_ordinal, name, system_type_name, is_nullable FROM @ExpectedMetadata
+        ) AS OptimizedExceptExpected
+    );
+    DECLARE @ProcedureMetadataMessage nvarchar(2048);
+    SET @ProcedureMetadataMessage = LEFT(N'Case PROCEDURE-METADATA mismatch: ExpectedCount='
+        + CONVERT(nvarchar(30), @ExpectedProcedureMetadataCount) + N', ActualCount='
+        + CONVERT(nvarchar(30), @ActualProcedureMetadataCount) + N', DifferenceCount='
+        + CONVERT(nvarchar(30), @ProcedureMetadataDifferenceCount) + N'.', 2048);
+    THROW 51504, @ProcedureMetadataMessage, 1;
+END;
 
 DECLARE @OriginalRunId sql_variant = SESSION_CONTEXT(N'WorkshopRunId');
 DECLARE @OriginalManualExecution sql_variant = SESSION_CONTEXT(N'WorkshopManualExecution');
 DECLARE @ValidationRunId nvarchar(128) = N'Task9Validation-' + CONVERT(nvarchar(36), NEWID());
-EXEC sys.sp_set_session_context @key = N'WorkshopRunId', @value = @ValidationRunId;
-EXEC sys.sp_set_session_context @key = N'WorkshopManualExecution', @value = 1;
 
-DECLARE @LowTerritoryID int =
+DECLARE @TerritoryCardinality table
 (
-    SELECT MIN(TerritoryID) FROM
-    (
-        SELECT TerritoryID FROM Sales.SalesTerritory
-        UNION
-        SELECT TerritoryID FROM lab.FactSales WHERE TerritoryID IS NOT NULL
-    ) AS domain
+    TerritoryID int NOT NULL PRIMARY KEY,
+    ExpectedRowCount bigint NOT NULL,
+    CardinalityRowNumber bigint NOT NULL,
+    DistinctTerritoryCount bigint NOT NULL
 );
-DECLARE @HighTerritoryID int =
+;WITH TerritoryCounts AS
 (
-    SELECT MAX(TerritoryID) FROM
-    (
-        SELECT TerritoryID FROM Sales.SalesTerritory
-        UNION
-        SELECT TerritoryID FROM lab.FactSales WHERE TerritoryID IS NOT NULL
-    ) AS domain
-);
-IF @LowTerritoryID IS NULL OR @HighTerritoryID IS NULL
-    THROW 51505, 'The deterministic territory domain is empty.', 1;
+    SELECT TerritoryID, COUNT_BIG(*) AS ExpectedRowCount
+    FROM lab.FactSales
+    WHERE TerritoryID IS NOT NULL
+    GROUP BY TerritoryID
+), RankedTerritories AS
+(
+    SELECT
+        TerritoryID,
+        ExpectedRowCount,
+        ROW_NUMBER() OVER (ORDER BY ExpectedRowCount, TerritoryID) AS CardinalityRowNumber,
+        COUNT_BIG(*) OVER () AS DistinctTerritoryCount
+    FROM TerritoryCounts
+)
+INSERT @TerritoryCardinality
+    (TerritoryID, ExpectedRowCount, CardinalityRowNumber, DistinctTerritoryCount)
+SELECT TerritoryID, ExpectedRowCount, CardinalityRowNumber, DistinctTerritoryCount
+FROM RankedTerritories;
+
+DECLARE @DistinctTerritoryCount bigint = COALESCE((SELECT MAX(DistinctTerritoryCount) FROM @TerritoryCardinality), 0);
+IF @DistinctTerritoryCount < 3
+BEGIN
+    DECLARE @TerritoryCountMessage nvarchar(2048);
+    SET @TerritoryCountMessage = LEFT(N'Case TERRITORY-CARDINALITY insufficient data: ExpectedCount=3, ActualCount='
+        + CONVERT(nvarchar(30), @DistinctTerritoryCount) + N', DifferenceCount='
+        + CONVERT(nvarchar(30), 3 - @DistinctTerritoryCount) + N'.', 2048);
+    THROW 51505, @TerritoryCountMessage, 1;
+END;
+
+DECLARE @LowTerritoryID int;
+DECLARE @MediumTerritoryID int;
+DECLARE @HighTerritoryID int;
+DECLARE @LowExpectedRowCount bigint;
+DECLARE @MediumExpectedRowCount bigint;
+DECLARE @HighExpectedRowCount bigint;
+SELECT @LowTerritoryID = TerritoryID, @LowExpectedRowCount = ExpectedRowCount
+FROM @TerritoryCardinality WHERE CardinalityRowNumber = 1;
+SELECT @MediumTerritoryID = TerritoryID, @MediumExpectedRowCount = ExpectedRowCount
+FROM @TerritoryCardinality WHERE CardinalityRowNumber = ((@DistinctTerritoryCount + 1) / 2);
+SELECT @HighTerritoryID = TerritoryID, @HighExpectedRowCount = ExpectedRowCount
+FROM @TerritoryCardinality WHERE CardinalityRowNumber = @DistinctTerritoryCount;
+
+DECLARE @SelectedTerritoryCount bigint;
+SELECT @SelectedTerritoryCount = COUNT_BIG(DISTINCT selected.TerritoryID)
+FROM (VALUES (@LowTerritoryID), (@MediumTerritoryID), (@HighTerritoryID)) AS selected(TerritoryID);
+IF @SelectedTerritoryCount <> 3
+BEGIN
+    DECLARE @SelectedTerritoryMessage nvarchar(2048);
+    SET @SelectedTerritoryMessage = LEFT(N'Case TERRITORY-CARDINALITY selection mismatch: ExpectedCount=3, ActualCount='
+        + CONVERT(nvarchar(30), @SelectedTerritoryCount) + N', DifferenceCount='
+        + CONVERT(nvarchar(30), 3 - @SelectedTerritoryCount) + N'.', 2048);
+    THROW 51505, @SelectedTerritoryMessage, 1;
+END;
+
+PRINT LEFT(N'Territory cardinality Low: TerritoryID=' + CONVERT(nvarchar(20), @LowTerritoryID)
+    + N', ExpectedRowCount=' + CONVERT(nvarchar(30), @LowExpectedRowCount) + N'.', 2048);
+PRINT LEFT(N'Territory cardinality Medium: TerritoryID=' + CONVERT(nvarchar(20), @MediumTerritoryID)
+    + N', ExpectedRowCount=' + CONVERT(nvarchar(30), @MediumExpectedRowCount) + N'.', 2048);
+PRINT LEFT(N'Territory cardinality High: TerritoryID=' + CONVERT(nvarchar(20), @HighTerritoryID)
+    + N', ExpectedRowCount=' + CONVERT(nvarchar(30), @HighExpectedRowCount) + N'.', 2048);
 
 DECLARE @Cases table
 (
@@ -203,21 +328,24 @@ DECLARE @Cases table
     StartDate date NOT NULL,
     EndDateExclusive date NOT NULL,
     TerritoryID int NULL,
-    TopCount int NOT NULL
+    TopCount int NOT NULL,
+    CardinalityLabel nvarchar(10) NULL,
+    ExpectedTerritoryRowCount bigint NULL
 );
-INSERT @Cases (CaseName, StartDate, EndDateExclusive, TerritoryID, TopCount)
+INSERT @Cases
+    (CaseName, StartDate, EndDateExclusive, TerritoryID, TopCount, CardinalityLabel, ExpectedTerritoryRowCount)
 VALUES
-    (N'NARROW-NULL-TERRITORY', '2022-06-01', '2022-06-02', NULL, 100),
-    (N'BROAD-NULL-TERRITORY', '2022-01-01', '2023-01-01', NULL, 100),
-    (N'LOW-TERRITORY', '2021-04-01', '2021-05-01', @LowTerritoryID, 100),
-    (N'HIGH-TERRITORY', '2021-04-01', '2022-04-01', @HighTerritoryID, 100),
-    (N'TOP-MINIMUM', '2020-01-01', '2020-02-01', NULL, 1),
-    (N'TOP-MAXIMUM', '2019-01-01', '2020-01-01', NULL, 1000),
-    (N'NO-MATCH', '2017-01-01', '2017-01-02', NULL, 100),
-    (N'DATE-BOUNDARY', '2023-12-31', '2024-01-01', NULL, 100),
-    (N'LEAP-BOUNDARY', '2020-02-28', '2020-03-01', @LowTerritoryID, 100),
-    (N'MEDIUM-CARDINALITY', '2018-01-01', '2018-04-01', @HighTerritoryID, 250),
-    (N'REPEATED-EXECUTION', '2022-06-01', '2022-06-02', NULL, 100);
+    (N'NARROW-NULL-TERRITORY', '2022-06-01', '2022-06-02', NULL, 100, NULL, NULL),
+    (N'BROAD-NULL-TERRITORY', '2022-01-01', '2023-01-01', NULL, 100, NULL, NULL),
+    (N'LOW-TERRITORY', '2021-04-01', '2021-05-01', @LowTerritoryID, 100, N'Low', @LowExpectedRowCount),
+    (N'MEDIUM-TERRITORY', '2018-01-01', '2018-04-01', @MediumTerritoryID, 250, N'Medium', @MediumExpectedRowCount),
+    (N'HIGH-TERRITORY', '2021-04-01', '2022-04-01', @HighTerritoryID, 100, N'High', @HighExpectedRowCount),
+    (N'TOP-MINIMUM', '2020-01-01', '2020-02-01', NULL, 1, NULL, NULL),
+    (N'TOP-MAXIMUM', '2019-01-01', '2020-01-01', NULL, 1000, NULL, NULL),
+    (N'NO-MATCH', '2017-01-01', '2017-01-02', NULL, 100, NULL, NULL),
+    (N'DATE-BOUNDARY', '2023-12-31', '2024-01-01', NULL, 100, NULL, NULL),
+    (N'LEAP-BOUNDARY', '2020-02-28', '2020-03-01', @LowTerritoryID, 100, NULL, NULL),
+    (N'REPEATED-EXECUTION', '2022-06-01', '2022-06-02', NULL, 100, NULL, NULL);
 
 CREATE TABLE #Baseline
 (
@@ -262,6 +390,8 @@ DECLARE @PassingCases table
 
 DECLARE @CaseNumber int = 1;
 DECLARE @CaseCount int = (SELECT COUNT(*) FROM @Cases);
+EXEC sys.sp_set_session_context @key = N'WorkshopRunId', @value = @ValidationRunId;
+EXEC sys.sp_set_session_context @key = N'WorkshopManualExecution', @value = 1;
 BEGIN TRY
     WHILE @CaseNumber <= @CaseCount
     BEGIN
@@ -270,13 +400,37 @@ BEGIN TRY
         DECLARE @EndDateExclusive date;
         DECLARE @TerritoryID int;
         DECLARE @TopCount int;
+        DECLARE @CardinalityLabel nvarchar(10);
+        DECLARE @ExpectedTerritoryRowCount bigint;
         SELECT
             @CaseName = CaseName,
             @StartDate = StartDate,
             @EndDateExclusive = EndDateExclusive,
             @TerritoryID = TerritoryID,
-            @TopCount = TopCount
+            @TopCount = TopCount,
+            @CardinalityLabel = CardinalityLabel,
+            @ExpectedTerritoryRowCount = ExpectedTerritoryRowCount
         FROM @Cases WHERE CaseNumber = @CaseNumber;
+
+        IF @CardinalityLabel IS NOT NULL
+        BEGIN
+            DECLARE @ActualTerritoryRowCount bigint =
+                (SELECT COUNT_BIG(*) FROM lab.FactSales WHERE TerritoryID = @TerritoryID);
+            IF @ActualTerritoryRowCount <> @ExpectedTerritoryRowCount
+            BEGIN
+                DECLARE @CardinalityMessage nvarchar(2048);
+                SET @CardinalityMessage = LEFT(N'Case ' + @CaseName + N' territory cardinality mismatch ('
+                    + @CardinalityLabel + N'): ExpectedCount=' + CONVERT(nvarchar(30), @ExpectedTerritoryRowCount)
+                    + N', ActualCount=' + CONVERT(nvarchar(30), @ActualTerritoryRowCount)
+                    + N', DifferenceCount=' + CONVERT(nvarchar(30), ABS(@ExpectedTerritoryRowCount - @ActualTerritoryRowCount))
+                    + N'.', 2048);
+                THROW 51506, @CardinalityMessage, 1;
+            END;
+            PRINT LEFT(N'Territory cardinality verified for case ' + @CaseName + N' (' + @CardinalityLabel
+                + N'): TerritoryID=' + CONVERT(nvarchar(20), @TerritoryID) + N', ExpectedCount='
+                + CONVERT(nvarchar(30), @ExpectedTerritoryRowCount) + N', ActualCount='
+                + CONVERT(nvarchar(30), @ActualTerritoryRowCount) + N', DifferenceCount=0.', 2048);
+        END;
 
         TRUNCATE TABLE #Baseline;
         TRUNCATE TABLE #Optimized;
@@ -296,8 +450,10 @@ BEGIN TRY
         DECLARE @OptimizedRowCount bigint = (SELECT COUNT_BIG(*) FROM #Optimized);
         IF @BaselineRowCount <> @OptimizedRowCount
         BEGIN
-            DECLARE @RowCountMessage nvarchar(2048) = N'Case ' + @CaseName + N' row-count mismatch: baseline='
-                + CONVERT(nvarchar(30), @BaselineRowCount) + N', optimized=' + CONVERT(nvarchar(30), @OptimizedRowCount) + N'.';
+            DECLARE @RowCountMessage nvarchar(2048);
+            SET @RowCountMessage = LEFT(N'Case ' + @CaseName + N' row-count mismatch: ExpectedCount='
+                + CONVERT(nvarchar(30), @BaselineRowCount) + N', ActualCount=' + CONVERT(nvarchar(30), @OptimizedRowCount)
+                + N', DifferenceCount=' + CONVERT(nvarchar(30), ABS(@BaselineRowCount - @OptimizedRowCount)) + N'.', 2048);
             THROW 51510, @RowCountMessage, 1;
         END;
 
@@ -319,9 +475,13 @@ BEGIN TRY
         ) AS OptimizedExceptBaseline;
         IF @BaselineExceptOptimized <> 0 OR @OptimizedExceptBaseline <> 0
         BEGIN
-            DECLARE @DifferenceMessage nvarchar(2048) = N'Case ' + @CaseName + N' differs: BaselineExceptOptimized='
+            DECLARE @DifferenceMessage nvarchar(2048);
+            SET @DifferenceMessage = LEFT(N'Case ' + @CaseName + N' set mismatch: ExpectedCount=0, ActualCount='
+                + CONVERT(nvarchar(30), @BaselineExceptOptimized + @OptimizedExceptBaseline)
+                + N', DifferenceCount=' + CONVERT(nvarchar(30), @BaselineExceptOptimized + @OptimizedExceptBaseline)
+                + N', BaselineExceptOptimized='
                 + CONVERT(nvarchar(30), @BaselineExceptOptimized) + N', OptimizedExceptBaseline='
-                + CONVERT(nvarchar(30), @OptimizedExceptBaseline) + N'.';
+                + CONVERT(nvarchar(30), @OptimizedExceptBaseline) + N'.', 2048);
             THROW 51511, @DifferenceMessage, 1;
         END;
 
@@ -347,7 +507,13 @@ BEGIN TRY
         FROM #Optimized;
         IF @BaselineHash <> @OptimizedHash
         BEGIN
-            DECLARE @HashMessage nvarchar(2048) = N'Case ' + @CaseName + N' deterministic result hash mismatch.';
+            DECLARE @HashMessage nvarchar(2048);
+            SET @HashMessage = LEFT(N'Case ' + @CaseName + N' deterministic result hash mismatch: ExpectedCount='
+                + CONVERT(nvarchar(30), @BaselineRowCount) + N', ActualCount=' + CONVERT(nvarchar(30), @OptimizedRowCount)
+                + N', DifferenceCount='
+                + CONVERT(nvarchar(30), @BaselineExceptOptimized + @OptimizedExceptBaseline)
+                + N', ExpectedHash=' + COALESCE(CONVERT(nvarchar(64), @BaselineHash, 2), N'<NULL>')
+                + N', ActualHash=' + COALESCE(CONVERT(nvarchar(64), @OptimizedHash, 2), N'<NULL>') + N'.', 2048);
             THROW 51512, @HashMessage, 1;
         END;
 
@@ -372,7 +538,13 @@ BEGIN TRY
             (SELECT COUNT_BIG(*) FROM OptimizedOrder WHERE CaptureOrder <> ExpectedOrder OR SalesRank <> ExpectedRank);
         IF @BaselineExceptOptimized <> 0 OR @OptimizedExceptBaseline <> 0
         BEGIN
-            DECLARE @OrderMessage nvarchar(2048) = N'Case ' + @CaseName + N' violates the deterministic ranking or output ordering contract.';
+            DECLARE @OrderMessage nvarchar(2048);
+            SET @OrderMessage = LEFT(N'Case ' + @CaseName
+                + N' violates the deterministic ranking or output ordering contract: ExpectedCount=0, ActualCount='
+                + CONVERT(nvarchar(30), @BaselineExceptOptimized + @OptimizedExceptBaseline)
+                + N', DifferenceCount=' + CONVERT(nvarchar(30), @BaselineExceptOptimized + @OptimizedExceptBaseline)
+                + N', BaselineViolations=' + CONVERT(nvarchar(30), @BaselineExceptOptimized)
+                + N', OptimizedViolations=' + CONVERT(nvarchar(30), @OptimizedExceptBaseline) + N'.', 2048);
             THROW 51513, @OrderMessage, 1;
         END;
 
@@ -448,8 +620,24 @@ BEGIN TRY
            OR @BaselineErrorMessage <> @ExpectedErrorMessage OR @OptimizedErrorMessage <> @ExpectedErrorMessage
            OR @BaselineErrorNumber <> @OptimizedErrorNumber OR @BaselineErrorMessage <> @OptimizedErrorMessage
         BEGIN
-            DECLARE @ErrorMessage nvarchar(2048) = N'Invalid-input case ' + @InvalidCaseName
-                + N' did not return the same expected error from both procedures.';
+            DECLARE @BaselineErrorMatched bit = CASE WHEN @BaselineErrorNumber = @ExpectedErrorNumber
+                AND @BaselineErrorMessage = @ExpectedErrorMessage THEN 1 ELSE 0 END;
+            DECLARE @OptimizedErrorMatched bit = CASE WHEN @OptimizedErrorNumber = @ExpectedErrorNumber
+                AND @OptimizedErrorMessage = @ExpectedErrorMessage THEN 1 ELSE 0 END;
+            DECLARE @InvalidCaseMatched bit = CASE WHEN @BaselineErrorMatched = 1 AND @OptimizedErrorMatched = 1
+                AND @BaselineErrorNumber = @OptimizedErrorNumber AND @BaselineErrorMessage = @OptimizedErrorMessage
+                THEN 1 ELSE 0 END;
+            DECLARE @ErrorMessage nvarchar(2048);
+            SET @ErrorMessage = LEFT(N'Invalid-input case ' + @InvalidCaseName
+                + N' error mismatch: ExpectedCount=1, ActualCount=' + CONVERT(nvarchar(1), @InvalidCaseMatched)
+                + N', DifferenceCount=1, ExpectedErrorNumber=' + CONVERT(nvarchar(20), @ExpectedErrorNumber)
+                + N', BaselineErrorNumber=' + CONVERT(nvarchar(20), @BaselineErrorNumber)
+                + N', OptimizedErrorNumber=' + CONVERT(nvarchar(20), @OptimizedErrorNumber)
+                + N', ExpectedErrorMessage=' + COALESCE(@ExpectedErrorMessage, N'<NULL>')
+                + N', BaselineErrorMessage=' + COALESCE(@BaselineErrorMessage, N'<NULL>')
+                + N', OptimizedErrorMessage=' + COALESCE(@OptimizedErrorMessage, N'<NULL>')
+                + N', BaselineMatched=' + CONVERT(nvarchar(1), @BaselineErrorMatched)
+                + N', OptimizedMatched=' + CONVERT(nvarchar(1), @OptimizedErrorMatched) + N'.', 2048);
             THROW 51514, @ErrorMessage, 1;
         END;
         SET @InvalidCaseNumber += 1;
