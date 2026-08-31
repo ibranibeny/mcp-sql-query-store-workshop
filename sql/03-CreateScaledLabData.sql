@@ -17,6 +17,9 @@ DECLARE @MinimumFreeSpaceMB int = COALESCE(TRY_CONVERT(int, @MinimumFreeSpaceMBV
 DECLARE @MaximumDataFileSizeMB int = COALESCE(TRY_CONVERT(int, @MaximumDataFileSizeMBValue), 65536);
 DECLARE @WorkshopMarker uniqueidentifier = '68A70D6E-62D8-4A77-8F0A-9DA7934DBA7C';
 DECLARE @WorkshopSchemaVersion int = 1;
+DECLARE @WorkshopSetupName sysname = N'MCP SQL Query Store Workshop';
+DECLARE @WorkshopSetupContract nvarchar(200) = N'lab.WorkshopMarker|1|MCP SQL Query Store Workshop';
+DECLARE @WorkshopSetupHash varbinary(32) = HASHBYTES('SHA2_256', CONVERT(varbinary(max), @WorkshopSetupContract));
 
 IF @TargetRowsValue IS NOT NULL AND (TRY_CONVERT(int, @TargetRowsValue) IS NULL OR SQL_VARIANT_PROPERTY(@TargetRowsValue, 'BaseType') NOT IN ('tinyint', 'smallint', 'int', 'bigint'))
     THROW 51300, 'TargetRows override must be an integer.', 1;
@@ -31,10 +34,19 @@ IF @BatchSize NOT BETWEEN 10000 AND 100000 THROW 51305, 'BatchSize must be betwe
 IF @MinimumFreeSpaceMB < 16384 THROW 51306, 'MinimumFreeSpaceMB must be at least 16384.', 1;
 IF @MaximumDataFileSizeMB <= 0 OR @MaximumDataFileSizeMB > 65536 THROW 51307, 'MaximumDataFileSizeMB must be between 1 and 65536.', 1;
 IF DB_NAME() <> N'AdventureWorks2022' THROW 51308, 'This script must run in AdventureWorks2022.', 1;
+IF @WorkshopSetupHash <> 0xADA06F206D3DB321527A5AAB390FC814E28EBB59791967EB99841BF669E1B16B
+    THROW 51327, 'The workshop marker contract hash is invalid.', 1;
 IF SCHEMA_ID(N'lab') IS NULL OR OBJECT_ID(N'lab.WorkshopMarker', N'U') IS NULL
     THROW 51309, 'The workshop marker is required before data generation.', 1;
-IF NOT EXISTS (SELECT 1 FROM lab.WorkshopMarker WHERE MarkerId = @WorkshopMarker AND SchemaVersion = 1)
-    THROW 51310, 'The workshop marker or SchemaVersion is invalid.', 1;
+IF NOT EXISTS
+(
+    SELECT 1 FROM lab.WorkshopMarker
+    WHERE MarkerId = @WorkshopMarker
+      AND SchemaVersion = @WorkshopSchemaVersion
+      AND SetupName = @WorkshopSetupName
+      AND SetupHash = @WorkshopSetupHash
+)
+    THROW 51310, 'The workshop marker contract is invalid.', 1;
 IF EXISTS (SELECT 1 FROM sys.database_query_store_options WHERE actual_state_desc <> N'READ_WRITE')
    OR NOT EXISTS (SELECT 1 FROM sys.database_query_store_options WHERE actual_state_desc = N'READ_WRITE')
     THROW 51311, 'Query Store actual_state_desc must be READ_WRITE.', 1;
@@ -162,6 +174,16 @@ DECLARE @NextId bigint = ISNULL((SELECT MAX(SyntheticSalesID) FROM lab.FactSales
 
 WHILE @NextId <= @TargetRows
 BEGIN
+    IF NOT EXISTS
+    (
+        SELECT 1 FROM lab.WorkshopMarker
+        WHERE MarkerId = @WorkshopMarker
+          AND SchemaVersion = @WorkshopSchemaVersion
+          AND SetupName = @WorkshopSetupName
+          AND SetupHash = @WorkshopSetupHash
+    )
+        THROW 51328, 'The workshop marker contract changed or disappeared during generation.', 1;
+
     DECLARE @ThisBatchSize int = CONVERT(int, CASE WHEN @TargetRows - @NextId + 1 < @BatchSize THEN @TargetRows - @NextId + 1 ELSE @BatchSize END);
     DECLARE @BatchEnd bigint = @NextId + @ThisBatchSize - 1;
     DECLARE @BatchAvailableSpaceMB bigint;

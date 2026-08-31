@@ -15,6 +15,9 @@ DECLARE @LogPath nvarchar(4000) = NULLIF(LTRIM(RTRIM(TRY_CONVERT(nvarchar(4000),
 DECLARE @DatabaseName sysname = NULLIF(LTRIM(RTRIM(TRY_CONVERT(sysname, SESSION_CONTEXT(N'DatabaseName')))), N'');
 DECLARE @WorkshopMarker uniqueidentifier = '68A70D6E-62D8-4A77-8F0A-9DA7934DBA7C';
 DECLARE @WorkshopSchemaVersion int = 1;
+DECLARE @WorkshopSetupName sysname = N'MCP SQL Query Store Workshop';
+DECLARE @WorkshopSetupContract nvarchar(200) = N'lab.WorkshopMarker|1|MCP SQL Query Store Workshop';
+DECLARE @WorkshopSetupHash varbinary(32) = HASHBYTES('SHA2_256', CONVERT(varbinary(max), @WorkshopSetupContract));
 DECLARE @FreshRestore bit = 0;
 DECLARE @ConfigureSql nvarchar(max) = N'ALTER DATABASE ' + QUOTENAME(@DatabaseName) + N' SET COMPATIBILITY_LEVEL = 160;
 ALTER DATABASE ' + QUOTENAME(@DatabaseName) + N' SET QUERY_STORE = ON;
@@ -29,7 +32,6 @@ ALTER DATABASE ' + QUOTENAME(@DatabaseName) + N' SET QUERY_STORE
     SIZE_BASED_CLEANUP_MODE = AUTO,
     WAIT_STATS_CAPTURE_MODE = ON
 );';
-DECLARE @SetupHash varbinary(32) = HASHBYTES('SHA2_256', CONVERT(varbinary(max), @ConfigureSql));
 
 IF @BackupPath IS NULL THROW 51200, 'BackupPath is required.', 1;
 IF @DataPath IS NULL THROW 51201, 'DataPath is required.', 1;
@@ -37,6 +39,8 @@ IF @LogPath IS NULL THROW 51202, 'LogPath is required.', 1;
 IF @DatabaseName IS NULL THROW 51203, 'DatabaseName is required.', 1;
 IF @DatabaseName <> N'AdventureWorks2022'
     THROW 51204, 'DatabaseName must be exactly AdventureWorks2022.', 1;
+IF @WorkshopSetupHash <> 0xADA06F206D3DB321527A5AAB390FC814E28EBB59791967EB99841BF669E1B16B
+    THROW 51214, 'The workshop marker contract hash is invalid.', 1;
 
 /* Permit only normalized local drive paths. UNC/device paths, traversal, wildcards,
    control characters, quotes, comments, and statement delimiters are rejected. */
@@ -75,12 +79,12 @@ BEGIN
            (
                SELECT 1 FROM lab.WorkshopMarker
                WHERE MarkerId = @MarkerId AND SchemaVersion = @SchemaVersion
-                 AND SetupName = N''QUERY_STORE_SETUP'' AND SetupDefinitionHash = @SetupHash
+               AND SetupName = @SetupName AND SetupHash = @SetupHash
            ) SET @Valid = 1;';
     EXEC sys.sp_executesql @ExistingMarkerSql,
-        N'@MarkerId uniqueidentifier, @SchemaVersion int, @SetupHash varbinary(32), @Valid bit OUTPUT',
+         N'@MarkerId uniqueidentifier, @SchemaVersion int, @SetupName sysname, @SetupHash varbinary(32), @Valid bit OUTPUT',
         @MarkerId = @WorkshopMarker, @SchemaVersion = @WorkshopSchemaVersion,
-        @SetupHash = @SetupHash,
+         @SetupName = @WorkshopSetupName, @SetupHash = @WorkshopSetupHash,
         @Valid = @ExistingMarkerValid OUTPUT;
     IF @ExistingMarkerValid <> 1
         THROW 51208, 'Existing AdventureWorks2022 lacks the exact workshop marker; refusing to overwrite or adopt it.', 1;
@@ -132,25 +136,32 @@ EXEC sys.sp_executesql @ConfigureSql;
 
 IF @FreshRestore = 1
 BEGIN
+    DECLARE @CreateSchemaSql nvarchar(max) = N'CREATE SCHEMA lab AUTHORIZATION dbo;';
+    DECLARE @UseTargetDatabaseSql nvarchar(max) = N'USE ' + QUOTENAME(@DatabaseName) + N';
+        IF SCHEMA_ID(N''lab'') IS NULL
+            EXEC sys.sp_executesql @CreateSchemaSql;';
+    EXEC sys.sp_executesql @UseTargetDatabaseSql,
+        N'@CreateSchemaSql nvarchar(max)', @CreateSchemaSql = @CreateSchemaSql;
+
     DECLARE @CreateMarkerSql nvarchar(max) = N'USE ' + QUOTENAME(@DatabaseName) + N';
-        CREATE SCHEMA lab AUTHORIZATION dbo;
         CREATE TABLE lab.WorkshopMarker
         (
             MarkerId uniqueidentifier NOT NULL,
             SchemaVersion int NOT NULL,
             SetupName sysname NOT NULL,
-            SetupDefinitionHash varbinary(32) NOT NULL,
+            SetupHash varbinary(32) NOT NULL,
             CreatedAtUtc datetime2(0) NOT NULL,
             LastVerifiedAtUtc datetime2(0) NOT NULL,
             CONSTRAINT PK_WorkshopMarker PRIMARY KEY (MarkerId, SchemaVersion)
         );
         INSERT lab.WorkshopMarker
-            (MarkerId, SchemaVersion, SetupName, SetupDefinitionHash, CreatedAtUtc, LastVerifiedAtUtc)
+            (MarkerId, SchemaVersion, SetupName, SetupHash, CreatedAtUtc, LastVerifiedAtUtc)
         VALUES
-            (@MarkerId, @SchemaVersion, N''QUERY_STORE_SETUP'', @SetupHash, SYSUTCDATETIME(), SYSUTCDATETIME());';
+            (@MarkerId, @SchemaVersion, @SetupName, @SetupHash, SYSUTCDATETIME(), SYSUTCDATETIME());';
     EXEC sys.sp_executesql @CreateMarkerSql,
-        N'@MarkerId uniqueidentifier, @SchemaVersion int, @SetupHash varbinary(32)',
-        @MarkerId = @WorkshopMarker, @SchemaVersion = @WorkshopSchemaVersion, @SetupHash = @SetupHash;
+        N'@MarkerId uniqueidentifier, @SchemaVersion int, @SetupName sysname, @SetupHash varbinary(32)',
+        @MarkerId = @WorkshopMarker, @SchemaVersion = @WorkshopSchemaVersion,
+        @SetupName = @WorkshopSetupName, @SetupHash = @WorkshopSetupHash;
 END;
 
 DECLARE @VerifyState bit = 0;
@@ -168,7 +179,7 @@ DECLARE @VerifyStateSql nvarchar(max) = N'USE ' + QUOTENAME(@DatabaseName) + N';
     (
         SELECT 1 FROM lab.WorkshopMarker
         WHERE MarkerId = @MarkerId AND SchemaVersion = @SchemaVersion
-            AND SetupName = N''QUERY_STORE_SETUP'' AND SetupDefinitionHash = @SetupHash
+            AND SetupName = @SetupName AND SetupHash = @SetupHash
     )
         AND EXISTS (SELECT 1 FROM sys.databases WHERE database_id = DB_ID() AND compatibility_level = 160)
     BEGIN
@@ -177,9 +188,10 @@ DECLARE @VerifyStateSql nvarchar(max) = N'USE ' + QUOTENAME(@DatabaseName) + N';
         SET @Valid = 1;
     END;';
 EXEC sys.sp_executesql @VerifyStateSql,
-    N'@MarkerId uniqueidentifier, @SchemaVersion int, @SetupHash varbinary(32), @Valid bit OUTPUT',
+    N'@MarkerId uniqueidentifier, @SchemaVersion int, @SetupName sysname, @SetupHash varbinary(32), @Valid bit OUTPUT',
     @MarkerId = @WorkshopMarker, @SchemaVersion = @WorkshopSchemaVersion,
-    @SetupHash = @SetupHash, @Valid = @VerifyState OUTPUT;
+    @SetupName = @WorkshopSetupName, @SetupHash = @WorkshopSetupHash,
+    @Valid = @VerifyState OUTPUT;
 IF @VerifyState <> 1
     THROW 51213, 'Database marker or effective Query Store state does not match the workshop contract.', 1;
 

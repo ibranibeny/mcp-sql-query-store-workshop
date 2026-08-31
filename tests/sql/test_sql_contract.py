@@ -525,6 +525,50 @@ def test_restore_never_overwrites_and_existing_database_requires_exact_marker() 
     assert "@MARKERID" in fresh and "@WORKSHOPMARKER" in text
 
 
+def test_restore_creates_schema_as_first_statement_in_nested_target_database_batch() -> None:
+    raw = sql("02-RestoreAndConfigureDatabase.sql")
+    text = normalized("02-RestoreAndConfigureDatabase.sql")
+    schema_batch = re.search(
+        r"DECLARE\s+@CreateSchemaSql\s+nvarchar\(max\)\s*=\s*N'(?P<body>.*?)';",
+        raw,
+        re.IGNORECASE | re.DOTALL,
+    )
+    assert schema_batch, "schema creation must have a dedicated dynamic batch"
+    assert re.match(r"\s*CREATE\s+SCHEMA\s+lab\s+AUTHORIZATION\s+dbo\s*;", schema_batch.group("body"), re.IGNORECASE)
+    assert re.search(
+        r"N'USE '\s*\+\s*QUOTENAME\(@DATABASENAME\).*?"
+        r"EXEC\s+SYS\.SP_EXECUTESQL\s+@CREATESCHEMASQL",
+        text,
+    )
+    marker_batch = re.search(
+        r"DECLARE\s+@CreateMarkerSql\s+nvarchar\(max\)\s*=\s*N'(?P<body>.*?)';",
+        raw,
+        re.IGNORECASE | re.DOTALL,
+    )
+    assert marker_batch
+    assert not re.search(r"CREATE\s+SCHEMA", marker_batch.group("body"), re.IGNORECASE)
+
+
+def test_restore_marker_contract_is_complete_and_exact() -> None:
+    text = normalized("02-RestoreAndConfigureDatabase.sql")
+    assert "N'MCP SQL QUERY STORE WORKSHOP'" in text
+    assert "HASHBYTES('SHA2_256'" in text
+    assert "0XADA06F206D3DB321527A5AAB390FC814E28EBB59791967EB99841BF669E1B16B" in text
+    assert "SETUPHASH VARBINARY(32) NOT NULL" in text
+    assert "SETUPDEFINITIONHASH" not in text
+    for section in (
+        text[text.index("IF DB_ID(@DATABASENAME) IS NOT NULL"):text.index("IF DB_ID(@DATABASENAME) IS NULL")],
+        text[text.index("DECLARE @VERIFYSTATESQL"):],
+    ):
+        for exact_match in (
+            "MARKERID = @MARKERID",
+            "SCHEMAVERSION = @SCHEMAVERSION",
+            "SETUPNAME = @SETUPNAME",
+            "SETUPHASH = @SETUPHASH",
+        ):
+            assert exact_match in section
+
+
 def test_restore_configures_and_verifies_exact_query_store_state() -> None:
     text = normalized("02-RestoreAndConfigureDatabase.sql")
     assert "COMPATIBILITY_LEVEL = 160" in text
@@ -541,7 +585,7 @@ def test_restore_configures_and_verifies_exact_query_store_state() -> None:
     assert "SYS.DATABASE_QUERY_STORE_OPTIONS" in text
     assert re.search(r"ACTUAL_STATE_DESC\s*=\s*N''?READ_WRITE''?", text)
     assert re.search(r"DESIRED_STATE_DESC\s*=\s*N''?READ_WRITE''?", text)
-    assert "QUERY_STORE_SETUP" in text and "HASHBYTES('SHA2_256'" in text
+    assert "MCP SQL QUERY STORE WORKSHOP" in text and "HASHBYTES('SHA2_256'" in text
     assert "SYSUTCDATETIME()" in text
 
 
@@ -573,10 +617,38 @@ def test_generator_requires_marker_database_and_query_store_before_changes() -> 
     assert "DB_NAME() <> N'ADVENTUREWORKS2022'" in guards
     assert "LAB.WORKSHOPMARKER" in guards
     assert "68A70D6E-62D8-4A77-8F0A-9DA7934DBA7C" in guards
-    assert "SCHEMAVERSION = 1" in guards
+    assert "@WORKSHOPSCHEMAVERSION INT = 1" in guards
+    assert "SCHEMAVERSION = @WORKSHOPSCHEMAVERSION" in guards
     assert "SYS.DATABASE_QUERY_STORE_OPTIONS" in guards
     assert "ACTUAL_STATE_DESC <> N'READ_WRITE'" in guards
     assert guards.count("THROW") >= 3
+
+
+def test_generator_validates_complete_marker_contract_initially_and_in_every_batch() -> None:
+    text = normalized("03-CreateScaledLabData.sql")
+    assert "N'MCP SQL QUERY STORE WORKSHOP'" in text
+    assert "HASHBYTES('SHA2_256'" in text
+    assert "0XADA06F206D3DB321527A5AAB390FC814E28EBB59791967EB99841BF669E1B16B" in text
+    initial = text[:text.index("IF EXISTS (SELECT 1 FROM SYS.DATABASE_QUERY_STORE_OPTIONS")]
+    loop = text[text.index("WHILE @NEXTID <= @TARGETROWS"):]
+    first_capacity_read = loop.index("SYS.DM_OS_VOLUME_STATS")
+    first_insert = loop.index("INSERT LAB.FACTSALES")
+    for section in (initial, loop):
+        for exact_match in (
+            "MARKERID = @WORKSHOPMARKER",
+            "SCHEMAVERSION = @WORKSHOPSCHEMAVERSION",
+            "SETUPNAME = @WORKSHOPSETUPNAME",
+            "SETUPHASH = @WORKSHOPSETUPHASH",
+        ):
+            assert exact_match in section
+    marker_match = re.search(r"IF NOT EXISTS\s*\(\s*SELECT 1 FROM LAB\.WORKSHOPMARKER", loop)
+    assert marker_match
+    assert len(re.findall(r"IF NOT EXISTS\s*\(\s*SELECT 1 FROM LAB\.WORKSHOPMARKER", loop)) == 1
+    for field in ("MARKERID", "SCHEMAVERSION", "SETUPNAME", "SETUPHASH"):
+        assert len(re.findall(rf"\b{field}\s*=", loop[marker_match.start():first_capacity_read])) == 1
+    marker_recheck = marker_match.start()
+    assert marker_recheck < first_capacity_read < first_insert
+    assert re.search(r"IF NOT EXISTS\s*\(\s*SELECT 1 FROM LAB\.WORKSHOPMARKER.*?THROW", loop)
 
 
 def test_numbers_generation_uses_bounded_top_cross_joins() -> None:
