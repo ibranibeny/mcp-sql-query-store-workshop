@@ -4,24 +4,30 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="description" content="{{ site.description }}">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://cdn.jsdelivr.net; style-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; upgrade-insecure-requests">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https://cdn.jsdelivr.net; object-src 'none'; base-uri 'none'; form-action 'self'; upgrade-insecure-requests">
   <title>{{ page.title }} | {{ site.title }}</title>
   <link rel="stylesheet" href="{{ asset_prefix }}/styles.css">
-  <script type="module" src="https://cdn.jsdelivr.net/npm/mermaid@11.12.0/dist/mermaid.esm.min.mjs"></script>
   <script type="module" src="{{ asset_prefix }}/app.js"></script>
 </head>
-<body>
+<body data-page-route="{{ page.route }}">
   <a class="skip-link" href="#main-content">Skip to main content</a>
-  <header>
-    <p class="site-title"><a href="{{ pages[0].href }}">{{ site.title }}</a></p>
-    <p>{{ site.description }}</p>
+  <header class="site-header">
+    <div>
+      <p class="site-kicker">SQL PERFORMANCE LAB // EVIDENCE FIRST</p>
+      <p class="site-title"><a href="{{ pages[0].href }}">{{ site.title }}</a></p>
+      <p class="site-description">{{ site.description }}</p>
+    </div>
+    <button class="nav-toggle" type="button" data-nav-toggle aria-controls="module-navigation" aria-expanded="false">
+      <span aria-hidden="true">☰</span>
+      Modules
+    </button>
   </header>
-  <nav aria-label="Workshop modules">
+  <nav id="module-navigation" class="module-navigation" aria-label="Workshop modules" data-open="false">
     <ol><!--{% for item in pages %}-->
       <li>
         <a href="{{ item.href }}"{% if item.route == page.route %} aria-current="page"{% endif %}>
-          <span>{{ item.phase }}</span>
-          {{ item.title }}
+          <span class="module-phase">{{ item.phase }}</span>
+          <span class="module-title">{{ item.title }}</span>
         </a>
       </li>
       <!--{% endfor %}-->
@@ -30,7 +36,7 @@
   <main id="main-content" tabindex="-1">
     {% block content %}{% endblock %}
   </main>
-  <footer>
+  <footer class="site-footer">
     <p>Evidence-driven SQL tuning with human review. Do not run the workshop workload against production.</p>
   </footer>
 </body>

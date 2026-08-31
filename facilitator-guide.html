@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="An evidence-driven L400 workshop for optimizing a SQL Server stored procedure with GitHub Copilot and Microsoft SQL MCP.">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https://cdn.jsdelivr.net; object-src 'none'; base-uri 'none'; form-action 'self'; upgrade-insecure-requests">
+  <title>Facilitator guide | MCP SQL Query Store Workshop</title>
+  <link rel="stylesheet" href="assets/styles.css">
+  <script type="module" src="assets/app.js"></script>
+</head>
+<body data-page-route="facilitator-guide.html">
+  <a class="skip-link" href="#main-content">Skip to main content</a>
+  <header class="site-header">
+    <div>
+      <p class="site-kicker">SQL PERFORMANCE LAB // EVIDENCE FIRST</p>
+      <p class="site-title"><a href="index.html">MCP SQL Query Store Workshop</a></p>
+      <p class="site-description">An evidence-driven L400 workshop for optimizing a SQL Server stored procedure with GitHub Copilot and Microsoft SQL MCP.</p>
+    </div>
+    <button class="nav-toggle" type="button" data-nav-toggle aria-controls="module-navigation" aria-expanded="false">
+      <span aria-hidden="true">☰</span>
+      Modules
+    </button>
+  </header>
+  <nav id="module-navigation" class="module-navigation" aria-label="Workshop modules" data-open="false">
+    <ol><!---->
+      <li>
+        <a href="index.html">
+          <span class="module-phase">Workshop 00</span>
+          <span class="module-title">Orientation and safety contract</span>
+        </a>
+      </li>
+      <!---->
+      <li>
+        <a href="facilitator-guide.html" aria-current="page">
+          <span class="module-phase">Facilitator resource</span>
+          <span class="module-title">Facilitator guide</span>
+        </a>
+      </li>
+      <!---->
+    </ol>
+  </nav>
+  <main id="main-content" tabindex="-1">
+    
+<article>
+  <header class="module-header">
+    <p class="module-meta">Facilitator resource · 0 minutes</p>
+    <h1>Facilitator guide</h1>
+    <div class="progress-control">
+      <button type="button" data-progress-toggle data-module-id="facilitator-guide.html" aria-pressed="false">
+        Mark module complete
+      </button>
+      <span role="status" data-progress-status aria-live="polite">Progress is stored only in this browser.</span>
+    </div>
+  </header>
+  <aside class="evidence-workbench" aria-labelledby="evidence-path-title">
+    <p class="workbench-label">DBA DECISION PATH</p>
+    <h2 id="evidence-path-title">Move claims through evidence</h2>
+    <ol class="evidence-path">
+      <li data-evidence-stage="hypothesis">TARGET / HYPOTHESIS</li>
+      <li data-evidence-stage="measured">MEASURED</li>
+      <li data-evidence-stage="decision">DECISION</li>
+    </ol>
+  </aside>
+  <div class="workshop-content">
+    <h1 id="facilitator-guide">Facilitator guide<a class="headerlink" href="#facilitator-guide" title="Permanent link">&para;</a></h1>
+<h2 id="delivery-contract">Delivery contract<a class="headerlink" href="#delivery-contract" title="Permanent link">&para;</a></h2>
+<p>This L400 workshop demonstrates how GitHub Copilot, grounded by Microsoft SQL MCP and verified SQL Server evidence, helps a DBA optimize a stored procedure. Preserve the distinction between observation, hypothesis, proposal, and evidence-backed decision throughout the day.</p>
+<p><strong>Do not run the workshop workload scripts against production.</strong> Repository build, test, and static-site generation are local operations and must not create Azure resources.</p>
+<h2 id="six-hour-agenda">Six-hour agenda<a class="headerlink" href="#six-hour-agenda" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th style="text-align: right;">Time</th>
+<th>Module</th>
+<th>Outcome</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: right;">15 min</td>
+<td>Orientation and safety contract</td>
+<td>Establish licensing, cost, stop conditions, and evidence labels.</td>
+</tr>
+<tr>
+<td style="text-align: right;">35 min</td>
+<td>MCP, SQL MCP Server, and GitHub Copilot</td>
+<td>Distinguish model, client, server, transport, tools, MSSQL context, and approvals.</td>
+</tr>
+<tr>
+<td style="text-align: right;">25 min</td>
+<td>Scenario and two-tier architecture</td>
+<td>Trace the trust boundary from Windows 11 tooling to private SQL Server.</td>
+</tr>
+<tr>
+<td style="text-align: right;">60 min</td>
+<td>Native Az PowerShell deployment</td>
+<td>Run preflight, review the plan card, obtain separate approval, and deploy.</td>
+</tr>
+<tr>
+<td style="text-align: right;">10 min</td>
+<td>Break</td>
+<td>No lab action.</td>
+</tr>
+<tr>
+<td style="text-align: right;">65 min</td>
+<td>Build and reproduce the problem</td>
+<td>Restore AdventureWorks, scale data, enable Query Store, baseline, and create bounded pressure.</td>
+</tr>
+<tr>
+<td style="text-align: right;">65 min</td>
+<td>Investigate through Visual Studio Code</td>
+<td>Explore schema, explain logic, inspect plans, and retrieve allowlisted evidence.</td>
+</tr>
+<tr>
+<td style="text-align: right;">10 min</td>
+<td>Break</td>
+<td>No lab action.</td>
+</tr>
+<tr>
+<td style="text-align: right;">55 min</td>
+<td>Optimize and prove</td>
+<td>Create a candidate, validate equivalence, execute A/B tests, and evaluate metrics.</td>
+</tr>
+<tr>
+<td style="text-align: right;">20 min</td>
+<td>Teardown and review</td>
+<td>Remove Azure resources, verify absence, and discuss production controls.</td>
+</tr>
+<tr>
+<td style="text-align: right;"><strong>360 min</strong></td>
+<td><strong>Total</strong></td>
+<td><strong>Six hours.</strong></td>
+</tr>
+</tbody>
+</table>
+<p>Lunch is outside the six-hour agenda.</p>
+<h2 id="deployment-approval-boundary">Deployment approval boundary<a class="headerlink" href="#deployment-approval-boundary" title="Permanent link">&para;</a></h2>
+<p>Deployment preflight and deployment approval are separate checkpoints:</p>
+<ol>
+<li>Run the non-destructive preflight. It may perform read-only validation of authentication, quota, regional VM/image availability, licensing attestation, source IPv4, naming, and configuration.</li>
+<li>Present the completed plan card, including billable VM, SQL Server Enterprise, disk, public IP, NAT Gateway, and network implications.</li>
+<li>Ask for <strong>explicit billable-deployment approval</strong> only after the facilitator reviews that plan card.</li>
+<li>Without that approval, stop. Do not invoke the deployment path and do not create or modify Azure resources.</li>
+</ol>
+<p><span class="evidence-label" data-evidence-label="ASSUMPTION">ASSUMPTION</span> Marketplace availability and capacity can change. Preflight must revalidate them immediately before any separately approved deployment.</p>
+<h2 id="public-ingress-boundary">Public ingress boundary<a class="headerlink" href="#public-ingress-boundary" title="Permanent link">&para;</a></h2>
+<ul>
+<li>Only the Windows 11 administration VM has a public endpoint.</li>
+<li>Public RDP is restricted to TCP 3389 from the facilitator's confirmed IPv4 <code>/32</code>.</li>
+<li>The SQL Server VM has no public IP.</li>
+<li>SQL Server traffic uses encrypted private TDS on TCP 1433 from the administration tier.</li>
+<li>Do not broaden RDP or SQL ingress as a troubleshooting shortcut.</li>
+<li>Confirm the public IP and all workshop resources are absent after teardown.</li>
+</ul>
+<h2 id="facilitation-checkpoints">Facilitation checkpoints<a class="headerlink" href="#facilitation-checkpoints" title="Permanent link">&para;</a></h2>
+<ul>
+<li>Before pressure: confirm the database, Resource Governor pool, workload tags, timeout, and stop path.</li>
+<li>Before accepting a proposal: prove result equivalence and keep conditions unchanged.</li>
+<li>During measurement: record actual values; targets are not measured evidence.</li>
+<li>On any threshold breach: stop the bounded workload and preserve diagnostics.</li>
+<li>Before closing: remove the lab resource group and verify resource absence.</li>
+</ul>
+<p><span class="evidence-label" data-evidence-label="TARGET">TARGET</span> The approximately 80% to 40% grant-utilization comparison is a target for the isolated workshop query-workspace pool, not a promised result or whole-server memory claim.</p>
+  </div>
+  
+</article>
+<nav class="page-navigation" aria-label="Previous and next pages">
+  
+  <a rel="prev" href="index.html">Previous: Orientation and safety contract</a>
+  
+  
+</nav>
+
+  </main>
+  <footer class="site-footer">
+    <p>Evidence-driven SQL tuning with human review. Do not run the workshop workload against production.</p>
+  </footer>
+</body>
+</html>

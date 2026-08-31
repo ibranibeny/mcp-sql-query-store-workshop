@@ -2,15 +2,58 @@
 
 {% block content %}
 <article>
-  <header>
-    <p>{{ page.phase }} · {{ page.durationMinutes }} minutes</p>
+  <header class="module-header">
+    <p class="module-meta">{{ page.phase }} · {{ page.durationMinutes }} minutes</p>
     <h1>{{ page.title }}</h1>
+    <div class="progress-control">
+      <button type="button" data-progress-toggle data-module-id="{{ page.route }}" aria-pressed="false">
+        Mark module complete
+      </button>
+      <span role="status" data-progress-status aria-live="polite">Progress is stored only in this browser.</span>
+    </div>
   </header>
+  <aside class="evidence-workbench" aria-labelledby="evidence-path-title">
+    <p class="workbench-label">DBA DECISION PATH</p>
+    <h2 id="evidence-path-title">Move claims through evidence</h2>
+    <ol class="evidence-path">
+      <li data-evidence-stage="hypothesis">TARGET / HYPOTHESIS</li>
+      <li data-evidence-stage="measured">MEASURED</li>
+      <li data-evidence-stage="decision">DECISION</li>
+    </ol>
+  </aside>
   <div class="workshop-content">
     {{ content | safe }}
   </div>
+  {% if page.route == "index.html" %}
+  <section class="grant-workbench" aria-labelledby="grant-workbench-title">
+    <p class="workbench-label">QUERY GRANT CHECK</p>
+    <h2 id="grant-workbench-title">Compare entered grant utilization</h2>
+    <p>Enter values from your own controlled run. The workshop bands are <strong>TARGET</strong> values, not measured results.</p>
+    <form data-grant-calculator action="#grant-result" method="get">
+      <fieldset>
+        <legend>Baseline values</legend>
+        <label for="baseline-granted-kb">Granted memory (KB)</label>
+        <input id="baseline-granted-kb" name="baselineGrantedKb" type="number" min="0" step="any" required inputmode="decimal">
+        <label for="baseline-total-kb">Total memory (KB)</label>
+        <input id="baseline-total-kb" name="baselineTotalKb" type="number" min="0.000001" step="any" required inputmode="decimal">
+      </fieldset>
+      <fieldset>
+        <legend>Optimized values</legend>
+        <label for="optimized-granted-kb">Granted memory (KB)</label>
+        <input id="optimized-granted-kb" name="optimizedGrantedKb" type="number" min="0" step="any" required inputmode="decimal">
+        <label for="optimized-total-kb">Total memory (KB)</label>
+        <input id="optimized-total-kb" name="optimizedTotalKb" type="number" min="0.000001" step="any" required inputmode="decimal">
+      </fieldset>
+      <button type="submit">Calculate comparison</button>
+      <output id="grant-result" for="baseline-granted-kb baseline-total-kb optimized-granted-kb optimized-total-kb" aria-live="polite">
+        TARGET: baseline 75–85%; optimized 35–45%.
+      </output>
+      <noscript>Divide granted memory by total memory and multiply by 100 to calculate each utilization percentage.</noscript>
+    </form>
+  </section>
+  {% endif %}
 </article>
-<nav aria-label="Previous and next pages">
+<nav class="page-navigation" aria-label="Previous and next pages">
   {% if previous %}
   <a rel="prev" href="{{ previous.href }}">Previous: {{ previous.title }}</a>
   {% endif %}

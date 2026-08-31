@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="An evidence-driven L400 workshop for optimizing a SQL Server stored procedure with GitHub Copilot and Microsoft SQL MCP.">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https://cdn.jsdelivr.net; object-src 'none'; base-uri 'none'; form-action 'self'; upgrade-insecure-requests">
+  <title>Orientation and safety contract | MCP SQL Query Store Workshop</title>
+  <link rel="stylesheet" href="assets/styles.css">
+  <script type="module" src="assets/app.js"></script>
+</head>
+<body data-page-route="index.html">
+  <a class="skip-link" href="#main-content">Skip to main content</a>
+  <header class="site-header">
+    <div>
+      <p class="site-kicker">SQL PERFORMANCE LAB // EVIDENCE FIRST</p>
+      <p class="site-title"><a href="index.html">MCP SQL Query Store Workshop</a></p>
+      <p class="site-description">An evidence-driven L400 workshop for optimizing a SQL Server stored procedure with GitHub Copilot and Microsoft SQL MCP.</p>
+    </div>
+    <button class="nav-toggle" type="button" data-nav-toggle aria-controls="module-navigation" aria-expanded="false">
+      <span aria-hidden="true">☰</span>
+      Modules
+    </button>
+  </header>
+  <nav id="module-navigation" class="module-navigation" aria-label="Workshop modules" data-open="false">
+    <ol><!---->
+      <li>
+        <a href="index.html" aria-current="page">
+          <span class="module-phase">Workshop 00</span>
+          <span class="module-title">Orientation and safety contract</span>
+        </a>
+      </li>
+      <!---->
+      <li>
+        <a href="facilitator-guide.html">
+          <span class="module-phase">Facilitator resource</span>
+          <span class="module-title">Facilitator guide</span>
+        </a>
+      </li>
+      <!---->
+    </ol>
+  </nav>
+  <main id="main-content" tabindex="-1">
+    
+<article>
+  <header class="module-header">
+    <p class="module-meta">Workshop 00 · 15 minutes</p>
+    <h1>Orientation and safety contract</h1>
+    <div class="progress-control">
+      <button type="button" data-progress-toggle data-module-id="index.html" aria-pressed="false">
+        Mark module complete
+      </button>
+      <span role="status" data-progress-status aria-live="polite">Progress is stored only in this browser.</span>
+    </div>
+  </header>
+  <aside class="evidence-workbench" aria-labelledby="evidence-path-title">
+    <p class="workbench-label">DBA DECISION PATH</p>
+    <h2 id="evidence-path-title">Move claims through evidence</h2>
+    <ol class="evidence-path">
+      <li data-evidence-stage="hypothesis">TARGET / HYPOTHESIS</li>
+      <li data-evidence-stage="measured">MEASURED</li>
+      <li data-evidence-stage="decision">DECISION</li>
+    </ol>
+  </aside>
+  <div class="workshop-content">
+    <h1 id="orientation-and-safety-contract">Orientation and safety contract<a class="headerlink" href="#orientation-and-safety-contract" title="Permanent link">&para;</a></h1>
+<h2 id="primary-workshop-goal">Primary workshop goal<a class="headerlink" href="#primary-workshop-goal" title="Permanent link">&para;</a></h2>
+<p>Use <strong>GitHub Copilot</strong>, grounded by <strong>Microsoft SQL MCP</strong> and verified SQL Server evidence, to help a DBA optimize a complex stored procedure while preserving its result contract. Copilot proposes and explains; the DBA validates, measures, and decides.</p>
+<p><span class="evidence-label" data-evidence-label="DOC-VERIFIED">DOC-VERIFIED</span> <a href="https://learn.microsoft.com/azure/data-api-builder/mcp/overview">SQL MCP Server</a> exposes configured database entities through Data API Builder permissions, while <a href="https://learn.microsoft.com/sql/relational-databases/security/authentication-access/getting-started-with-database-engine-permissions">SQL Server Database Engine permissions</a> continue to authorize database actions. This controlled tool boundary is not permission to bypass database authorization or human review.</p>
+<h2 id="architecture-and-public-ingress-boundary">Architecture and public ingress boundary<a class="headerlink" href="#architecture-and-public-ingress-boundary" title="Permanent link">&para;</a></h2>
+<pre class="mermaid">flowchart LR
+    F["Facilitator"] --&gt;|"Public RDP 3389 from approved /32 only"| A["Windows 11 administration VM"]
+    A --&gt;|"Private encrypted TDS 1433"| S["SQL Server 2022 Enterprise VM&lt;br/&gt;No public IP"]</pre>
+<p>Only the Windows 11 administration VM has public ingress. Its RDP endpoint is restricted to the facilitator's confirmed IPv4 <code>/32</code>. The SQL VM has <strong>no public IP</strong> and accepts SQL traffic from the administration tier over the private virtual network only.</p>
+<p><span class="evidence-label" data-evidence-label="ASSUMPTION">ASSUMPTION</span> The facilitator must validate the current source IPv4 address, Windows 11 licensing eligibility, regional capacity, and workshop configuration during preflight.</p>
+<h2 id="measurement-target-not-a-result">Measurement target, not a result<a class="headerlink" href="#measurement-target-not-a-result" title="Permanent link">&para;</a></h2>
+<p><span class="evidence-label" data-evidence-label="TARGET">TARGET</span> Under unchanged data, parameters, concurrency, SQL memory configuration, and Resource Governor pool configuration, move workshop-pool query-execution grant utilization from an approximately <strong>80% baseline</strong> (75–85% target band) toward approximately <strong>40% optimized</strong> (35–45% target band).</p>
+<p>This is a <strong>target</strong>, not a measured result. It is not a claim about Task Manager, total host memory, SQL Server process memory, Total Server Memory, or buffer-pool usage. Only evidence captured from a real lab run may carry <code>[!LAB-MEASURED]</code>. If the target is missed, report the observed outcome; never substitute the target values.</p>
+<h2 id="safety-contract">Safety contract<a class="headerlink" href="#safety-contract" title="Permanent link">&para;</a></h2>
+<ul>
+<li><strong>Do not run the workshop workload scripts against production.</strong></li>
+<li>Use only the disposable, marked workshop environment.</li>
+<li>Keep the SQL VM private; never add a public IP or broad SQL ingress rule.</li>
+<li>Treat Copilot output as a hypothesis or proposal until correctness and performance evidence supports it.</li>
+<li>Stop when a timeout, safety threshold, unexpected object, or unapproved cost boundary is encountered.</li>
+<li>Azure deployment is a separate billable action. Repository build and test commands create no Azure resources.</li>
+</ul>
+<p><span class="evidence-label" data-evidence-label="DOC-VERIFIED">DOC-VERIFIED</span> The SQL MCP and SQL Server authorization claims above link to their official Microsoft Learn sources.</p>
+<p><span class="evidence-label" data-evidence-label="SUBSCRIPTION-VALIDATED">SUBSCRIPTION-VALIDATED</span> Subscription-specific availability must be revalidated by the deployment preflight at the time of use.</p>
+<h2 id="evidence-language">Evidence language<a class="headerlink" href="#evidence-language" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Label</th>
+<th>Use</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>DOC-VERIFIED</code></td>
+<td>Backed by a cited official Microsoft source.</td>
+</tr>
+<tr>
+<td><code>SUBSCRIPTION-VALIDATED</code></td>
+<td>Confirmed read-only against a named subscription context and date.</td>
+</tr>
+<tr>
+<td><code>LAB-MEASURED</code></td>
+<td>Captured from an actual workshop run.</td>
+</tr>
+<tr>
+<td><code>ASSUMPTION</code></td>
+<td>Requires facilitator validation before use.</td>
+</tr>
+<tr>
+<td><code>TARGET</code></td>
+<td>Desired outcome; never presented as an observed result.</td>
+</tr>
+</tbody>
+</table>
+  </div>
+  
+  <section class="grant-workbench" aria-labelledby="grant-workbench-title">
+    <p class="workbench-label">QUERY GRANT CHECK</p>
+    <h2 id="grant-workbench-title">Compare entered grant utilization</h2>
+    <p>Enter values from your own controlled run. The workshop bands are <strong>TARGET</strong> values, not measured results.</p>
+    <form data-grant-calculator action="#grant-result" method="get">
+      <fieldset>
+        <legend>Baseline values</legend>
+        <label for="baseline-granted-kb">Granted memory (KB)</label>
+        <input id="baseline-granted-kb" name="baselineGrantedKb" type="number" min="0" step="any" required inputmode="decimal">
+        <label for="baseline-total-kb">Total memory (KB)</label>
+        <input id="baseline-total-kb" name="baselineTotalKb" type="number" min="0.000001" step="any" required inputmode="decimal">
+      </fieldset>
+      <fieldset>
+        <legend>Optimized values</legend>
+        <label for="optimized-granted-kb">Granted memory (KB)</label>
+        <input id="optimized-granted-kb" name="optimizedGrantedKb" type="number" min="0" step="any" required inputmode="decimal">
+        <label for="optimized-total-kb">Total memory (KB)</label>
+        <input id="optimized-total-kb" name="optimizedTotalKb" type="number" min="0.000001" step="any" required inputmode="decimal">
+      </fieldset>
+      <button type="submit">Calculate comparison</button>
+      <output id="grant-result" for="baseline-granted-kb baseline-total-kb optimized-granted-kb optimized-total-kb" aria-live="polite">
+        TARGET: baseline 75–85%; optimized 35–45%.
+      </output>
+      <noscript>Divide granted memory by total memory and multiply by 100 to calculate each utilization percentage.</noscript>
+    </form>
+  </section>
+  
+</article>
+<nav class="page-navigation" aria-label="Previous and next pages">
+  
+  
+  <a rel="next" href="facilitator-guide.html">Next: Facilitator guide</a>
+  
+</nav>
+
+  </main>
+  <footer class="site-footer">
+    <p>Evidence-driven SQL tuning with human review. Do not run the workshop workload against production.</p>
+  </footer>
+</body>
+</html>
