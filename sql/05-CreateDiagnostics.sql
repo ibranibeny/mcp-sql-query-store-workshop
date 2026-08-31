@@ -475,55 +475,181 @@ IF EXISTS (SELECT * FROM @ExpectedDefaults)
 DECLARE @ExpectedChecks table
 (
     table_name sysname NOT NULL, constraint_name sysname NOT NULL,
-    normalized_definition nvarchar(4000) NOT NULL, is_disabled bit NOT NULL,
+    expected_string_literal_count int NULL, is_disabled bit NOT NULL,
     is_not_trusted bit NOT NULL, is_not_for_replication bit NOT NULL
 );
 INSERT @ExpectedChecks VALUES
-    (N'WorkshopRun', N'CK_WorkshopRun_EvidenceClassification', N'EVIDENCECLASSIFICATIONIN''DOC-VERIFIED'',''SUBSCRIPTION-VALIDATED'',''LAB-MEASURED'',''ASSUMPTION'',''TARGET'',''ILLUSTRATIVE''', 0, 0, 0),
-    (N'WorkshopRun', N'CK_WorkshopRun_Phase', N'PHASEIN''BASELINE'',''OPTIMIZED'',''COMPARISON''', 0, 0, 0),
-    (N'WorkshopRun', N'CK_WorkshopRun_Status', N'RUNSTATUSIN''PENDING'',''RUNNING'',''COMPLETED'',''FAILED'',''STOPPED''', 0, 0, 0),
-    (N'WorkshopRun', N'CK_WorkshopRun_Outcome', N'OUTCOMEISNULLOROUTCOMEIN''TARGETMET'',''IMPROVEDOUTSIDETARGET'',''NOMATERIALIMPROVEMENT'',''BASELINETARGETNOTREACHED'',''SAFETYSTOP'',''MANUALSTOP'',''FAILED''', 0, 0, 0),
-    (N'WorkshopRun', N'CK_WorkshopRun_Timestamps', N'COMPLETEDATUTCISNULLORCOMPLETEDATUTC>=STARTEDATUTC', 0, 0, 0),
-    (N'WorkshopRun', N'CK_WorkshopRun_FrozenSettingsJson', N'LENFROZENSETTINGSJSONBETWEEN2AND4000ANDISJSONFROZENSETTINGSJSON=1', 0, 0, 0),
-    (N'WorkshopRun', N'CK_WorkshopRun_BaselineIdentifiers', N'BASELINEQUERYIDISNULLANDBASELINEPLANIDISNULLORBASELINEQUERYID>0ANDBASELINEPLANID>0', 0, 0, 0),
-    (N'WorkshopRun', N'CK_WorkshopRun_OptimizedIdentifiers', N'OPTIMIZEDQUERYIDISNULLANDOPTIMIZEDPLANIDISNULLOROPTIMIZEDQUERYID>0ANDOPTIMIZEDPLANID>0', 0, 0, 0),
-    (N'WorkshopRun', N'CK_WorkshopRun_Metrics', N'DURATIONMSISNULLORDURATIONMS>=0ANDCPUMSISNULLORCPUMS>=0ANDLOGICALREADSISNULLORLOGICALREADS>=0ANDSPILLSISNULLORSPILLS>=0ANDWAITTIMEMSISNULLORWAITTIMEMS>=0', 0, 0, 0),
-    (N'WorkshopSample', N'CK_WorkshopSample_Sequence', N'SAMPLESEQUENCE>0', 0, 0, 0),
-    (N'WorkshopSample', N'CK_WorkshopSample_Phase', N'PHASEIN''BASELINE'',''OPTIMIZED''', 0, 0, 0),
-    (N'WorkshopSample', N'CK_WorkshopSample_PoolMemory', N'POOLTOTALMEMORYKB>=0ANDPOOLGRANTEDMEMORYKB>=0ANDPOOLUSEDMEMORYKB>=0ANDPOOLAVAILABLEMEMORYKB>=0', 0, 0, 0),
-    (N'WorkshopSample', N'CK_WorkshopSample_Utilization', N'GRANTUTILIZATIONPERCENTBETWEEN0AND100', 0, 0, 0),
-    (N'WorkshopSample', N'CK_WorkshopSample_Counts', N'GRANTEECOUNT>=0ANDWAITERCOUNT>=0', 0, 0, 0),
-    (N'WorkshopSample', N'CK_WorkshopSample_HostMemory', N'HOSTAVAILABLEMEMORYKB>=0ANDHOSTUSEDMEMORYKB>=0', 0, 0, 0),
-    (N'WorkshopSample', N'CK_WorkshopSample_ProcessMemory', N'PROCESSPHYSICALMEMORYKB>=0', 0, 0, 0),
-    (N'WorkshopSample', N'CK_WorkshopSample_ServerMemory', N'TOTALSERVERMEMORYKB>=0ANDTARGETSERVERMEMORYKB>=0', 0, 0, 0),
-    (N'WorkshopRequestSample', N'CK_WorkshopRequestSample_Identifiers', N'SAMPLESEQUENCE>0ANDSESSIONID>0ANDREQUESTID>=0', 0, 0, 0),
-    (N'WorkshopRequestSample', N'CK_WorkshopRequestSample_Memory', N'REQUESTEDMEMORYKB>=0ANDGRANTEDMEMORYKB>=0ANDREQUIREDMEMORYKB>=0ANDIDEALMEMORYKB>=0ANDUSEDMEMORYKB>=0ANDMAXUSEDMEMORYKB>=0', 0, 0, 0),
-    (N'WorkshopRequestSample', N'CK_WorkshopRequestSample_Wait', N'WAITORDERISNULLORWAITORDER>=0ANDWAITTIMEMS>=0', 0, 0, 0),
-    (N'WorkshopRequestSample', N'CK_WorkshopRequestSample_QueryIdentifiers', N'QUERYIDISNULLANDPLANIDISNULLORQUERYID>0ANDPLANID>0', 0, 0, 0),
-    (N'ValidationRun', N'CK_ValidationRun_Linkage', N'BASELINERUNIDISNULLANDOPTIMIZEDRUNIDISNULLORBASELINERUNIDISNOTNULLANDOPTIMIZEDRUNIDISNOTNULL', 0, 0, 0);
+    (N'WorkshopRun', N'CK_WorkshopRun_EvidenceClassification', 6, 0, 0, 0),
+    (N'WorkshopRun', N'CK_WorkshopRun_Phase', 3, 0, 0, 0),
+    (N'WorkshopRun', N'CK_WorkshopRun_Status', 5, 0, 0, 0),
+    (N'WorkshopRun', N'CK_WorkshopRun_Outcome', 7, 0, 0, 0),
+    (N'WorkshopRun', N'CK_WorkshopRun_Timestamps', NULL, 0, 0, 0),
+    (N'WorkshopRun', N'CK_WorkshopRun_FrozenSettingsJson', NULL, 0, 0, 0),
+    (N'WorkshopRun', N'CK_WorkshopRun_BaselineIdentifiers', NULL, 0, 0, 0),
+    (N'WorkshopRun', N'CK_WorkshopRun_OptimizedIdentifiers', NULL, 0, 0, 0),
+    (N'WorkshopRun', N'CK_WorkshopRun_Metrics', NULL, 0, 0, 0),
+    (N'WorkshopSample', N'CK_WorkshopSample_Sequence', NULL, 0, 0, 0),
+    (N'WorkshopSample', N'CK_WorkshopSample_Phase', 2, 0, 0, 0),
+    (N'WorkshopSample', N'CK_WorkshopSample_PoolMemory', NULL, 0, 0, 0),
+    (N'WorkshopSample', N'CK_WorkshopSample_Utilization', NULL, 0, 0, 0),
+    (N'WorkshopSample', N'CK_WorkshopSample_Counts', NULL, 0, 0, 0),
+    (N'WorkshopSample', N'CK_WorkshopSample_HostMemory', NULL, 0, 0, 0),
+    (N'WorkshopSample', N'CK_WorkshopSample_ProcessMemory', NULL, 0, 0, 0),
+    (N'WorkshopSample', N'CK_WorkshopSample_ServerMemory', NULL, 0, 0, 0),
+    (N'WorkshopRequestSample', N'CK_WorkshopRequestSample_Identifiers', NULL, 0, 0, 0),
+    (N'WorkshopRequestSample', N'CK_WorkshopRequestSample_Memory', NULL, 0, 0, 0),
+    (N'WorkshopRequestSample', N'CK_WorkshopRequestSample_Wait', NULL, 0, 0, 0),
+    (N'WorkshopRequestSample', N'CK_WorkshopRequestSample_QueryIdentifiers', NULL, 0, 0, 0),
+    (N'ValidationRun', N'CK_ValidationRun_Linkage', NULL, 0, 0, 0);
+
+DECLARE @ExpectedCheckColumns table
+(
+    constraint_name sysname NOT NULL, column_name sysname NOT NULL,
+    PRIMARY KEY (constraint_name, column_name)
+);
+INSERT @ExpectedCheckColumns VALUES
+    (N'CK_WorkshopRun_EvidenceClassification', N'EvidenceClassification'),
+    (N'CK_WorkshopRun_Phase', N'Phase'), (N'CK_WorkshopRun_Status', N'RunStatus'),
+    (N'CK_WorkshopRun_Outcome', N'Outcome'),
+    (N'CK_WorkshopRun_Timestamps', N'CompletedAtUtc'), (N'CK_WorkshopRun_Timestamps', N'StartedAtUtc'),
+    (N'CK_WorkshopRun_FrozenSettingsJson', N'FrozenSettingsJson'),
+    (N'CK_WorkshopRun_BaselineIdentifiers', N'BaselineQueryID'), (N'CK_WorkshopRun_BaselineIdentifiers', N'BaselinePlanID'),
+    (N'CK_WorkshopRun_OptimizedIdentifiers', N'OptimizedQueryID'), (N'CK_WorkshopRun_OptimizedIdentifiers', N'OptimizedPlanID'),
+    (N'CK_WorkshopRun_Metrics', N'DurationMs'), (N'CK_WorkshopRun_Metrics', N'CpuMs'),
+    (N'CK_WorkshopRun_Metrics', N'LogicalReads'), (N'CK_WorkshopRun_Metrics', N'Spills'),
+    (N'CK_WorkshopRun_Metrics', N'WaitTimeMs'),
+    (N'CK_WorkshopSample_Sequence', N'SampleSequence'), (N'CK_WorkshopSample_Phase', N'Phase'),
+    (N'CK_WorkshopSample_PoolMemory', N'PoolTotalMemoryKB'), (N'CK_WorkshopSample_PoolMemory', N'PoolGrantedMemoryKB'),
+    (N'CK_WorkshopSample_PoolMemory', N'PoolUsedMemoryKB'), (N'CK_WorkshopSample_PoolMemory', N'PoolAvailableMemoryKB'),
+    (N'CK_WorkshopSample_Utilization', N'GrantUtilizationPercent'),
+    (N'CK_WorkshopSample_Counts', N'GranteeCount'), (N'CK_WorkshopSample_Counts', N'WaiterCount'),
+    (N'CK_WorkshopSample_HostMemory', N'HostAvailableMemoryKB'), (N'CK_WorkshopSample_HostMemory', N'HostUsedMemoryKB'),
+    (N'CK_WorkshopSample_ProcessMemory', N'ProcessPhysicalMemoryKB'),
+    (N'CK_WorkshopSample_ServerMemory', N'TotalServerMemoryKB'), (N'CK_WorkshopSample_ServerMemory', N'TargetServerMemoryKB'),
+    (N'CK_WorkshopRequestSample_Identifiers', N'SampleSequence'), (N'CK_WorkshopRequestSample_Identifiers', N'SessionID'),
+    (N'CK_WorkshopRequestSample_Identifiers', N'RequestID'),
+    (N'CK_WorkshopRequestSample_Memory', N'RequestedMemoryKB'), (N'CK_WorkshopRequestSample_Memory', N'GrantedMemoryKB'),
+    (N'CK_WorkshopRequestSample_Memory', N'RequiredMemoryKB'), (N'CK_WorkshopRequestSample_Memory', N'IdealMemoryKB'),
+    (N'CK_WorkshopRequestSample_Memory', N'UsedMemoryKB'), (N'CK_WorkshopRequestSample_Memory', N'MaxUsedMemoryKB'),
+    (N'CK_WorkshopRequestSample_Wait', N'WaitOrder'), (N'CK_WorkshopRequestSample_Wait', N'WaitTimeMs'),
+    (N'CK_WorkshopRequestSample_QueryIdentifiers', N'QueryID'), (N'CK_WorkshopRequestSample_QueryIdentifiers', N'PlanID'),
+    (N'CK_ValidationRun_Linkage', N'BaselineRunID'), (N'CK_ValidationRun_Linkage', N'OptimizedRunID');
+
+DECLARE @ExpectedCheckTokens table
+(
+    constraint_name sysname NOT NULL, required_token nvarchar(256) NOT NULL,
+    PRIMARY KEY (constraint_name, required_token)
+);
+INSERT @ExpectedCheckTokens VALUES
+    (N'CK_WorkshopRun_EvidenceClassification', N'''DOC-VERIFIED'''),
+    (N'CK_WorkshopRun_EvidenceClassification', N'''SUBSCRIPTION-VALIDATED'''),
+    (N'CK_WorkshopRun_EvidenceClassification', N'''LAB-MEASURED'''),
+    (N'CK_WorkshopRun_EvidenceClassification', N'''ASSUMPTION'''),
+    (N'CK_WorkshopRun_EvidenceClassification', N'''TARGET'''),
+    (N'CK_WorkshopRun_EvidenceClassification', N'''ILLUSTRATIVE'''),
+    (N'CK_WorkshopRun_Phase', N'''BASELINE'''), (N'CK_WorkshopRun_Phase', N'''OPTIMIZED'''),
+    (N'CK_WorkshopRun_Phase', N'''COMPARISON'''),
+    (N'CK_WorkshopRun_Status', N'''PENDING'''), (N'CK_WorkshopRun_Status', N'''RUNNING'''),
+    (N'CK_WorkshopRun_Status', N'''COMPLETED'''), (N'CK_WorkshopRun_Status', N'''FAILED'''),
+    (N'CK_WorkshopRun_Status', N'''STOPPED'''),
+    (N'CK_WorkshopRun_Outcome', N'OUTCOMEISNULL'), (N'CK_WorkshopRun_Outcome', N'''TARGETMET'''),
+    (N'CK_WorkshopRun_Outcome', N'''IMPROVEDOUTSIDETARGET'''), (N'CK_WorkshopRun_Outcome', N'''NOMATERIALIMPROVEMENT'''),
+    (N'CK_WorkshopRun_Outcome', N'''BASELINETARGETNOTREACHED'''), (N'CK_WorkshopRun_Outcome', N'''SAFETYSTOP'''),
+    (N'CK_WorkshopRun_Outcome', N'''MANUALSTOP'''), (N'CK_WorkshopRun_Outcome', N'''FAILED'''),
+    (N'CK_WorkshopRun_Timestamps', N'COMPLETEDATUTCISNULL'), (N'CK_WorkshopRun_Timestamps', N'COMPLETEDATUTC>=STARTEDATUTC'),
+    (N'CK_WorkshopRun_FrozenSettingsJson', N'LENFROZENSETTINGSJSON'), (N'CK_WorkshopRun_FrozenSettingsJson', N'>=2'),
+    (N'CK_WorkshopRun_FrozenSettingsJson', N'<=4000'), (N'CK_WorkshopRun_FrozenSettingsJson', N'ISJSONFROZENSETTINGSJSON=1'),
+    (N'CK_WorkshopRun_BaselineIdentifiers', N'BASELINEQUERYIDISNULL'), (N'CK_WorkshopRun_BaselineIdentifiers', N'BASELINEPLANIDISNULL'),
+    (N'CK_WorkshopRun_BaselineIdentifiers', N'BASELINEQUERYID>0'), (N'CK_WorkshopRun_BaselineIdentifiers', N'BASELINEPLANID>0'),
+    (N'CK_WorkshopRun_OptimizedIdentifiers', N'OPTIMIZEDQUERYIDISNULL'), (N'CK_WorkshopRun_OptimizedIdentifiers', N'OPTIMIZEDPLANIDISNULL'),
+    (N'CK_WorkshopRun_OptimizedIdentifiers', N'OPTIMIZEDQUERYID>0'), (N'CK_WorkshopRun_OptimizedIdentifiers', N'OPTIMIZEDPLANID>0'),
+    (N'CK_WorkshopRun_Metrics', N'DURATIONMS>=0'), (N'CK_WorkshopRun_Metrics', N'CPUMS>=0'),
+    (N'CK_WorkshopRun_Metrics', N'LOGICALREADS>=0'), (N'CK_WorkshopRun_Metrics', N'SPILLS>=0'),
+    (N'CK_WorkshopRun_Metrics', N'WAITTIMEMS>=0'),
+    (N'CK_WorkshopSample_Sequence', N'SAMPLESEQUENCE>0'),
+    (N'CK_WorkshopSample_Phase', N'''BASELINE'''), (N'CK_WorkshopSample_Phase', N'''OPTIMIZED'''),
+    (N'CK_WorkshopSample_PoolMemory', N'POOLTOTALMEMORYKB>=0'), (N'CK_WorkshopSample_PoolMemory', N'POOLGRANTEDMEMORYKB>=0'),
+    (N'CK_WorkshopSample_PoolMemory', N'POOLUSEDMEMORYKB>=0'), (N'CK_WorkshopSample_PoolMemory', N'POOLAVAILABLEMEMORYKB>=0'),
+    (N'CK_WorkshopSample_Utilization', N'GRANTUTILIZATIONPERCENT>=0'), (N'CK_WorkshopSample_Utilization', N'GRANTUTILIZATIONPERCENT<=100'),
+    (N'CK_WorkshopSample_Counts', N'GRANTEECOUNT>=0'), (N'CK_WorkshopSample_Counts', N'WAITERCOUNT>=0'),
+    (N'CK_WorkshopSample_HostMemory', N'HOSTAVAILABLEMEMORYKB>=0'), (N'CK_WorkshopSample_HostMemory', N'HOSTUSEDMEMORYKB>=0'),
+    (N'CK_WorkshopSample_ProcessMemory', N'PROCESSPHYSICALMEMORYKB>=0'),
+    (N'CK_WorkshopSample_ServerMemory', N'TOTALSERVERMEMORYKB>=0'), (N'CK_WorkshopSample_ServerMemory', N'TARGETSERVERMEMORYKB>=0'),
+    (N'CK_WorkshopRequestSample_Identifiers', N'SAMPLESEQUENCE>0'), (N'CK_WorkshopRequestSample_Identifiers', N'SESSIONID>0'),
+    (N'CK_WorkshopRequestSample_Identifiers', N'REQUESTID>=0'),
+    (N'CK_WorkshopRequestSample_Memory', N'REQUESTEDMEMORYKB>=0'), (N'CK_WorkshopRequestSample_Memory', N'GRANTEDMEMORYKB>=0'),
+    (N'CK_WorkshopRequestSample_Memory', N'REQUIREDMEMORYKB>=0'), (N'CK_WorkshopRequestSample_Memory', N'IDEALMEMORYKB>=0'),
+    (N'CK_WorkshopRequestSample_Memory', N'USEDMEMORYKB>=0'), (N'CK_WorkshopRequestSample_Memory', N'MAXUSEDMEMORYKB>=0'),
+    (N'CK_WorkshopRequestSample_Wait', N'WAITORDERISNULL'), (N'CK_WorkshopRequestSample_Wait', N'WAITORDER>=0'),
+    (N'CK_WorkshopRequestSample_Wait', N'WAITTIMEMS>=0'),
+    (N'CK_WorkshopRequestSample_QueryIdentifiers', N'QUERYIDISNULL'), (N'CK_WorkshopRequestSample_QueryIdentifiers', N'PLANIDISNULL'),
+    (N'CK_WorkshopRequestSample_QueryIdentifiers', N'QUERYID>0'), (N'CK_WorkshopRequestSample_QueryIdentifiers', N'PLANID>0'),
+    (N'CK_ValidationRun_Linkage', N'BASELINERUNIDISNULL'), (N'CK_ValidationRun_Linkage', N'OPTIMIZEDRUNIDISNULL'),
+    (N'CK_ValidationRun_Linkage', N'BASELINERUNIDISNOTNULL'), (N'CK_ValidationRun_Linkage', N'OPTIMIZEDRUNIDISNOTNULL');
 
 IF EXISTS
 (
-    SELECT * FROM @ExpectedChecks
+    SELECT table_name, constraint_name, is_disabled, is_not_trusted, is_not_for_replication FROM @ExpectedChecks
     EXCEPT
-    SELECT OBJECT_NAME(cc.parent_object_id), cc.name,
-           UPPER(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(cc.definition,
-               N' ', N''), CHAR(9), N''), CHAR(10), N''), CHAR(13), N''), N'[', N''), N']', N''), N'(', N''), N')', N'')),
-           cc.is_disabled, cc.is_not_trusted, cc.is_not_for_replication
+    SELECT OBJECT_NAME(cc.parent_object_id), cc.name, cc.is_disabled, cc.is_not_trusted, cc.is_not_for_replication
     FROM sys.check_constraints AS cc
     WHERE cc.parent_object_id IN (OBJECT_ID(N'lab.WorkshopRun'), OBJECT_ID(N'lab.WorkshopSample'),
                                   OBJECT_ID(N'lab.WorkshopRequestSample'), OBJECT_ID(N'lab.ValidationRun'))
 )
 OR EXISTS
 (
-    SELECT OBJECT_NAME(cc.parent_object_id), cc.name,
-           UPPER(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(cc.definition,
-               N' ', N''), CHAR(9), N''), CHAR(10), N''), CHAR(13), N''), N'[', N''), N']', N''), N'(', N''), N')', N'')),
-           cc.is_disabled, cc.is_not_trusted, cc.is_not_for_replication
+    SELECT OBJECT_NAME(cc.parent_object_id), cc.name, cc.is_disabled, cc.is_not_trusted, cc.is_not_for_replication
     FROM sys.check_constraints AS cc
     WHERE cc.parent_object_id IN (OBJECT_ID(N'lab.WorkshopRun'), OBJECT_ID(N'lab.WorkshopSample'),
                                   OBJECT_ID(N'lab.WorkshopRequestSample'), OBJECT_ID(N'lab.ValidationRun'))
-    EXCEPT SELECT * FROM @ExpectedChecks
+    EXCEPT
+    SELECT table_name, constraint_name, is_disabled, is_not_trusted, is_not_for_replication FROM @ExpectedChecks
+)
+OR EXISTS
+(
+    SELECT constraint_name, column_name FROM @ExpectedCheckColumns
+    EXCEPT
+    SELECT cc.name, c.name
+    FROM sys.check_constraints AS cc
+    INNER JOIN sys.sql_expression_dependencies AS dependency ON dependency.referencing_id = cc.object_id
+    INNER JOIN sys.columns AS c
+        ON c.object_id = dependency.referenced_id AND c.column_id = dependency.referenced_minor_id
+    WHERE cc.parent_object_id IN (OBJECT_ID(N'lab.WorkshopRun'), OBJECT_ID(N'lab.WorkshopSample'),
+                                  OBJECT_ID(N'lab.WorkshopRequestSample'), OBJECT_ID(N'lab.ValidationRun'))
+)
+OR EXISTS
+(
+    SELECT cc.name, c.name
+    FROM sys.check_constraints AS cc
+    INNER JOIN sys.sql_expression_dependencies AS dependency ON dependency.referencing_id = cc.object_id
+    INNER JOIN sys.columns AS c
+        ON c.object_id = dependency.referenced_id AND c.column_id = dependency.referenced_minor_id
+    WHERE cc.parent_object_id IN (OBJECT_ID(N'lab.WorkshopRun'), OBJECT_ID(N'lab.WorkshopSample'),
+                                  OBJECT_ID(N'lab.WorkshopRequestSample'), OBJECT_ID(N'lab.ValidationRun'))
+    EXCEPT SELECT constraint_name, column_name FROM @ExpectedCheckColumns
+)
+OR EXISTS
+(
+    SELECT 1
+    FROM @ExpectedCheckTokens AS expected
+    INNER JOIN sys.check_constraints AS cc ON cc.name = expected.constraint_name
+    CROSS APPLY (VALUES
+    (
+        UPPER(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(OBJECT_DEFINITION(cc.object_id),
+            N' ', N''), CHAR(9), N''), CHAR(10), N''), CHAR(13), N''), N'[', N''), N']', N''), N'(', N''), N')', N''))
+    )) AS canonical(definition)
+    WHERE CHARINDEX(expected.required_token, canonical.definition) = 0
+)
+OR EXISTS
+(
+    SELECT 1
+    FROM @ExpectedChecks AS expected
+    INNER JOIN sys.check_constraints AS cc
+        ON cc.name = expected.constraint_name AND OBJECT_NAME(cc.parent_object_id) = expected.table_name
+    WHERE expected.expected_string_literal_count IS NOT NULL
+      AND (LEN(OBJECT_DEFINITION(cc.object_id))
+          - LEN(REPLACE(OBJECT_DEFINITION(cc.object_id), N'''', N''))) / 2
+          <> expected.expected_string_literal_count
 )
     THROW 51604, 'Existing evidence table CHECK contract is incompatible.', 1;
 
@@ -760,7 +886,8 @@ END;
 GO
 
 CREATE OR ALTER PROCEDURE lab.usp_GetActiveWorkshopGrants
-    @Top int = 20
+    @Top int = 20,
+    @RunID uniqueidentifier = NULL
 WITH EXECUTE AS OWNER
 AS
 BEGIN
@@ -768,10 +895,8 @@ BEGIN
     IF @Top IS NULL OR @Top NOT BETWEEN 1 AND 100
         THROW 51620, 'Top must be between 1 and 100.', 1;
 
-    DECLARE @RunID uniqueidentifier = TRY_CONVERT(uniqueidentifier, SESSION_CONTEXT(N'WorkshopRunId'));
-
     SELECT TOP (@Top)
-        CONVERT(uniqueidentifier, sessionRun.RunID) AS RunID,
+        sessionRun.RunID,
         CONVERT(smallint, mg.session_id) AS SessionID,
         CONVERT(int, COALESCE(r.request_id, mg.request_id)) AS RequestID,
         CONVERT(varchar(16), r.status) AS RequestStatus,
@@ -790,14 +915,10 @@ BEGIN
     FROM sys.dm_exec_query_memory_grants AS mg
     INNER JOIN sys.dm_exec_sessions AS s ON s.session_id = mg.session_id
     LEFT JOIN sys.dm_exec_requests AS r ON r.session_id = mg.session_id AND r.request_id = mg.request_id
-        CROSS APPLY
+    OUTER APPLY
         (
-                SELECT TOP (1) wrs.RunID
-                FROM lab.WorkshopRequestSample AS wrs
-                WHERE wrs.SessionID = mg.session_id
-                    AND wrs.RequestID = COALESCE(r.request_id, mg.request_id)
-                    AND (@RunID IS NULL OR wrs.RunID = @RunID)
-                ORDER BY wrs.SampleSequence DESC
+            SELECT TRY_CONVERT(uniqueidentifier,
+                CONVERT(binary(16), SUBSTRING(s.context_info, 1, 16))) AS RunID
         ) AS sessionRun
     WHERE s.program_name LIKE N'MCP-SQL-Workshop%'
       AND (@RunID IS NULL OR sessionRun.RunID = @RunID)

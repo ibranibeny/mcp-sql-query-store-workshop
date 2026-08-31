@@ -41,6 +41,7 @@ BEGIN
     DECLARE @WorkshopSetupName sysname = N'MCP SQL Query Store Workshop';
     DECLARE @WorkshopSetupHash varbinary(32) = 0xADA06F206D3DB321527A5AAB390FC814E28EBB59791967EB99841BF669E1B16B;
     DECLARE @WorkshopRunId nvarchar(128) = NULLIF(LTRIM(RTRIM(TRY_CONVERT(nvarchar(128), SESSION_CONTEXT(N'WorkshopRunId')))), N'');
+    DECLARE @RunID uniqueidentifier = TRY_CONVERT(uniqueidentifier, @WorkshopRunId);
     DECLARE @WorkshopManualExecution bit = COALESCE(TRY_CONVERT(bit, SESSION_CONTEXT(N'WorkshopManualExecution')), 0);
     DECLARE @IsWorkshopApplication bit = CASE WHEN APP_NAME() LIKE N'MCP-SQL-Workshop%' THEN 1 ELSE 0 END;
 
@@ -55,10 +56,12 @@ BEGIN
              AND SetupHash = @WorkshopSetupHash
        )
         THROW 51400, 'The workshop marker contract is invalid.', 1;
-    IF @WorkshopRunId IS NULL
+    IF @RunID IS NULL
         THROW 51401, 'WorkshopRunId session context is required.', 1;
     IF @IsWorkshopApplication = 0 AND @WorkshopManualExecution <> 1
         THROW 51402, 'The session must use a workshop application name or explicit manual execution context.', 1;
+    DECLARE @RunContextInfo varbinary(128) = CONVERT(binary(16), @RunID);
+    SET CONTEXT_INFO @RunContextInfo;
     IF @StartDate IS NULL
         THROW 51403, 'StartDate is required.', 1;
     IF @EndDateExclusive IS NULL

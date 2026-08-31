@@ -17,6 +17,7 @@ __pycache__/
 .coverage
 htmlcov/
 TestResults/
+testResults.xml
 .vscode/settings.json
 *.user
 .DS_Store

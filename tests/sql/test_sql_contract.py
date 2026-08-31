@@ -1257,6 +1257,32 @@ def test_all_four_evidence_tables_validate_exact_keys_indexes_defaults_and_check
     assert text.index("THROW 51604") < text.index("CREATE OR ALTER VIEW LAB.VW_WORKSHOPRUNSUMMARY")
 
 
+def _check_fixture_is_semantically_accepted(definition: str, required_tokens: tuple[str, ...]) -> bool:
+    canonical = re.sub(r"[\[\]()\s]", "", definition).upper()
+    return all(token.upper() in canonical for token in required_tokens)
+
+
+def test_check_validation_accepts_engine_normalization_and_rejects_semantic_drift() -> None:
+    required = ("PHASE", "'BASELINE'", "'OPTIMIZED'")
+    fixtures = (
+        ("([Phase] IN ('Baseline', 'Optimized'))", True),
+        ("([Phase]='Baseline' OR [Phase]='Optimized')", True),
+        ("([Phase]='Baseline' OR [Phase]='Comparison')", False),
+    )
+    for definition, expected in fixtures:
+        assert _check_fixture_is_semantically_accepted(definition, required) is expected
+
+    text = normalized("05-CreateDiagnostics.sql")
+    assert "@EXPECTEDCHECKCOLUMNS" in text
+    assert "@EXPECTEDCHECKTOKENS" in text
+    assert "SYS.SQL_EXPRESSION_DEPENDENCIES" in text
+    assert "OBJECT_DEFINITION(CC.OBJECT_ID)" in text
+    assert "REQUIRED_TOKEN" in text
+    check_region = text[text.index("DECLARE @EXPECTEDCHECKS"):text.index("CREATE OR ALTER VIEW LAB.VW_WORKSHOPRUNSUMMARY")]
+    assert "SELECT * FROM @EXPECTEDCHECKS EXCEPT" not in check_region
+    assert "EXCEPT SELECT * FROM @EXPECTEDCHECKS" not in check_region
+
+
 def test_workshop_outcome_check_has_only_the_exact_allowed_terminal_states() -> None:
     text = normalized("05-CreateDiagnostics.sql")
     expected = (
@@ -1313,12 +1339,24 @@ def test_live_memory_diagnostics_are_bounded_filtered_and_secret_free() -> None:
     assert "@TOP INT = 20" in grants and "@TOP NOT BETWEEN 1 AND 100" in grants
     assert "SELECT TOP (@TOP)" in grants and "ORDER BY" in grants
     assert "S.PROGRAM_NAME LIKE N'MCP-SQL-WORKSHOP%'" in grants
-    assert "SESSION_CONTEXT(N'WORKSHOPRUNID')" in grants
-    assert "LAB.WORKSHOPREQUESTSAMPLE" in grants
-    assert "CONTEXT_INFO" not in grants
+    assert "@RUNID UNIQUEIDENTIFIER = NULL" in grants
+    assert "S.CONTEXT_INFO" in grants
+    assert "TRY_CONVERT(UNIQUEIDENTIFIER" in grants
+    assert "LAB.WORKSHOPREQUESTSAMPLE" not in grants
+    assert "OUTER APPLY" in grants
     assert "SYS.DM_EXEC_QUERY_MEMORY_GRANTS" in grants
     assert "SYS.DM_EXEC_REQUESTS" in grants and "SYS.DM_EXEC_SESSIONS" in grants
     assert "DM_EXEC_SQL_TEXT" not in grants and "SQL_HANDLE" not in grants
+
+
+def test_workload_procedures_publish_run_id_for_cross_session_dmv_correlation() -> None:
+    for name, procedure in (
+        ("04-CreateBaselineProcedure.sql", "lab.usp_MonthEndSalesBaseline"),
+        ("06-CreateOptimizedProcedure.sql", "lab.usp_MonthEndSalesOptimized"),
+    ):
+        body = procedure_body(name, procedure)
+        assert "CONVERT(BINARY(16), @RUNID)" in body
+        assert "SET CONTEXT_INFO @RUNCONTEXTINFO" in body
 
 
 def test_server_dmv_access_uses_minimal_certificate_module_signing() -> None:
