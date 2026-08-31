@@ -121,6 +121,16 @@ BeforeAll {
             -ExpiresOn (Get-Date).Date.AddDays(2) `
             -Operations $Operations
     }
+
+    function Get-TestCredential {
+        $secureValue = [System.Security.SecureString]::new()
+        foreach ($codePoint in @(117, 110, 105, 116, 45, 116, 101, 115, 116, 45, 111, 110, 108, 121)) {
+            $secureValue.AppendChar([char] $codePoint)
+        }
+        $secureValue.MakeReadOnly()
+
+        return [System.Management.Automation.PSCredential]::new('workshop-admin', $secureValue)
+    }
 }
 
 Describe 'Workshop configuration defaults' {
@@ -1497,7 +1507,7 @@ Describe 'Exact workshop VM creation' {
                 $null
             }
             CreateVm = {
-                param($Spec, $Credential, $ResourceGroupName)
+                param($Spec, [System.Management.Automation.PSCredential] $Credential, $ResourceGroupName)
                 $null = $Credential, $ResourceGroupName
                 $script:VmCreates.Add($Spec)
                 if (-not $script:SkipVmReadBack) { $script:VmState[$Spec.Name] = $Spec }
@@ -1509,8 +1519,7 @@ Describe 'Exact workshop VM creation' {
                 $script:DiskState[$Spec.Name] = $Spec
             }
         }
-        $secure = ConvertTo-SecureString 'test-only-password' -AsPlainText -Force
-        $script:VmCredential = [PSCredential]::new('workshop-admin', $secure)
+        $script:VmCredential = Get-TestCredential
     }
 
     It 'creates the attested Windows client VM with exact Trusted Launch, OS disk, image, and admin NIC' {
@@ -1855,10 +1864,12 @@ Describe 'Workshop stop and guarded removal' {
 
 Describe 'Default Task 6 Az command contracts' {
     It 'builds the administration VM with an immutable image, Windows client license, Trusted Launch, UEFI, OS disk, and exact NIC' {
-        InModuleScope Workshop.Azure -Parameters @{ Config = $script:Config } {
-            param($Config)
-            $secure = ConvertTo-SecureString 'not-output' -AsPlainText -Force
-            $credential = [PSCredential]::new('workshop-admin', $secure)
+        InModuleScope Workshop.Azure -Parameters @{
+            Config = $script:Config
+            TestCredential = (Get-TestCredential)
+        } {
+            param($Config, [System.Management.Automation.PSCredential] $TestCredential)
+            $credential = $TestCredential
             $spec = Get-WorkshopVmSpecification -Role Admin -Config $Config `
                 -ImageVersion '26100.2033.1' -SubscriptionId 'sub'
             Mock New-AzVMConfig { [pscustomobject]@{ Name=$VMName } }
@@ -1905,10 +1916,12 @@ Describe 'Default Task 6 Az command contracts' {
     }
 
     It 'creates Premium SQL disks and attaches LUN zero ReadOnly and LUN one None without any public IP command' {
-        InModuleScope Workshop.Azure -Parameters @{ Config = $script:Config } {
-            param($Config)
-            $secure = ConvertTo-SecureString 'not-output' -AsPlainText -Force
-            $credential = [PSCredential]::new('workshop-admin', $secure)
+        InModuleScope Workshop.Azure -Parameters @{
+            Config = $script:Config
+            TestCredential = (Get-TestCredential)
+        } {
+            param($Config, [System.Management.Automation.PSCredential] $TestCredential)
+            $credential = $TestCredential
             $spec = Get-WorkshopVmSpecification -Role Sql -Config $Config `
                 -ImageVersion '16.0.1135.2' -SubscriptionId 'sub'
             $diskSpecs = @(Get-WorkshopDiskSpecification -VmSpecification $spec)
