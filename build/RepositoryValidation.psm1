@@ -108,20 +108,24 @@ function Find-RepositorySecret {
     $fixtureMarkerPattern = '(?i)(?:^|\s)#\s*repository-secret-scan:\s*allow-test-fixture\s*$'
     $fixtureMarkerOnlyPattern = '(?i)^\s*#\s*repository-secret-scan:\s*allow-test-fixture\s*$'
     $contentLines = @($Content -split '\r?\n')
-    $suppressedFixtureLines = [System.Collections.Generic.HashSet[int]]::new()
+    $standaloneFixtureMarkerLines = [System.Collections.Generic.HashSet[int]]::new()
+    $inlineFixtureMarkerIndexes = [System.Collections.Generic.Dictionary[int, int]]::new()
     if ($fixtureBypassIsAllowed) {
         for ($index = 0; $index -lt $contentLines.Count; $index++) {
-            if ($contentLines[$index] -notmatch $fixtureMarkerPattern) {
+            $fixtureMarker = [regex]::Match($contentLines[$index], $fixtureMarkerPattern)
+            if (-not $fixtureMarker.Success) {
                 continue
             }
 
-            $suppressedLine = if ($contentLines[$index] -match $fixtureMarkerOnlyPattern) {
-                $index + 2
+            if ($contentLines[$index] -match $fixtureMarkerOnlyPattern) {
+                # A standalone marker suppresses only the first finding on the immediately following line.
+                [void] $standaloneFixtureMarkerLines.Add($index + 2)
             }
             else {
-                $index + 1
+                # An inline marker suppresses only the finding whose value/header immediately precedes it.
+                $inlineFixtureMarkerIndexes[$index + 1] =
+                    $fixtureMarker.Index + $fixtureMarker.Value.IndexOf('#')
             }
-            [void] $suppressedFixtureLines.Add($suppressedLine)
         }
     }
 
@@ -140,13 +144,17 @@ function Find-RepositorySecret {
     $multilineJsonPattern = '(?im)"(?:password|pwd)"\s*:\s*\r?\n\s*(?<value>"(?:\\.|[^"\\])*")'
     foreach ($match in [regex]::Matches($Content, $multilineJsonPattern)) {
         $findingLine = 1 + ([regex]::Matches($Content.Substring(0, $match.Index), '\r?\n')).Count
-        if (-not $suppressedFixtureLines.Contains($findingLine) -and
-            -not (Test-ApprovedPasswordValue -Value $match.Groups['value'].Value)) {
-            [pscustomobject]@{
-                Path = $Path
-                Type = 'Password assignment'
-                Line = $findingLine
-            }
+        if (Test-ApprovedPasswordValue -Value $match.Groups['value'].Value) {
+            continue
+        }
+        if ($standaloneFixtureMarkerLines.Remove($findingLine)) {
+            continue
+        }
+
+        [pscustomobject]@{
+            Path = $Path
+            Type = 'Password assignment'
+            Line = $findingLine
         }
     }
 
@@ -154,15 +162,15 @@ function Find-RepositorySecret {
     foreach ($line in $contentLines) {
         $lineNumber++
         $reportedAssignments = [System.Collections.Generic.HashSet[int]]::new()
-        if ($suppressedFixtureLines.Contains($lineNumber)) {
-            continue
-        }
-        if ($line -match $privateKeyPattern) {
-            [pscustomobject]@{
-                Path = $Path
+        $candidates = [System.Collections.Generic.List[object]]::new()
+
+        foreach ($match in [regex]::Matches($line, $privateKeyPattern)) {
+            $candidates.Add([pscustomobject]@{
+                Id = "Private key:$($match.Index)"
                 Type = 'Private key'
-                Line = $lineNumber
-            }
+                Index = $match.Index
+                EndIndex = $match.Index + $match.Length
+            })
         }
 
         foreach ($pattern in $patterns) {
@@ -182,11 +190,44 @@ function Find-RepositorySecret {
                     continue
                 }
 
-                [pscustomobject]@{
-                    Path = $Path
+                $candidates.Add([pscustomobject]@{
+                    Id = "Password assignment:$assignmentIndex"
                     Type = 'Password assignment'
-                    Line = $lineNumber
-                }
+                    Index = $assignmentIndex
+                    EndIndex = $match.Index + $match.Length
+                })
+            }
+        }
+
+        $orderedCandidates = @($candidates | Sort-Object Index, Type)
+        $suppressedCandidateIds = [System.Collections.Generic.HashSet[string]]::new()
+        if ($standaloneFixtureMarkerLines.Remove($lineNumber) -and $orderedCandidates.Count -gt 0) {
+            [void] $suppressedCandidateIds.Add($orderedCandidates[0].Id)
+        }
+
+        if ($inlineFixtureMarkerIndexes.ContainsKey($lineNumber)) {
+            $markerIndex = $inlineFixtureMarkerIndexes[$lineNumber]
+            $inlineCandidate = $orderedCandidates |
+                Where-Object {
+                    $_.EndIndex -le $markerIndex -and
+                    $line.Substring($_.EndIndex, $markerIndex - $_.EndIndex) -match '^\s*$'
+                } |
+                Sort-Object EndIndex -Descending |
+                Select-Object -First 1
+            if ($null -ne $inlineCandidate) {
+                [void] $suppressedCandidateIds.Add($inlineCandidate.Id)
+            }
+        }
+
+        foreach ($candidate in $orderedCandidates) {
+            if ($suppressedCandidateIds.Contains($candidate.Id)) {
+                continue
+            }
+
+            [pscustomobject]@{
+                Path = $Path
+                Type = $candidate.Type
+                Line = $lineNumber
             }
         }
     }

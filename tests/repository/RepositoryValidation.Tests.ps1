@@ -183,6 +183,49 @@ Describe 'Find-RepositorySecret' {
             Should -BeNullOrEmpty
     }
 
+    It 'suppresses only the password assignment immediately preceding an inline marker' {
+        $passwordName = 'pass' + 'word'
+        $marker = '# repository-secret-scan: allow-test-fixture'
+        $unannotatedValue = 'unannotated' + '-same-line-value'
+        $fixtureValue = 'annotated' + '-same-line-value'
+        $content = '{{"{0}":"{1}","{0}":"{2}" {3}' -f @(
+            $passwordName, $unannotatedValue, $fixtureValue, $marker
+        )
+
+        $findings = @(
+            Find-RepositorySecret -Path 'tests/fixtures/secrets/two-assignments.json' `
+                -Content $content
+        )
+
+        $findings.Count | Should -Be 1
+        $findings[0].Type | Should -Be 'Password assignment'
+        $findings[0].Line | Should -Be 1
+        ($findings | Out-String) | Should -Not -Match ([regex]::Escape($unannotatedValue))
+        ($findings | Out-String) | Should -Not -Match ([regex]::Escape($fixtureValue))
+    }
+
+    It 'suppresses only the first password assignment after a standalone marker' {
+        $passwordName = 'pass' + 'word'
+        $marker = '# repository-secret-scan: allow-test-fixture'
+        $fixtureValue = 'standalone' + '-fixture-value'
+        $unannotatedValue = 'standalone' + '-unannotated-value'
+        $assignmentLine = '{{"{0}":"{1}","{0}":"{2}"}}' -f @(
+            $passwordName, $fixtureValue, $unannotatedValue
+        )
+        $content = @($marker, $assignmentLine) -join "`n"
+
+        $findings = @(
+            Find-RepositorySecret -Path 'tests/fixtures/secrets/standalone-marker.json' `
+                -Content $content
+        )
+
+        $findings.Count | Should -Be 1
+        $findings[0].Type | Should -Be 'Password assignment'
+        $findings[0].Line | Should -Be 2
+        ($findings | Out-String) | Should -Not -Match ([regex]::Escape($fixtureValue))
+        ($findings | Out-String) | Should -Not -Match ([regex]::Escape($unannotatedValue))
+    }
+
     It 'scopes a fixture marker to its annotated assignment and reports a later secret' {
         $passwordName = 'pass' + 'word'
         $marker = 'repository-secret-scan: allow-test-fixture'
@@ -227,6 +270,31 @@ Describe 'Find-RepositorySecret' {
         $findings.Count | Should -Be 1
         $findings[0].Type | Should -Be 'Private key'
         $findings[0].Line | Should -Be 4
+        ($findings | Out-String) | Should -Not -Match ([regex]::Escape($keyHeader))
+    }
+
+    It 'suppresses only one private key header when a fixture line contains two' -ForEach @(
+        @{ MarkerPlacement = 'Inline'; FixtureHeaderIsFirst = $false },
+        @{ MarkerPlacement = 'Standalone'; FixtureHeaderIsFirst = $true }
+    ) {
+        $marker = '# repository-secret-scan: allow-test-fixture'
+        $keyHeader = '-----BEGIN ' + 'PRIVATE KEY-----'
+        $headerLine = "$keyHeader $keyHeader"
+        $content = if ($MarkerPlacement -eq 'Inline') {
+            "$headerLine $marker"
+        }
+        else {
+            @($marker, $headerLine) -join "`n"
+        }
+
+        $findings = @(
+            Find-RepositorySecret -Path 'tests/fixtures/secrets/two-keys-one-line.pem' `
+                -Content $content
+        )
+
+        $findings.Count | Should -Be 1
+        $findings[0].Type | Should -Be 'Private key'
+        $findings[0].Line | Should -Be $(if ($MarkerPlacement -eq 'Inline') { 1 } else { 2 })
         ($findings | Out-String) | Should -Not -Match ([regex]::Escape($keyHeader))
     }
 
