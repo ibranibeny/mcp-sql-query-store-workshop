@@ -167,6 +167,45 @@ Describe 'Find-RepositorySecret' {
         @(Find-RepositorySecret -Path 'fixture.txt' -Content $_) | Should -BeNullOrEmpty
     }
 
+    It 'allows a SQL master-key command assembled from a session-context variable' {
+        $passwordKeyword = 'PASS' + 'WORD'
+        $content = @"
+DECLARE @MasterKeyPassword nvarchar(4000) =
+    TRY_CONVERT(nvarchar(4000), SESSION_CONTEXT(N'DatabaseMasterKeyPassword'));
+SET @MasterKeySql = N'CREATE MASTER KEY ENCRYPTION BY $passwordKeyword = N'''
+    + REPLACE(@MasterKeyPassword, N'''', N'''''') + N'''';
+"@
+
+        @(Find-RepositorySecret -Path 'deploy/Invoke-WorkshopSqlScripts.ps1' -Content $content) |
+            Should -BeNullOrEmpty
+    }
+
+    It 'allows generated SQL password expressions backed by non-literal references' -ForEach @(
+        "N'prefix-' + @GeneratedPassword",
+        "N'prefix-' + `$(DatabasePassword)",
+        "REPLACE(SESSION_CONTEXT(N'DatabaseMasterKeyPassword'), N'''', N'''''')"
+    ) {
+        $passwordKeyword = 'PASS' + 'WORD'
+        $content = "$passwordKeyword = $_"
+
+        @(Find-RepositorySecret -Path 'fixture.sql' -Content $content) | Should -BeNullOrEmpty
+    }
+
+    It 'detects a complete quoted SQL password literal without returning its value' {
+        $passwordKeyword = 'PASS' + 'WORD'
+        $content = "SET @MasterKeySql = N'CREATE MASTER KEY ENCRYPTION BY $passwordKeyword = N''literal-secret''';"
+
+        $findings = @(
+            Find-RepositorySecret -Path 'deploy/Invoke-WorkshopSqlScripts.ps1' -Content $content
+        )
+
+        $findings.Count | Should -Be 1
+        $findings[0].Type | Should -Be 'Password assignment'
+        $findings[0].Line | Should -Be 1
+        $findings[0].PSObject.Properties.Name | Should -Be @('Path', 'Type', 'Line')
+        ($findings | Out-String) | Should -Not -Match 'literal-secret'
+    }
+
     It 'does not honor the fixture bypass outside designated test paths' {
         $content = 'password: bypassed-literal # repository-secret-scan: allow-test-fixture'
 

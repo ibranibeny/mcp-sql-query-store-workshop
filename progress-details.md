@@ -19,3 +19,23 @@
 - GREEN: focused SQL tests 93 passed; focused Pester tests 7 passed.
 - Aggregate: Python 163 passed, 2 platform-dependent symlink tests skipped; Pester 261 passed; PSScriptAnalyzer 0 errors/warnings; `git diff --check` clean.
 - No live Azure or SQL resources were used.
+
+# Strict secret-scan dynamic SQL fix
+
+## Root cause
+
+- The line-oriented password scanner classified the quoted prefix of a multiline dynamic SQL expression as a complete password value without considering its `REPLACE(@MasterKeyPassword, ...)` continuation.
+- Overlapping format patterns could also re-report a shorter match after the full generated expression had been approved.
+
+## Fix
+
+- Evaluate `+` continuation lines as one password expression and approve only generated expressions backed by variable, SQLCMD, or `SESSION_CONTEXT` references.
+- Preserve complete quoted-literal detection, deduplicate approved overlapping assignments, and return only path/type/line diagnostics.
+- Added exact master-key construction and contrasting hardcoded-literal regression coverage.
+
+## Validation
+
+- RED: focused repository validation had 1 expected failure for the exact safe master-key construction; expanded generated-expression coverage then exposed 3 expected failures.
+- GREEN: repository scanner 59 passed; SQL runner 7 passed; SQL contracts 93 passed.
+- Full strict validation: Python 163 passed with 2 platform-dependent skips; Pester 320 passed; syntax, PSScriptAnalyzer, JSON, tracked-file secret scan, static site, and whitespace gates passed.
+- No live Azure or SQL resources were used.

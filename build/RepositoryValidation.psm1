@@ -74,7 +74,9 @@ function Test-ApprovedPasswordValue {
         [string] $Value
     )
 
-    $candidate = $Value.Trim().Trim("'", '"')
+    $expression = $Value.Trim()
+    $candidate = $expression.TrimEnd(';').Trim().Trim("'", '"')
+    $sqlReferencePattern = '(?:@[A-Za-z_][A-Za-z0-9_]*|\$\([A-Za-z_][A-Za-z0-9_.-]*\)|(?i:SESSION_CONTEXT)\(\s*N?''[^'']+''\s*\))'
     return (
         [string]::IsNullOrWhiteSpace($candidate) -or
         $candidate -match '^(?i:SET_LOCALLY_ON_ADMIN_VM|WORKSHOP-PLACEHOLDER|<password>)$' -or
@@ -84,7 +86,15 @@ function Test-ApprovedPasswordValue {
         $candidate -match '^@[A-Za-z_][A-Za-z0-9_]*$' -or
         $candidate -match '^\$(?:env:)?[A-Za-z_][A-Za-z0-9_:]*$' -or
         $candidate -match '^\[(?:System\.)?Environment\]::GetEnvironmentVariable\((?:''[^'']+''|"[^"]+")\)$' -or
-        $candidate -match '^(?i:Read-Host)\b'
+        $candidate -match '^(?i:Read-Host)\b' -or
+        $expression -match "^$sqlReferencePattern\s*;?$" -or
+        (
+            (
+                $expression -match '\+' -and
+                $expression -match $sqlReferencePattern
+            ) -or
+            $expression -match "^\s*(?i:REPLACE)\(\s*$sqlReferencePattern\s*,"
+        )
     )
 }
 
@@ -175,16 +185,25 @@ function Find-RepositorySecret {
 
         foreach ($pattern in $patterns) {
             foreach ($match in [regex]::Matches($line, $pattern)) {
-                if (Test-ApprovedPasswordValue -Value $match.Groups['value'].Value) {
-                    continue
+                $valueForApproval = $match.Groups['value'].Value
+                $continuationIndex = $lineNumber
+                while (
+                    $continuationIndex -lt $contentLines.Count -and
+                    $contentLines[$continuationIndex] -match '^\s*\+'
+                ) {
+                    $valueForApproval += ' ' + $contentLines[$continuationIndex].Trim()
+                    $continuationIndex++
                 }
-
                 $passwordToken = [regex]::Match($match.Value, '(?i)(?:password|pwd)')
                 $assignmentIndex = if ($passwordToken.Success) {
                     $match.Index + $passwordToken.Index
                 }
                 else {
                     $match.Groups['value'].Index
+                }
+                if (Test-ApprovedPasswordValue -Value $valueForApproval) {
+                    [void] $reportedAssignments.Add($assignmentIndex)
+                    continue
                 }
                 if (-not $reportedAssignments.Add($assignmentIndex)) {
                     continue
