@@ -9,7 +9,7 @@
 
 ## 1. Executive summary
 
-This repository will deliver an evidence-driven L400 workshop for senior SQL Server administrators and performance engineers. It demonstrates how GitHub Copilot, the MSSQL extension for Visual Studio Code, and Microsoft's SQL Model Context Protocol (MCP) Server can assist with understanding and improving a complex stored procedure without replacing DBA judgment.
+This repository will deliver an evidence-driven L400 workshop for senior SQL Server administrators and performance engineers. Its primary goal is to demonstrate how GitHub Copilot, grounded through Microsoft's SQL Model Context Protocol (MCP) Server and verified SQL Server evidence, helps a DBA understand and optimize a complex stored procedure without replacing DBA judgment. The MSSQL extension for Visual Studio Code supplies complementary connected-schema and execution-plan capabilities.
 
 The workshop uses two Azure virtual machines in Indonesia Central:
 
@@ -20,7 +20,7 @@ The SQL VM has no public IP. SQL Server accepts encrypted TCP 1433 connections o
 
 The lab restores `AdventureWorks2022`, creates an isolated `lab` schema with deterministic synthetic data, and runs a bounded, deliberately inefficient month-end reporting procedure. Query Store, execution plans, dynamic management views, and controlled SQL MCP diagnostic tools provide evidence. Participants create an optimized procedure beside the baseline, verify result equivalence, perform an interleaved A/B test, and retain a change only when measured evidence supports it.
 
-The requested 70% memory behavior is an observation target, not a promised result. The lab can set `max server memory` to 45,875 MB, which is 70% of 64 GiB rounded down. It then attempts to bring SQL Server managed memory into a 65–70% band through a bounded workload. Host safety thresholds are measured separately. The controller reports the actual result and stops safely on timeout or threshold breach.
+The requested 80% before and 40% after behavior is implemented as a measured query-execution grant utilization target, not as Task Manager or total server memory. SQL Server intentionally retains buffer-pool memory after a query finishes, so process memory is not expected to halve immediately after query optimization. The inefficient procedure targets 75–85% of an isolated Resource Governor query-workspace pool; the optimized procedure targets 35–45% under the same data, parameters, worker count, memory configuration, and pool configuration. The controller reports the actual outcome and stops safely on timeout or threshold breach.
 
 ## 2. Confirmed decisions
 
@@ -41,6 +41,11 @@ The requested 70% memory behavior is an observation target, not a promised resul
 | SQL ingress | Private TCP 1433 from administration application security group only |
 | SQL public IP | None |
 | Outbound connectivity | NAT Gateway on private subnets |
+| Primary workshop outcome | Optimize a stored procedure with GitHub Copilot assisted by SQL MCP evidence |
+| Memory comparison metric | Workshop resource-pool query-execution grant utilization |
+| Baseline target band | 75–85%, presented as approximately 80% |
+| Optimized target band | 35–45%, presented as approximately 40% |
+| Workload isolation | SQL Server Enterprise Resource Governor pool and workload group |
 | Workshop duration | Six hours |
 | GitHub visibility | Public |
 | Repository name | `mcp-sql-query-store-workshop` |
@@ -57,11 +62,11 @@ Read-only Azure validation on 2026-08-31 confirmed that `Standard_D4s_v5`, `Stan
 3. Deploy a reproducible two-VM lab with native Az PowerShell.
 4. Keep SQL Server unreachable from the public internet.
 5. Restore AdventureWorks2022 and create an isolated, disposable performance lab.
-6. Produce bounded memory pressure through a complex stored procedure under controlled concurrency.
+6. Produce bounded memory-grant pressure through a complex stored procedure under controlled concurrency, targeting approximately 80% of the isolated workshop query-workspace pool.
 7. Capture Query Store, plan, wait, grant, spill, TempDB, process-memory, and host-memory evidence.
 8. Use VS Code and SQL MCP to learn the allowlisted diagnostic model while using MSSQL tools for broader connected-schema and execution-plan analysis.
 9. Improve the stored procedure while preserving its parameter and result contract.
-10. Prove or reject the improvement with deterministic correctness checks and interleaved A/B measurements.
+10. Prove or reject the intended reduction toward approximately 40% grant utilization with deterministic correctness checks and interleaved A/B measurements under unchanged conditions.
 11. Teach least privilege, human approval, cost control, failure handling, rollback, and verified teardown.
 12. Publish the complete workshop, scripts, diagrams, prompt book, and official source references through GitHub Pages.
 
@@ -72,7 +77,7 @@ Read-only Azure validation on 2026-08-31 confirmed that `Standard_D4s_v5`, `Stan
 3. This is not an autonomous production tuning system.
 4. SQL MCP Server will not be represented as an arbitrary SQL or DDL engine.
 5. GitHub Copilot output will not be accepted without database evidence and human review.
-6. The workshop will not guarantee exactly 70% memory utilization.
+6. The workshop will not claim that total host, SQL process, or Total Server Memory drops from exactly 80% to exactly 40%; those values are target bands for query-execution grant utilization only.
 7. The workshop will not expose SQL Server or the SQL VM to the internet.
 8. Repository implementation will not create billable Azure resources without a separate deployment approval after preflight.
 9. The repository will not publish credentials, private keys, generated secrets, or unreviewed evidence.
@@ -130,7 +135,7 @@ The workshop explicitly separates:
 - **Proposal:** a candidate change or experiment.
 - **Decision:** a retained or rejected change after correctness and performance validation.
 
-No sample benchmark number is described as an actual result. Illustrative output is labeled as illustrative. A target that is not reached is reported as `NotReached`, never replaced with an invented value.
+No sample benchmark number is described as an actual result. Illustrative output is labeled as illustrative. A missed target is reported as `BaselineTargetNotReached`, `ImprovedOutsideTarget`, or `NoMaterialImprovement`, as appropriate; it is never replaced with an invented value.
 
 ## 6. Technical boundary: MSSQL tools versus SQL MCP Server
 
@@ -298,12 +303,12 @@ sequenceDiagram
     loop Every five seconds
         S->>Q: Persist plans, runtime statistics, and waits
         W->>S: Sample host, process, grant, and semaphore evidence
-        alt SQL managed memory reaches 65–70% and host remains healthy
-            W->>S: Record Reached and stop tagged workers
+        alt Workshop grant utilization reaches 75–85% and host remains healthy
+            W->>S: Freeze worker count and record baseline target evidence
         else Host safety threshold or SQL health check fails
             W->>S: Record SafetyStop and stop tagged workers
         else Ten-minute limit reached
-            W->>S: Record NotReached and stop tagged workers
+            W->>S: Record BaselineTargetNotReached and stop tagged workers
         end
     end
 
@@ -315,7 +320,9 @@ sequenceDiagram
     F->>C: Approve candidate creation
     C->>S: Create optimized procedure beside baseline
     C->>S: Run deterministic result-equivalence tests
-    W->>S: Run interleaved A/B workload
+    W->>S: Run optimized procedure with frozen baseline conditions
+    S-->>W: Measure target band of 35–45% grant utilization
+    W->>S: Run interleaved A/B workload for performance statistics
     C->>M: Retrieve before-and-after evidence
     C-->>F: Report measured findings and remaining risks
 
@@ -362,7 +369,7 @@ By the end of the workshop, participants can:
 
 ### 10.1 Business scenario
 
-Adventure Works has a month-end sales analysis procedure that summarizes sales by territory, customer, and product for a requested date range. Under month-end concurrency, execution slows, SQL managed memory approaches its configured ceiling, some requests receive excessive grants, other requests wait, and selected parameter sets spill to TempDB.
+Adventure Works has a month-end sales analysis procedure that summarizes sales by territory, customer, and product for a requested date range. Under month-end concurrency, execution slows and the tagged workload consumes approximately 80% of its isolated query-workspace pool. Some requests receive excessive grants, other requests wait, and selected parameter sets spill to TempDB. After SQL MCP-grounded analysis and GitHub Copilot-assisted optimization, the same workload targets approximately 40% utilization of the same pool without changing the result contract.
 
 The DBA must determine:
 
@@ -424,19 +431,26 @@ The repository includes a reference candidate for reproducibility, but the instr
 
 ## 11. Memory target and safety model
 
-### 11.1 Definition of 70%
+### 11.1 Definition of the 80% and 40% targets
 
-The selected SQL VM has 64 GiB RAM:
+The primary workshop metric is regular query-execution grant utilization inside the dedicated Resource Governor pool:
 
 $$
-64 \times 1024 \times 0.70 = 45{,}875.2\ \text{MiB}
+	ext{Grant utilization percentage} =
+\frac{\text{granted\_memory\_kb}}
+{\text{total\_memory\_kb}}
+	imes 100
 $$
 
-The lab rounds down to `45,875 MB` for `max server memory`. This is a ceiling for memory governed by that setting; it is not an allocation command and does not cap every allocation visible in `sqlservr.exe`.
+Both values come from `sys.dm_exec_query_resource_semaphores` for the workshop pool and regular semaphore (`resource_semaphore_id = 0`). The controller corroborates this aggregate ratio with per-request data from `sys.dm_exec_query_memory_grants` and Granted Workspace Memory counters.
 
-The primary observation target is SQL Server **Total Server Memory divided by host physical memory**, sustained between 65% and 70% for three consecutive five-second samples. Host physical-memory use is a separate safety signal and will normally be higher because Windows and processes outside the SQL memory manager also consume RAM.
+The inefficient baseline targets 75–85%, reported as approximately 80%. The optimized procedure targets 35–45%, reported as approximately 40%. A target is considered met only after three consecutive five-second samples fall within its band.
 
-`min server memory` remains `0`. The workshop does not set minimum and maximum memory to the same or nearly the same value.
+Resource Governor isolates sessions whose application name begins with `MCP-SQL-Workshop`. For database objects that are not memory optimized, `MIN_MEMORY_PERCENT` and `MAX_MEMORY_PERCENT` govern query workspace or execution-grant memory, not the shared buffer pool. The workshop pool uses `MIN_MEMORY_PERCENT = 0` and a bounded `MAX_MEMORY_PERCENT`; its workload group limits the grant available to any single request. The exact pool percentage and single-request cap are recorded in each evidence bundle.
+
+`max server memory` is set to a conservative fixed value during setup, and `min server memory` remains `0`. The Resource Governor pool, server memory configuration, database scoped configurations, data, statistics, indexes, parameter schedule, and worker count remain unchanged between measured baseline and optimized runs. Memory Grant Feedback is disabled for the core controlled A/B comparison, with its prior state recorded and restored during cleanup; a separate optional exercise demonstrates it.
+
+Task Manager, SQL process memory, Total Server Memory, and buffer-pool size remain important context and safety measurements, but they are not the 80% → 40% acceptance metric. SQL Server can retain acquired cache memory after the optimized query completes, so expecting whole-process memory to immediately fall by half would be misleading.
 
 ### 11.2 Required measurements
 
@@ -444,27 +458,32 @@ The primary observation target is SQL Server **Total Server Memory divided by ho
 |---|---|---|
 | Host total, used, and available memory | `sys.dm_os_sys_memory` plus a Windows counter cross-check | Host safety and denominator validation |
 | SQL process physical memory | `sys.dm_os_process_memory` | Whole `sqlservr.exe` consumption |
-| Total and Target Server Memory | SQL Server performance counter DMV | Current committed and target managed memory |
+| Total and Target Server Memory | SQL Server performance counter DMV | Context for committed and target managed memory; not the A/B acceptance metric |
 | Buffer pool by database | DMVs | Cached database pages versus other consumers |
-| Granted Workspace Memory | SQL Server performance counter DMV | Active query-execution grants |
+| Workshop pool grant utilization | `sys.dm_exec_query_resource_semaphores` | Primary 80% → 40% A/B metric |
+| Requested, granted, ideal, and used memory by tagged request | `sys.dm_exec_query_memory_grants` | Explains grant accuracy and per-query contribution |
+| Granted Workspace Memory | SQL Server performance counter DMV | Corroborates active query-execution grants |
 | Memory Grants Outstanding and Pending | SQL Server performance counter DMV | Grant activity and contention |
 | Resource semaphore totals and waiters | `sys.dm_exec_query_resource_semaphores` | Grant-pool pressure |
-| Active query grants | `sys.dm_exec_query_memory_grants` | Requested, granted, used, and waiting memory by session |
+| Resource Governor pool and workload group state | Resource Governor catalog views and DMVs | Proves isolation and unchanged limits |
 | Spill and TempDB evidence | Actual plans, Query Store, TempDB DMVs | Grants that are insufficient |
 | Query Store runtime and waits | Query Store catalog views | Persistent before-and-after evidence |
 
 ### 11.3 Adaptive controller
 
 1. Refuse to run unless the expected server, Enterprise edition, database, and workshop marker are present.
-2. Verify Query Store is `READ_WRITE`.
-3. Verify host physical memory and `max server memory` match the approved lab profile.
+2. Verify Query Store is `READ_WRITE`, Resource Governor is enabled, and tagged sessions classify into the workshop workload group.
+3. Verify host memory, server memory, pool settings, workload-group settings, and database scoped configurations match the approved lab profile.
 4. Capture idle and single-execution baselines.
-5. Start one worker tagged with a unique application name and session context.
+5. Start one baseline worker tagged with the workshop application name and session context.
 6. Sample evidence every five seconds.
-7. Add at most one worker every twenty seconds while SQL managed memory is below 65%, host available memory exceeds 12 GiB, and all health checks pass.
+7. Add at most one baseline worker every twenty seconds while workshop-pool grant utilization is below 75%, host available memory exceeds 12 GiB, and all health checks pass.
 8. Never exceed four concurrent workers.
-9. Declare `Reached` after three consecutive samples show SQL managed memory between 65% and 70% of host physical memory.
-10. Stop all tagged workers and capture final evidence on success, timeout, manual stop, SQL health failure, or safety breach.
+9. Freeze the worker count and parameter schedule after three consecutive samples fall within the 75–85% baseline band.
+10. Stop tagged baseline workers, let active grants return, and preserve the calibrated conditions without changing data or configuration.
+11. Run the optimized procedure with the frozen worker count and parameter schedule.
+12. Declare `TargetMet` only when the baseline reached 75–85% and the optimized run reaches 35–45% for three consecutive samples.
+13. Stop all tagged workers and capture final evidence on success, timeout, manual stop, SQL health failure, or safety breach.
 
 ### 11.4 Hard guardrails
 
@@ -496,8 +515,10 @@ Prohibited operations include:
 
 | State | Meaning |
 |---|---|
-| `Reached` | Three consecutive samples placed SQL managed memory in the 65–70% band |
-| `NotReached` | The bounded run completed or timed out below the band |
+| `TargetMet` | Baseline reached 75–85% and the unchanged optimized run reached 35–45% |
+| `ImprovedOutsideTarget` | The optimized run reduced peak grant utilization by at least 25 percentage points but missed the 35–45% band |
+| `NoMaterialImprovement` | Correctness passed but peak grant utilization fell by less than 25 percentage points or another primary metric materially regressed |
+| `BaselineTargetNotReached` | The bounded baseline could not reach 75–85% within approved concurrency and time limits |
 | `SafetyStop` | A safety threshold stopped the workload |
 | `ManualStop` | The facilitator requested cancellation |
 | `Failed` | Identity, setup, measurement, or workload execution was invalid |
@@ -526,7 +547,7 @@ The workflow is:
 8. Create the candidate procedure beside the baseline after explicit approval.
 9. Verify result equivalence before performance testing.
 10. Run interleaved A/B trials to reduce ordering and cache bias.
-11. Compare median and P95 duration, CPU, logical reads, grant size, spill size, waits, and throughput.
+11. Compare peak and median pool grant utilization, median and P95 duration, CPU, logical reads, requested/granted/used memory, spill size, waits, and throughput.
 12. Retain or reject the candidate and record the reason.
 
 ## 13. Correctness and performance validation
@@ -563,7 +584,7 @@ Each baseline/candidate pair must pass:
 - Record worker count, memory configuration, database size, Query Store state, VM SKU, and image version.
 - Do not claim improvement from a single execution.
 
-The candidate is accepted only when every correctness check passes, at least two primary performance measures improve, and no material regression appears in another primary measure.
+The candidate is accepted only when every correctness check passes, peak query-grant utilization is materially lower, at least one additional primary performance measure improves, and no material regression appears in another primary measure. `TargetMet` requires the 75–85% baseline and 35–45% optimized bands; a useful improvement outside those bands is reported as `ImprovedOutsideTarget`, not rewritten as 80% → 40%.
 
 ### 13.3 Optional Query Store hint exercise
 
@@ -878,7 +899,7 @@ The site uses a “query-plan workbench” visual language rather than a generic
 - copy controls for PowerShell, T-SQL, JSON, and prompts;
 - Mermaid architecture, sequence, deployment, and safety diagrams;
 - browser-local progress only;
-- a memory calculator explaining configured ceiling versus observed utilization;
+- an 80% → 40% comparison panel that calculates workshop-pool grant utilization and clearly separates it from host, process, Total Server Memory, and buffer-pool metrics;
 - source links adjacent to technically sensitive claims;
 - explicit destructive and billable action labels;
 - no analytics or external data collection by default.
@@ -902,7 +923,8 @@ The site uses a “query-plan workbench” visual language rather than a generic
 | Backup verification fails | Do not restore or continue setup |
 | Query Store not `READ_WRITE` | Do not start workload |
 | Data-disk headroom insufficient | Stop generation before unsafe consumption |
-| Memory target not reached | Record `NotReached`; do not exceed approved limits |
+| Baseline 80% target not reached | Record `BaselineTargetNotReached`; do not increase workers, duration, pool size, or host pressure beyond approved limits |
+| Optimized 40% target not reached | Record `ImprovedOutsideTarget` or `NoMaterialImprovement` from measured evidence; never substitute target values |
 | Safety threshold crossed | Capture evidence, stop only tagged workers, record `SafetyStop` |
 | Candidate correctness mismatch | Reject candidate and skip performance acceptance |
 | DAB fails to start | Show MCP output, version, configuration, environment, and TLS checks |
@@ -939,7 +961,7 @@ Tests cover:
 - explicit deployment confirmation;
 - idempotent resource discovery;
 - teardown confirmation and absence checks;
-- workload state transitions using mocked memory samples.
+- baseline calibration, frozen A/B conditions, and outcome transitions using mocked grant and host-memory samples.
 
 ### 20.3 SQL tests
 
@@ -1005,6 +1027,9 @@ Implementation will cite and revalidate these primary sources:
 - [Query Store hints](https://learn.microsoft.com/en-us/sql/relational-databases/performance/query-store-hints?view=sql-server-ver17)
 - [Troubleshoot memory grant issues](https://learn.microsoft.com/en-us/troubleshoot/sql/database-engine/performance/troubleshoot-memory-grant-issues)
 - [Server memory configuration options](https://learn.microsoft.com/en-us/sql/database-engine/configure-windows/server-memory-server-configuration-options?view=sql-server-ver17)
+- [Resource Governor](https://learn.microsoft.com/en-us/sql/relational-databases/resource-governor/resource-governor?view=sql-server-ver17)
+- [Resource Governor resource pool](https://learn.microsoft.com/en-us/sql/relational-databases/resource-governor/resource-governor-resource-pool?view=sql-server-ver17)
+- [Resource Governor configuration examples and best practices](https://learn.microsoft.com/en-us/sql/relational-databases/resource-governor/resource-governor-walkthrough?view=sql-server-ver17)
 - [Guide to creating SQL Server VM with PowerShell](https://learn.microsoft.com/en-us/azure/azure-sql/virtual-machines/windows/create-sql-vm-powershell?view=azuresql)
 - [SQL Server on Azure VMs security considerations](https://learn.microsoft.com/en-us/azure/azure-sql/virtual-machines/windows/security-considerations-best-practices?view=azuresql)
 - [Use Windows client in Azure for dev/test](https://learn.microsoft.com/en-us/azure/virtual-machines/windows/client-images)
