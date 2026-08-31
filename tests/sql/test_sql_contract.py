@@ -790,6 +790,195 @@ def test_generator_defers_optimized_index_and_avoids_destructive_commands() -> N
     assert "WHILE 1 = 1" not in text
 
 
+def procedure_signature(name: str, procedure: str) -> list[tuple[str, str, str | None]]:
+    text = sql(name)
+    match = re.search(
+        rf"CREATE\s+OR\s+ALTER\s+PROCEDURE\s+{re.escape(procedure)}\s+(?P<header>.*?)\s+AS\s+BEGIN",
+        text,
+        re.IGNORECASE | re.DOTALL,
+    )
+    assert match, f"missing procedure header for {procedure}"
+    signature: list[tuple[str, str, str | None]] = []
+    for declaration in match.group("header").split(","):
+        parsed = re.fullmatch(
+            r"\s*(@\w+)\s+(date|int)(?:\s*=\s*(NULL|\d+))?\s*",
+            declaration,
+            re.IGNORECASE,
+        )
+        assert parsed, f"unsupported or malformed parameter declaration: {declaration!r}"
+        parameter, data_type, default = parsed.groups()
+        signature.append((parameter.lower(), data_type.lower(), default.upper() if default else None))
+    return signature
+
+
+def procedure_body(name: str, procedure: str) -> str:
+    text = sql(name)
+    match = re.search(
+        rf"CREATE\s+OR\s+ALTER\s+PROCEDURE\s+{re.escape(procedure)}\b(?P<body>.*)",
+        text,
+        re.IGNORECASE | re.DOTALL,
+    )
+    assert match
+    body = re.sub(r"/\*.*?\*/", " ", match.group("body"), flags=re.DOTALL)
+    body = re.sub(r"--[^\r\n]*", " ", body)
+    return re.sub(r"\s+", " ", body).upper()
+
+
+def test_month_end_procedures_have_the_exact_same_signature() -> None:
+    expected = [
+        ("@startdate", "date", None),
+        ("@enddateexclusive", "date", None),
+        ("@territoryid", "int", "NULL"),
+        ("@topcount", "int", "100"),
+    ]
+    baseline = procedure_signature("04-CreateBaselineProcedure.sql", "lab.usp_MonthEndSalesBaseline")
+    optimized = procedure_signature("06-CreateOptimizedProcedure.sql", "lab.usp_MonthEndSalesOptimized")
+    assert baseline == optimized == expected
+
+
+@pytest.mark.parametrize("name", ["04-CreateBaselineProcedure.sql", "06-CreateOptimizedProcedure.sql"])
+def test_month_end_procedures_use_exact_marker_session_and_validation_contract(name: str) -> None:
+    text = normalized(name)
+    for contract in (
+        "68A70D6E-62D8-4A77-8F0A-9DA7934DBA7C",
+        "N'MCP SQL QUERY STORE WORKSHOP'",
+        "0XADA06F206D3DB321527A5AAB390FC814E28EBB59791967EB99841BF669E1B16B",
+        "SESSION_CONTEXT(N'WORKSHOPRUNID')",
+        "SESSION_CONTEXT(N'WORKSHOPMANUALEXECUTION')",
+        "APP_NAME() LIKE N'MCP-SQL-WORKSHOP%'",
+        "@STARTDATE IS NULL",
+        "@ENDDATEEXCLUSIVE IS NULL",
+        "@ENDDATEEXCLUSIVE <= @STARTDATE",
+        "DATEDIFF(DAY, @STARTDATE, @ENDDATEEXCLUSIVE) > 366",
+        "@TOPCOUNT NOT BETWEEN 1 AND 1000",
+        "SALES.SALESTERRITORY",
+        "LAB.FACTSALES",
+    ):
+        assert contract in text
+    procedure = "lab.usp_MonthEndSalesBaseline" if name.startswith("04") else "lab.usp_MonthEndSalesOptimized"
+    errors = re.findall(r"THROW\s+(514\d{2}),\s*'([^']+)'", procedure_body(name, procedure))
+    assert errors[:8] == [
+        ("51400", "THE WORKSHOP MARKER CONTRACT IS INVALID."),
+        ("51401", "WORKSHOPRUNID SESSION CONTEXT IS REQUIRED."),
+        ("51402", "THE SESSION MUST USE A WORKSHOP APPLICATION NAME OR EXPLICIT MANUAL EXECUTION CONTEXT."),
+        ("51403", "STARTDATE IS REQUIRED."),
+        ("51404", "ENDDATEEXCLUSIVE IS REQUIRED."),
+        ("51405", "ENDDATEEXCLUSIVE MUST BE GREATER THAN STARTDATE."),
+        ("51406", "THE DATE RANGE MUST NOT EXCEED 366 DAYS."),
+        ("51407", "TOPCOUNT MUST BE BETWEEN 1 AND 1000."),
+    ]
+    assert ("51408", "TERRITORYID DOES NOT EXIST IN THE SOURCE OR SYNTHETIC DOMAIN.") in errors
+
+
+def test_baseline_contains_bounded_natural_antipatterns() -> None:
+    body = procedure_body("04-CreateBaselineProcedure.sql", "lab.usp_MonthEndSalesBaseline")
+    assert "CONVERT(DATE, FS.ORDERDATE) >= @STARTDATE" in body
+    assert "CONVERT(DATE, FS.ORDERDATE) < @ENDDATEEXCLUSIVE" in body
+    assert body.count("LAB.FACTSALES AS FS") == 2
+    assert "WIDEPAYLOAD" in body
+    assert "GROUP BY" in body and "ORDER BY" in body
+    assert "OPTION (HASH JOIN" not in body and "OPTION (HASH GROUP" not in body
+    assert "CROSS JOIN" not in body
+
+
+def test_optimized_has_one_narrow_sargable_fact_access_and_exact_index() -> None:
+    text = normalized("06-CreateOptimizedProcedure.sql")
+    body = procedure_body("06-CreateOptimizedProcedure.sql", "lab.usp_MonthEndSalesOptimized")
+    assert "CREATE INDEX IX_FACTSALES_ORDERDATE_TERRITORY" in text
+    assert "(ORDERDATE, TERRITORYID)" in text
+    assert "INCLUDE (CUSTOMERID, PRODUCTID, ORDERQTY, UNITPRICE, SALESAMOUNT)" in text
+    assert "SYS.INDEX_COLUMNS" in text and "EXISTING IX_FACTSALES_ORDERDATE_TERRITORY DEFINITION DOES NOT MATCH" in text
+    assert "IS_DESCENDING_KEY" in text and "IS_HYPOTHETICAL" in text
+    assert body.count("LAB.FACTSALES AS FS") == 1
+    assert "FS.ORDERDATE >= @STARTDATE" in body
+    assert "FS.ORDERDATE < @ENDDATEEXCLUSIVE" in body
+    assert "WIDEPAYLOAD" not in body
+    assert body.count("GROUP BY") == 1
+    assert "OPTION (" not in body
+
+
+@pytest.mark.parametrize("name", ["04-CreateBaselineProcedure.sql", "06-CreateOptimizedProcedure.sql"])
+def test_average_unit_price_is_the_same_quantity_weighted_formula(name: str) -> None:
+    procedure = "lab.usp_MonthEndSalesBaseline" if name.startswith("04") else "lab.usp_MonthEndSalesOptimized"
+    body = procedure_body(name, procedure)
+    assert re.search(
+        r"SUM\(CONVERT\(DECIMAL\(38,4\), FS\.SALESAMOUNT\)\)\s*/\s*"
+        r"NULLIF\(SUM\(CONVERT\(DECIMAL\(38,4\), FS\.ORDERQTY\)\), 0\)",
+        body,
+    )
+
+
+@pytest.mark.parametrize("name", ["04-CreateBaselineProcedure.sql", "06-CreateOptimizedProcedure.sql"])
+def test_procedure_output_contract_and_order_are_explicit(name: str) -> None:
+    body = procedure_body(
+        name,
+        "lab.usp_MonthEndSalesBaseline" if name.startswith("04") else "lab.usp_MonthEndSalesOptimized",
+    )
+    for contract in (
+        "TERRITORYID INT",
+        "CUSTOMERID INT",
+        "PRODUCTID INT",
+        "ORDERCOUNT BIGINT",
+        "TOTALQUANTITY BIGINT",
+        "TOTALSALES DECIMAL(38,4)",
+        "AVERAGEUNITPRICE DECIMAL(19,4)",
+        "SALESRANK BIGINT",
+        "ORDER BY SALESRANK, CASE WHEN TERRITORYID IS NULL THEN 0 ELSE 1 END, TERRITORYID, CUSTOMERID, PRODUCTID",
+    ):
+        assert contract in body
+
+
+def test_equivalence_harness_checks_metadata_rows_sets_hashes_order_and_errors() -> None:
+    text = normalized("07-ValidateEquivalence.sql")
+    assert "SYS.DM_EXEC_DESCRIBE_FIRST_RESULT_SET_FOR_OBJECT" in text
+    for token in ("COLUMN_ORDINAL", "NAME", "SYSTEM_TYPE_NAME", "IS_NULLABLE"):
+        assert token in text
+    assert "#BASELINE" in text and "#OPTIMIZED" in text
+    assert text.count("EXCEPT") >= 4
+    assert "COUNT_BIG(*)" in text
+    assert "HASHBYTES('SHA2_256'" in text
+    assert "CONCAT_WS" in text and "STRING_AGG" in text
+    assert "BASELINEEXCEPTOPTIMIZED" in text and "OPTIMIZEDEXCEPTBASELINE" in text
+    assert "IDENTITY" in text and "SALESRANK" in text
+    assert "INVALIDINPUTCASES" in text and "ERROR_NUMBER()" in text and "ERROR_MESSAGE()" in text
+    assert "LAB.VALIDATIONRUN" in text
+
+
+def test_equivalence_matrix_has_at_least_eight_deterministic_cases() -> None:
+    text = normalized("07-ValidateEquivalence.sql")
+    values = re.search(r"INSERT\s+@CASES.*?VALUES(?P<values>.*?);", text)
+    assert values
+    case_names = re.findall(r"\(N'([^']+)'", values.group("values"))
+    assert len(case_names) >= 8
+    for required in (
+        "NARROW-NULL-TERRITORY",
+        "BROAD-NULL-TERRITORY",
+        "LOW-TERRITORY",
+        "HIGH-TERRITORY",
+        "TOP-MINIMUM",
+        "TOP-MAXIMUM",
+        "NO-MATCH",
+        "DATE-BOUNDARY",
+    ):
+        assert required in case_names
+    assert "MIN(TERRITORYID)" in text and "MAX(TERRITORYID)" in text
+    assert "2018-01-01" in text and "2024-01-01" in text
+
+
+def test_task9_scripts_avoid_sqlcmd_injection_and_unbounded_or_destructive_operations() -> None:
+    combined = "\n".join(sql(name) for name in (
+        "04-CreateBaselineProcedure.sql",
+        "06-CreateOptimizedProcedure.sql",
+        "07-ValidateEquivalence.sql",
+    ))
+    upper = combined.upper()
+    assert not re.search(r"\$\(\w+\)", combined)
+    assert "DBCC DROPCLEANBUFFERS" not in upper
+    assert "DBCC FREEPROCCACHE" not in upper
+    assert "WHILE 1 = 1" not in upper
+    assert "DROP DATABASE" not in upper
+
+
 def test_all_sql_is_bounded_and_avoids_destructive_or_public_network_commands() -> None:
     combined = "\n".join(normalized(path.name) for path in SQL_DIR.glob("*.sql"))
     forbidden = (
