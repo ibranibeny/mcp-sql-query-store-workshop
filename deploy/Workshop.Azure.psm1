@@ -878,11 +878,28 @@ ${function:Test-WorkshopPrerequisites} = {
         else {
             $restrictions = @($sku.Restrictions)
         }
-        $skuPassed = $skuResult.Succeeded -and $null -ne $sku -and $restrictions.Count -eq 0
+        $capabilities = if ($null -ne $sku -and $sku.PSObject.Properties.Name -contains 'Capabilities') {
+            @($sku.Capabilities)
+        }
+        else {
+            @()
+        }
+        $trustedLaunchDisabled = $capabilities | Where-Object Name -EQ 'TrustedLaunchDisabled' |
+            Select-Object -First 1
+        $hyperVGenerations = $capabilities | Where-Object Name -EQ 'HyperVGenerations' |
+            Select-Object -First 1
+        $trustedLaunchAllowed = $null -eq $trustedLaunchDisabled -or
+            -not [string]::Equals([string] $trustedLaunchDisabled.Value, 'true', [System.StringComparison]::OrdinalIgnoreCase)
+        $generationV2Allowed = $null -eq $hyperVGenerations -or
+            @(([string] $hyperVGenerations.Value) -split ',' | ForEach-Object { $_.Trim() }) -contains 'V2'
+        $skuPassed = $skuResult.Succeeded -and $null -ne $sku -and $restrictions.Count -eq 0 -and
+            $trustedLaunchAllowed -and $generationV2Allowed
         $restrictionDetail = if ($restrictions.Count -eq 0) { 'none' } else { ($restrictions.ReasonCode -join ', ') }
+        $trustedLaunchDetail = if ($null -eq $trustedLaunchDisabled) { 'not returned' } else { [string] $trustedLaunchDisabled.Value }
+        $generationDetail = if ($null -eq $hyperVGenerations) { 'not returned' } else { [string] $hyperVGenerations.Value }
         Add-WorkshopCheck -Checks $checks -Name "VM SKU $($vm.Size)" -Passed $skuPassed `
-            -Detail "Exact SKU in $($Config.Location); restrictions: $restrictionDetail. Availability is not claimed until this check passes." `
-            -Remediation "Resolve subscription restrictions or choose an approved capacity path for $($vm.Size)."
+            -Detail "Exact SKU in $($Config.Location); restrictions: $restrictionDetail; TrustedLaunchDisabled: $trustedLaunchDetail; HyperVGenerations: $generationDetail. Availability is not claimed until this check passes." `
+            -Remediation "Confirm $($vm.Size) supports Trusted Launch and Hyper-V generation V2 without subscription restrictions."
     }
 
     $diskSku = $skuResult.Value | Where-Object {
@@ -1022,7 +1039,16 @@ ${function:Test-WorkshopPrerequisites} = {
         }
         $latestRecord = $versions | Sort-Object ParsedVersion -Descending | Select-Object -First 1
         $latest = if ($null -eq $latestRecord) { $null } else { $latestRecord.Image }
-        $imagePassed = $imageResult.Succeeded -and $null -ne $latest
+        $hyperVGeneration = if ($null -ne $latest -and
+            $latest.PSObject.Properties.Name -contains 'HyperVGeneration') {
+            [string] $latest.HyperVGeneration
+        }
+        else {
+            ''
+        }
+        $generationV2 = [string]::IsNullOrWhiteSpace($hyperVGeneration) -or
+            @($hyperVGeneration -split ',' | ForEach-Object { $_.Trim() }) -contains 'V2'
+        $imagePassed = $imageResult.Succeeded -and $null -ne $latest -and $generationV2
         if ($imagePassed) {
             $resolvedImages[$role] = [pscustomobject][ordered]@{
                 Publisher = [string] $vm.Publisher
@@ -1032,9 +1058,10 @@ ${function:Test-WorkshopPrerequisites} = {
             }
         }
         $resolvedVersion = if ($null -eq $latest) { 'not resolved' } else { [string] $latest.Version }
+        $generationDetail = if ([string]::IsNullOrWhiteSpace($hyperVGeneration)) { 'not returned' } else { $hyperVGeneration }
         Add-WorkshopCheck -Checks $checks -Name "$role VM image" -Passed $imagePassed `
-            -Detail "Exact image $($vm.Publisher):$($vm.Offer):$($vm.Sku); immutable version: $resolvedVersion." `
-            -Remediation 'Confirm the exact Marketplace image coordinates are visible in Indonesia Central.'
+            -Detail "Exact image $($vm.Publisher):$($vm.Offer):$($vm.Sku); immutable version: $resolvedVersion; HyperVGeneration: $generationDetail." `
+            -Remediation 'Confirm the exact Marketplace image is visible in Indonesia Central and supports Hyper-V generation V2.'
     }
 
     $usageResult = Invoke-WorkshopReadOperation -Operation $Operations.GetVmUsages -Arguments @($Config.Location)
@@ -2327,9 +2354,9 @@ function Get-WorkshopVmSpecification {
         VmSize = [string] $vmConfig.Size
         OsType = 'Windows'
         LicenseType = if ($Role -eq 'Admin') { 'Windows_Client' } else { $null }
-        SecurityType = if ($Role -eq 'Admin') { 'TrustedLaunch' } else { $null }
-        SecureBoot = $Role -eq 'Admin'
-        VTpm = $Role -eq 'Admin'
+        SecurityType = 'TrustedLaunch'
+        SecureBoot = $true
+        VTpm = $true
         Image = [pscustomobject][ordered]@{
             Publisher = [string] $vmConfig.Publisher
             Offer = [string] $vmConfig.Offer

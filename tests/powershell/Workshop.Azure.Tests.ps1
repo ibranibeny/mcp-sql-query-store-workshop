@@ -62,8 +62,22 @@ BeforeAll {
             GetLocations = { @([pscustomobject]@{ Location = 'indonesiacentral' }) }
             GetComputeSkus = {
                 @(
-                    [pscustomobject]@{ Name = 'Standard_D4s_v5'; ResourceType = 'virtualMachines'; Family = 'standardDSv5Family'; Locations = @('indonesiacentral'); Restrictions = @() }
-                    [pscustomobject]@{ Name = 'Standard_E8s_v5'; ResourceType = 'virtualMachines'; Family = 'standardESv5Family'; Locations = @('indonesiacentral'); Restrictions = @() }
+                    [pscustomobject]@{
+                        Name = 'Standard_D4s_v5'; ResourceType = 'virtualMachines'; Family = 'standardDSv5Family'
+                        Locations = @('indonesiacentral'); Restrictions = @()
+                        Capabilities = @(
+                            [pscustomobject]@{ Name = 'TrustedLaunchDisabled'; Value = 'False' }
+                            [pscustomobject]@{ Name = 'HyperVGenerations'; Value = 'V1,V2' }
+                        )
+                    }
+                    [pscustomobject]@{
+                        Name = 'Standard_E8s_v5'; ResourceType = 'virtualMachines'; Family = 'standardESv5Family'
+                        Locations = @('indonesiacentral'); Restrictions = @()
+                        Capabilities = @(
+                            [pscustomobject]@{ Name = 'TrustedLaunchDisabled'; Value = 'False' }
+                            [pscustomobject]@{ Name = 'HyperVGenerations'; Value = 'V1,V2' }
+                        )
+                    }
                     [pscustomobject]@{ Name = 'Premium_LRS'; ResourceType = 'disks'; Locations = @('indonesiacentral'); Restrictions = @() }
                 )
             }
@@ -72,13 +86,13 @@ BeforeAll {
                 $null = $Offer, $Sku, $Location
                 if ($Publisher -eq 'MicrosoftWindowsDesktop') {
                     return @(
-                        [pscustomobject]@{ Version = '26100.2000.1' }
-                        [pscustomobject]@{ Version = '26100.2033.1' }
+                        [pscustomobject]@{ Version = '26100.2000.1'; HyperVGeneration = 'V2' }
+                        [pscustomobject]@{ Version = '26100.2033.1'; HyperVGeneration = 'V2' }
                     )
                 }
                 return @(
-                    [pscustomobject]@{ Version = '16.0.1000.1' }
-                    [pscustomobject]@{ Version = '16.0.1135.2' }
+                    [pscustomobject]@{ Version = '16.0.1000.1'; HyperVGeneration = 'V2' }
+                    [pscustomobject]@{ Version = '16.0.1135.2'; HyperVGeneration = 'V2' }
                 )
             }
             GetVmUsages = {
@@ -910,6 +924,42 @@ Describe 'Non-destructive workshop preflight' {
         ($result.Checks | Where-Object Name -EQ 'VM SKU Standard_E8s_v5').Status | Should -Be 'Failed'
     }
 
+    It 'rejects VM SKU metadata that disables Trusted Launch or omits generation V2' -ForEach @(
+        @{ Size = 'Standard_D4s_v5'; Capability = 'TrustedLaunchDisabled'; Value = 'True' }
+        @{ Size = 'Standard_E8s_v5'; Capability = 'TrustedLaunchDisabled'; Value = 'true' }
+        @{ Size = 'Standard_D4s_v5'; Capability = 'HyperVGenerations'; Value = 'V1' }
+        @{ Size = 'Standard_E8s_v5'; Capability = 'HyperVGenerations'; Value = 'V1' }
+    ) {
+        $ops = Get-PassingOperationSet
+        $passingSkus = @(& $ops.GetComputeSkus)
+        $targetSku = $passingSkus | Where-Object Name -EQ $Size
+        ($targetSku.Capabilities | Where-Object Name -EQ $Capability).Value = $Value
+        $ops.GetComputeSkus = { $passingSkus }.GetNewClosure()
+
+        $result = Invoke-PassingPreflight -Operations $ops
+
+        $result.Passed | Should -BeFalse
+        ($result.Checks | Where-Object Name -EQ "VM SKU $Size").Status | Should -Be 'Failed'
+    }
+
+    It 'rejects selected VM image metadata that is not generation V2' -ForEach @(
+        @{ Publisher = 'MicrosoftWindowsDesktop'; Check = 'Admin VM image' }
+        @{ Publisher = 'MicrosoftSQLServer'; Check = 'SQL VM image' }
+    ) {
+        $rejectedPublisher = $Publisher
+        $ops = Get-PassingOperationSet
+        $ops.GetImages = {
+            param($ImagePublisher)
+            $generation = if ($ImagePublisher -eq $rejectedPublisher) { 'V1' } else { 'V2' }
+            [pscustomobject]@{ Version = '1.2.3'; HyperVGeneration = $generation }
+        }.GetNewClosure()
+
+        $result = Invoke-PassingPreflight -Operations $ops
+
+        $result.Passed | Should -BeFalse
+        ($result.Checks | Where-Object Name -EQ $Check).Status | Should -Be 'Failed'
+    }
+
     It 'scopes resource-name collision reads to the target resource group' {
         $script:CollisionScope = $null
         $ops = Get-PassingOperationSet
@@ -1610,6 +1660,10 @@ Describe 'Exact workshop VM creation' {
         $vm.Image.Offer | Should -Be 'SQL2022-WS2022'
         $vm.Image.Sku | Should -Be 'enterprise-gen2'
         $vm.Image.Version | Should -Be '16.0.1135.2'
+        $vm.LicenseType | Should -BeNullOrEmpty
+        $vm.SecurityType | Should -Be 'TrustedLaunch'
+        $vm.SecureBoot | Should -BeTrue
+        $vm.VTpm | Should -BeTrue
         $vm.OsDisk.SizeGiB | Should -Be 128
         $vm.OsDisk.Sku | Should -Be 'Premium_LRS'
         $vm.NetworkInterfaceIds | Should -Be @('/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/rg-mcp-sql-workshop/providers/Microsoft.Network/networkInterfaces/nic-mcpsql-sql')
@@ -1633,6 +1687,9 @@ Describe 'Exact workshop VM creation' {
 
     It 'fails all known shape conflicts before any later mutation' -ForEach @(
         @{ Target = 'VM'; Property = 'VmSize'; Value = 'Standard_E2s_v5' }
+        @{ Target = 'VM'; Property = 'SecurityType'; Value = $null }
+        @{ Target = 'VM'; Property = 'SecureBoot'; Value = $false }
+        @{ Target = 'VM'; Property = 'VTpm'; Value = $false }
         @{ Target = 'VM'; Property = 'NetworkInterfaceIds'; Value = @('/wrong/nic') }
         @{ Target = 'VM'; Property = 'Image'; Value = [pscustomobject]@{ Publisher='MicrosoftSQLServer'; Offer='SQL2022-WS2022'; Sku='enterprise-gen2'; Version='latest' } }
         @{ Target = 'Data'; Property = 'SizeGiB'; Value = 512 }
@@ -1659,6 +1716,27 @@ Describe 'Exact workshop VM creation' {
             Should -Throw '*positive read-back*'
     }
 
+    It 'rejects SQL Trusted Launch mismatch during positive readback' -ForEach @(
+        @{ Property = 'SecurityType'; Value = $null }
+        @{ Property = 'SecureBoot'; Value = $false }
+        @{ Property = 'VTpm'; Value = $false }
+    ) {
+        $mismatchProperty = $Property
+        $mismatchValue = $Value
+        $vmState = $script:VmState
+        $script:VmOperations.CreateVm = {
+            param($Spec, [System.Management.Automation.PSCredential] $Credential, $ResourceGroupName)
+            $null = $Credential, $ResourceGroupName
+            $readBack = $Spec | ConvertTo-Json -Depth 10 | ConvertFrom-Json
+            $readBack.$mismatchProperty = $mismatchValue
+            $vmState[$Spec.Name] = $readBack
+        }.GetNewClosure()
+
+        { New-WorkshopSqlVm -Config $script:Config -ImageVersion '16.0.1135.2' `
+                -Credential $script:VmCredential -Operations $script:VmOperations } |
+            Should -Throw '*positive read-back*'
+    }
+
     It 'positively verifies both approved VM boundaries' {
         $null = New-WorkshopAdminVm -Config $script:Config -ImageVersion '26100.2033.1' `
             -Credential $script:VmCredential -WindowsClientLicenseAttested $true -Operations $script:VmOperations
@@ -1672,6 +1750,26 @@ Describe 'Exact workshop VM creation' {
 
         $result.Passed | Should -BeTrue
         @($result.Checks | Where-Object Status -EQ 'Failed') | Should -HaveCount 0
+    }
+
+    It 'fails the SQL VM boundary for Trusted Launch drift' -ForEach @(
+        @{ Property = 'SecurityType'; Value = $null }
+        @{ Property = 'SecureBoot'; Value = $false }
+        @{ Property = 'VTpm'; Value = $false }
+    ) {
+        $null = New-WorkshopAdminVm -Config $script:Config -ImageVersion '26100.2033.1' `
+            -Credential $script:VmCredential -WindowsClientLicenseAttested $true -Operations $script:VmOperations
+        $null = New-WorkshopSqlVm -Config $script:Config -ImageVersion '16.0.1135.2' `
+            -Credential $script:VmCredential -Operations $script:VmOperations
+        $script:VmState['vm-mcpsql-sql'].$Property = $Value
+
+        $result = Test-WorkshopVmBoundary -Config $script:Config -ResolvedImages @{
+            Admin = [pscustomobject]@{ Version = '26100.2033.1' }
+            Sql = [pscustomobject]@{ Version = '16.0.1135.2' }
+        } -Operations $script:VmOperations
+
+        $result.Passed | Should -BeFalse
+        ($result.Checks | Where-Object Name -EQ 'Sql VM exact shape').Status | Should -Be 'Failed'
     }
 }
 
@@ -1986,7 +2084,71 @@ Describe 'Default Task 6 Az command contracts' {
                 $Name -eq 'disk-mcpsql-sql-log' -and $Lun -eq 1 -and $Caching -eq 'None' -and
                 $CreateOption -eq 'Attach' -and $ErrorAction -eq 'Stop'
             }
+            Should -Invoke New-AzVMConfig -Times 1 -Exactly -ParameterFilter {
+                $VMName -eq 'vm-mcpsql-sql' -and $VMSize -eq 'Standard_E8s_v5' -and
+                [string]::IsNullOrWhiteSpace([string] $LicenseType) -and $ErrorAction -eq 'Stop'
+            }
+            Should -Invoke Set-AzVMSecurityProfile -Times 1 -Exactly -ParameterFilter {
+                $SecurityType -eq 'TrustedLaunch' -and $ErrorAction -eq 'Stop'
+            }
+            Should -Invoke Set-AzVmUefi -Times 1 -Exactly -ParameterFilter {
+                $EnableVtpm -and $EnableSecureBoot -and $ErrorAction -eq 'Stop'
+            }
             Should -Invoke New-AzPublicIpAddress -Times 0 -Exactly
+        }
+    }
+
+    It 'fails closed before SQL VM creation when Trusted Launch commands reject required parameters' -ForEach @(
+        @{ FailedCommand = 'SecurityProfile'; Message = 'SecurityType'; ExpectedUefiCalls = 0 }
+        @{ FailedCommand = 'Uefi'; Message = 'EnableVtpm'; ExpectedUefiCalls = 1 }
+    ) {
+        InModuleScope Workshop.Azure -Parameters @{
+            Config = $script:Config
+            TestCredential = (Get-TestCredential)
+            RejectedCommand = $FailedCommand
+            RejectionMessage = $Message
+            UefiCalls = $ExpectedUefiCalls
+        } {
+            param(
+                $Config,
+                [System.Management.Automation.PSCredential] $TestCredential,
+                $RejectedCommand,
+                $RejectionMessage,
+                $UefiCalls
+            )
+            $credential = $TestCredential
+            $rejected = $RejectedCommand
+            $rejection = $RejectionMessage
+            $expectedUefiCalls = $UefiCalls
+            $spec = Get-WorkshopVmSpecification -Role Sql -Config $Config `
+                -ImageVersion '16.0.1135.2' -SubscriptionId 'sub'
+            Mock New-AzVMConfig { [pscustomobject]@{ Name=$VMName } }
+            Mock Set-AzVMOperatingSystem { $VM }
+            Mock Set-AzVMSourceImage { $VM }
+            Mock Set-AzVMOSDisk { $VM }
+            Mock Set-AzVMSecurityProfile {
+                if ($rejected -eq 'SecurityProfile') {
+                    throw "A parameter cannot be found that matches parameter name $rejection."
+                }
+                $VM
+            }
+            Mock Set-AzVmUefi {
+                if ($rejected -eq 'Uefi') {
+                    throw "A parameter cannot be found that matches parameter name $rejection."
+                }
+                $VM
+            }
+            Mock Add-AzVMNetworkInterface { $VM }
+            Mock Add-AzVMDataDisk { $VM }
+            Mock New-AzVM { [pscustomobject]@{ Name=$VM.Name } }
+
+            $operations = Get-DefaultWorkshopVmOperationSet
+            { & $operations.CreateVm $spec $credential $Config.ResourceGroupName } |
+                Should -Throw "*$rejection*"
+
+            Should -Invoke Set-AzVMSecurityProfile -Times 1 -Exactly
+            Should -Invoke Set-AzVmUefi -Times $expectedUefiCalls -Exactly
+            Should -Invoke New-AzVM -Times 0 -Exactly
         }
     }
 
