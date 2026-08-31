@@ -24,8 +24,9 @@
   </header>
   <nav id="module-navigation" class="module-navigation" aria-label="Workshop modules" data-open="false">
     <ol><!--{% for item in pages %}-->
-      <li>
-        <a href="{{ item.href }}"{% if item.route == page.route %} aria-current="page"{% endif %}>
+      <li class="module-node">
+        <a class="module-node-link" href="{{ item.href }}"{% if item.route == page.route %} aria-current="page"{% endif %}>
+          <span class="module-operator-glyph" aria-hidden="true"></span>
           <span class="module-phase">{{ item.phase }}</span>
           <span class="module-title">{{ item.title }}</span>
         </a>

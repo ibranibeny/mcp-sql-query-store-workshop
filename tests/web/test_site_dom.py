@@ -55,6 +55,59 @@ def test_module_navigation_and_progress_controls_are_accessible(tmp_path: Path) 
         assert soup.select_one('[role="status"][data-progress-status]')
 
 
+def test_module_navigation_links_are_ordered_execution_plan_nodes(tmp_path: Path) -> None:
+    _, pages = build_pages(tmp_path)
+
+    for soup in pages:
+        links = soup.select(".module-navigation ol > li.module-node > a.module-node-link")
+        assert links
+        for link in links:
+            glyphs = link.select(".module-operator-glyph[aria-hidden='true']")
+            assert len(glyphs) == 1
+            assert not glyphs[0].get_text(strip=True)
+
+
+def test_module_navigation_css_scopes_plan_nodes_and_flow_connectors(tmp_path: Path) -> None:
+    destination, _ = build_pages(tmp_path)
+    css = (destination / "assets/styles.css").read_text(encoding="utf-8")
+
+    assert re.search(r"\.module-navigation\s+\.module-node-link\s*\{", css)
+    assert re.search(r"\.module-navigation\s+\.module-operator-glyph\s*\{", css)
+    assert re.search(
+        r"\.module-navigation\s+\.module-node\s*\+\s*\.module-node::before\s*\{",
+        css,
+    )
+    assert re.search(
+        r"\.module-navigation\s+\.module-node\s*\+\s*\.module-node::after\s*\{",
+        css,
+    )
+    assert re.search(
+        r"\.module-navigation\s+\.module-node-link\[aria-current=\"page\"\]"
+        r"\s+\.module-operator-glyph\s*\{",
+        css,
+    )
+    node_rule = re.search(
+        r"\.module-navigation\s+\.module-node\s*\{(?P<body>[^}]*)\}", css
+    )
+    connector_rule = re.search(
+        r"\.module-navigation\s+\.module-node\s*\+\s*\.module-node::before\s*\{"
+        r"(?P<body>[^}]*)\}",
+        css,
+    )
+    arrow_rule = re.search(
+        r"\.module-navigation\s+\.module-node\s*\+\s*\.module-node::after\s*\{"
+        r"(?P<body>[^}]*)\}",
+        css,
+    )
+    assert node_rule and "flex: 0 0 14rem" in node_rule.group("body")
+    assert connector_rule and "left: calc(-100% + 1.5rem)" in connector_rule.group("body")
+    assert "width: 100%" in connector_rule.group("body")
+    assert arrow_rule and "left: 0.55rem" in arrow_rule.group("body")
+    assert "min-height: 4.5rem" in css
+    assert "@media (forced-colors: active) and (max-width: 640px)" in css
+    assert "@media print" in css
+
+
 def test_page_has_evidence_path_and_progressive_grant_calculator(tmp_path: Path) -> None:
     _, pages = build_pages(tmp_path)
     soup = pages[0]
