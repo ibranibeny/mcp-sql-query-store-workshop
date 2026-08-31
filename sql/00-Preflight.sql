@@ -1,12 +1,10 @@
 :on error exit
 /*
-Run with sqlcmd mode enabled. Example:
-    sqlcmd -S <server> -E -b -i sql/00-Preflight.sql -v ExpectedServerName="sql01" DatabaseName="AdventureWorks2022" ExpectedPhysicalMemoryMB="65536" PreflightPhase="Infrastructure"
-
-Optional disk checks use same-connection session context rather than optional SQLCMD
-variables. A caller that needs them can run a small wrapper in SQLCMD mode that calls
-sys.sp_set_session_context for MCP_SQL_PlannedRestorePath, MCP_SQL_PlannedDataPath,
-and MCP_SQL_MinimumFreeSpaceMB, then includes this file with :r.
+The bootstrap must validate caller input, open one connection, and set these values with
+parameterized SqlCommand calls to sys.sp_set_session_context before executing this file:
+ExpectedServerName, DatabaseName, ExpectedPhysicalMemoryMB, PreflightPhase, and optionally
+PlannedRestorePath, PlannedDataPath, MinimumFreeSpaceMB. SQLCMD variables must not be
+substituted into this SQL text because substitution occurs before T-SQL validation.
 
 Infrastructure validates the instance before a restore. Lab additionally requires the
 restored database and both workshop ownership markers. This script is read-only.
@@ -17,18 +15,19 @@ https://learn.microsoft.com/sql/database-engine/configure-windows/server-memory-
 SET NOCOUNT ON;
 SET XACT_ABORT ON;
 
-DECLARE @ExpectedServerName nvarchar(256) = NULLIF(LOWER(LTRIM(RTRIM(N'$(ExpectedServerName)'))), N'');
-DECLARE @DatabaseName sysname = NULLIF(LTRIM(RTRIM(N'$(DatabaseName)')), N'');
-DECLARE @ExpectedPhysicalMemoryMB bigint = TRY_CONVERT(bigint, N'$(ExpectedPhysicalMemoryMB)');
-DECLARE @PreflightPhase nvarchar(32) = UPPER(LTRIM(RTRIM(N'$(PreflightPhase)')));
-DECLARE @PlannedRestorePath nvarchar(4000) = NULLIF(LTRIM(RTRIM(TRY_CONVERT(nvarchar(4000), SESSION_CONTEXT(N'MCP_SQL_PlannedRestorePath')))), N'');
-DECLARE @PlannedDataPath nvarchar(4000) = NULLIF(LTRIM(RTRIM(TRY_CONVERT(nvarchar(4000), SESSION_CONTEXT(N'MCP_SQL_PlannedDataPath')))), N'');
-DECLARE @MinimumFreeSpaceValue sql_variant = SESSION_CONTEXT(N'MCP_SQL_MinimumFreeSpaceMB');
-DECLARE @MinimumFreeSpaceMB bigint = COALESCE(TRY_CONVERT(bigint, SESSION_CONTEXT(N'MCP_SQL_MinimumFreeSpaceMB')), 0);
+DECLARE @ExpectedServerName nvarchar(256) = NULLIF(LOWER(LTRIM(RTRIM(TRY_CONVERT(nvarchar(256), SESSION_CONTEXT(N'ExpectedServerName'))))), N'');
+DECLARE @DatabaseName sysname = NULLIF(LTRIM(RTRIM(TRY_CONVERT(sysname, SESSION_CONTEXT(N'DatabaseName')))), N'');
+DECLARE @ExpectedPhysicalMemoryValue sql_variant = SESSION_CONTEXT(N'ExpectedPhysicalMemoryMB');
+DECLARE @ExpectedPhysicalMemoryMB bigint = TRY_CONVERT(bigint, @ExpectedPhysicalMemoryValue);
+DECLARE @PreflightPhase nvarchar(32) = UPPER(LTRIM(RTRIM(TRY_CONVERT(nvarchar(32), SESSION_CONTEXT(N'PreflightPhase')))));
+DECLARE @PlannedRestorePath nvarchar(4000) = NULLIF(LTRIM(RTRIM(TRY_CONVERT(nvarchar(4000), SESSION_CONTEXT(N'PlannedRestorePath')))), N'');
+DECLARE @PlannedDataPath nvarchar(4000) = NULLIF(LTRIM(RTRIM(TRY_CONVERT(nvarchar(4000), SESSION_CONTEXT(N'PlannedDataPath')))), N'');
+DECLARE @MinimumFreeSpaceValue sql_variant = SESSION_CONTEXT(N'MinimumFreeSpaceMB');
+DECLARE @MinimumFreeSpaceMB bigint = COALESCE(TRY_CONVERT(bigint, @MinimumFreeSpaceValue), 0);
 DECLARE @WorkshopMarker uniqueidentifier = '68A70D6E-62D8-4A77-8F0A-9DA7934DBA7C';
 DECLARE @WorkshopSchemaVersion int = 1;
 
-IF @PreflightPhase NOT IN (N'INFRASTRUCTURE', N'LAB')
+IF @PreflightPhase IS NULL OR @PreflightPhase NOT IN (N'INFRASTRUCTURE', N'LAB')
     THROW 51000, 'PreflightPhase must be Infrastructure or Lab.', 1;
 
 IF @ExpectedServerName IS NULL

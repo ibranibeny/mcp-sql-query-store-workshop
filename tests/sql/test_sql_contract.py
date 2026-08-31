@@ -30,40 +30,27 @@ def batch_index(name: str, pattern: str) -> int:
     return next(index for index, batch in enumerate(batches(name)) if expression.search(batch))
 
 
-def sqlcmd_substitute(text: str, variables: dict[str, str]) -> str:
-    return re.sub(
-        r"\$\((\w+)\)",
-        lambda match: variables.get(match.group(1), match.group(0)),
-        text,
-    )
+def test_administrative_scripts_use_session_context_not_sqlcmd_substitution() -> None:
+    combined = "\n".join(sql(name) for name in ("00-Preflight.sql", "01-ConfigureInstance.sql"))
+    assert not re.search(r"N?'\$\([^)]*\)'", combined, re.IGNORECASE)
+    assert not re.search(r"\$\(\w+\)", combined)
 
 
-def test_preflight_is_sqlcmd_parameterized() -> None:
+def test_preflight_requires_session_context_inputs() -> None:
     text = sql("00-Preflight.sql")
     assert ":on error exit" in text.lower()
-    required = {
+    for key in (
         "ExpectedServerName",
         "DatabaseName",
         "ExpectedPhysicalMemoryMB",
         "PreflightPhase",
-    }
-    assert required.issubset(set(re.findall(r"\$\((\w+)\)", text)))
-
-
-def test_preflight_minimal_sqlcmd_invocation_has_no_unresolved_variables() -> None:
-    text = sqlcmd_substitute(
-        sql("00-Preflight.sql"),
-        {
-            "ExpectedServerName": "sql01",
-            "DatabaseName": "AdventureWorks2022",
-            "ExpectedPhysicalMemoryMB": "65536",
-            "PreflightPhase": "Infrastructure",
-        },
-    )
-    assert not re.search(r"\$\(\w+\)", text)
-    assert "SESSION_CONTEXT(N'MCP_SQL_PlannedRestorePath')" in text
-    assert "SESSION_CONTEXT(N'MCP_SQL_PlannedDataPath')" in text
-    assert "SESSION_CONTEXT(N'MCP_SQL_MinimumFreeSpaceMB')" in text
+        "PlannedRestorePath",
+        "PlannedDataPath",
+        "MinimumFreeSpaceMB",
+    ):
+        assert f"SESSION_CONTEXT(N'{key}')" in text
+    for required in ("ExpectedServerName", "DatabaseName", "ExpectedPhysicalMemoryMB", "PreflightPhase"):
+        assert re.search(rf"IF @{required.upper()} IS NULL.*?THROW", normalized("00-Preflight.sql"))
 
 
 def test_preflight_rejects_wrong_phase_before_phase_specific_checks() -> None:
@@ -136,11 +123,14 @@ def test_preflight_is_read_only_rerunnable_and_returns_one_bounded_result() -> N
     assert "TOP (" not in text
 
 
-def test_configuration_is_sqlcmd_parameterized_and_uses_owned_utility_database() -> None:
+def test_configuration_requires_session_context_and_uses_owned_utility_database() -> None:
     text = sql("01-ConfigureInstance.sql")
     assert ":on error exit" in text.lower()
-    assert {"DatabaseName", "ExpectedServerName"}.issubset(set(re.findall(r"\$\((\w+)\)", text)))
+    assert "SESSION_CONTEXT(N'ExpectedServerName')" in text
+    assert "SESSION_CONTEXT(N'DatabaseName')" in text
     upper = normalized("01-ConfigureInstance.sql")
+    assert re.search(r"@DATABASENAME.*?IS NULL.*?THROW", upper)
+    assert re.search(r"@EXPECTEDSERVERNAME.*?IS NULL.*?THROW", upper)
     assert "CREATE DATABASE [WORKSHOPADMIN]" in upper
     assert "MCP_SQL_WORKSHOP" in upper and "EXTENDED_PROPERTIES" in upper
     assert re.search(r"IF.*?WORKSHOPADMIN.*?EXISTS.*?THROW", upper)
@@ -175,6 +165,47 @@ def test_database_backup_captures_query_store_and_memory_grant_feedback_once() -
     assert not re.search(r"UPDATE\s+WORKSHOPADMIN\.DBO\.DATABASECONFIGURATIONBACKUP", text)
 
 
+def test_memory_grant_feedback_capture_maps_primary_and_secondary_values_to_int_flags() -> None:
+    text = normalized("01-ConfigureInstance.sql")
+    table = text[text.index("CREATE TABLE DBO.DATABASECONFIGURATIONBACKUP"):text.index("CONSTRAINT PK_DATABASECONFIGURATIONBACKUP")]
+    for column in (
+        "ROWMODEMEMORYGRANTFEEDBACK INT",
+        "ROWMODEMEMORYGRANTFEEDBACKFORSECONDARY INT",
+        "BATCHMODEMEMORYGRANTFEEDBACK INT",
+        "BATCHMODEMEMORYGRANTFEEDBACKFORSECONDARY INT",
+    ):
+        assert column in table
+    capture = text[text.index("DECLARE @CAPTUREDATABASESQL"):text.index("EXEC SYS.SP_EXECUTESQL", text.index("DECLARE @CAPTUREDATABASESQL"))]
+    assert capture.count("VALUE_FOR_SECONDARY") >= 2
+    assert capture.count("WHEN TRY_CONVERT(INT, D.VALUE) = 0 THEN 0") >= 2
+    assert capture.count("WHEN TRY_CONVERT(INT, D.VALUE) = 1 THEN 1") >= 2
+    assert capture.count("WHEN TRY_CONVERT(INT, D.VALUE_FOR_SECONDARY) = 0 THEN 0") >= 2
+    assert capture.count("WHEN TRY_CONVERT(INT, D.VALUE_FOR_SECONDARY) = 1 THEN 1") >= 2
+
+
+def test_existing_text_memory_grant_feedback_backups_are_migrated_to_int() -> None:
+    text = normalized("01-ConfigureInstance.sql")
+    for column in (
+        "ROWMODEMEMORYGRANTFEEDBACK",
+        "BATCHMODEMEMORYGRANTFEEDBACK",
+        "MEMORYGRANTFEEDBACKPERCENTILEGRANT",
+        "MEMORYGRANTFEEDBACKPERSISTENCE",
+    ):
+        assert f"ALTER TABLE DBO.DATABASECONFIGURATIONBACKUP ALTER COLUMN {column} INT NULL" in text
+    assert "CANNOT MIGRATE NON-NUMERIC MEMORY GRANT FEEDBACK BACKUP VALUES" in text
+
+
+def test_memory_grant_feedback_compensation_maps_zero_to_off_and_one_to_on() -> None:
+    text = normalized("01-ConfigureInstance.sql")
+    catch = text[text.index("BEGIN CATCH", text.index("SP_GETAPPLOCK")):]
+    assert "@ORIGINALROWMODEMEMORYGRANTFEEDBACK INT" in text
+    assert "@ORIGINALBATCHMODEMEMORYGRANTFEEDBACK INT" in text
+    assert "CASE @ORIGINALROWMODEMEMORYGRANTFEEDBACK WHEN 0 THEN N'OFF' WHEN 1 THEN N'ON' END" in catch
+    assert "CASE @ORIGINALBATCHMODEMEMORYGRANTFEEDBACK WHEN 0 THEN N'OFF' WHEN 1 THEN N'ON' END" in catch
+    assert "@ORIGINALROWMODEMEMORYGRANTFEEDBACK IN (0, 1)" in catch
+    assert "@ORIGINALBATCHMODEMEMORYGRANTFEEDBACK IN (0, 1)" in catch
+
+
 def test_memory_grant_feedback_is_disabled_only_in_existing_target_database() -> None:
     text = normalized("01-ConfigureInstance.sql")
     guarded_bodies = re.findall(
@@ -194,6 +225,25 @@ def test_server_memory_is_configured_and_effectively_read_back() -> None:
     assert text.count("RECONFIGURE") >= 3
     assert re.search(r"SYS\.CONFIGURATIONS.*?VALUE_IN_USE.*?49152.*?THROW", text)
     assert re.search(r"SYS\.CONFIGURATIONS.*?VALUE_IN_USE.*?0.*?THROW", text)
+
+
+def test_server_memory_lowers_min_before_setting_workshop_max() -> None:
+    text = normalized("01-ConfigureInstance.sql")
+    configure = text[text.index("SP_CONFIGURE N'SHOW ADVANCED OPTIONS', 1"):text.index("IF EXISTS ( SELECT 1 FROM SYS.CONFIGURATIONS")]
+    lower_min = configure.index("SP_CONFIGURE N'MIN SERVER MEMORY (MB)', 0")
+    max_memory = configure.index("SP_CONFIGURE N'MAX SERVER MEMORY (MB)', 49152")
+    assert lower_min < max_memory
+    assert "SP_CONFIGURE N'MIN SERVER MEMORY (MB)', 0; RECONFIGURE;" in configure
+    assert "SP_CONFIGURE N'MAX SERVER MEMORY (MB)', 49152; RECONFIGURE;" in configure
+
+
+def test_server_memory_compensation_uses_relationship_safe_restore_order() -> None:
+    text = normalized("01-ConfigureInstance.sql")
+    catch = text[text.index("BEGIN CATCH", text.index("SP_GETAPPLOCK")):]
+    restore = catch[catch.index("SERVER MEMORY (ERROR") - 2000:catch.index("SERVER MEMORY (ERROR")]
+    assert "IF @COMPENSATIONCURRENTMINSERVERMEMORYMB > @ORIGINALMAXSERVERMEMORYMB" in restore
+    assert restore.index("SP_CONFIGURE N'MIN SERVER MEMORY (MB)', 0") < restore.index("SP_CONFIGURE N'MAX SERVER MEMORY (MB)', @ORIGINALMAXSERVERMEMORYMB")
+    assert restore.index("SP_CONFIGURE N'MAX SERVER MEMORY (MB)', @ORIGINALMAXSERVERMEMORYMB") < restore.index("SP_CONFIGURE N'MIN SERVER MEMORY (MB)', @ORIGINALMINSERVERMEMORYMB")
 
 
 def test_resource_governor_objects_have_exact_limits_and_idempotency_guards() -> None:
@@ -295,7 +345,7 @@ def test_classifier_requires_exact_normalized_hash_and_dual_ownership_markers() 
     assert "NOT LIKE N'%APP_NAME" not in text
 
 
-def test_existing_classifier_rejects_null_or_non_active_ownership_without_adoption() -> None:
+def test_existing_classifier_recovers_only_exact_pending_ownership() -> None:
     text = normalized("01-ConfigureInstance.sql")
     start = text.index("IF @LOCKEDWORKSHOPCLASSIFIERID IS NOT NULL")
     existing = text[
@@ -307,11 +357,27 @@ def test_existing_classifier_rejects_null_or_non_active_ownership_without_adopti
         "@LOCKEDHASH IS NULL",
         "@LOCKEDSTOREDHASH IS NULL",
         "@LOCKEDOWNERSHIPSTATE IS NULL",
-        "@LOCKEDOWNERSHIPSTATE <> 'ACTIVE'",
-        "@LOCKEDMARKERVALID <> 1",
     ):
         assert required_guard in existing
-    assert "@LOCKEDOWNERSHIPSTATE = 'PENDING'" not in existing
+    assert "@LOCKEDOWNERSHIPSTATE = 'PENDING'" in existing
+    assert re.search(r"@LOCKEDOWNERSHIPSTATE = 'PENDING'.*?@LOCKEDHASH = @EXPECTEDCLASSIFIERHASH.*?@LOCKEDSTOREDHASH = @EXPECTEDCLASSIFIERHASH", existing)
+    assert "SP_ADDEXTENDEDPROPERTY" in existing
+    assert re.search(r"SET OWNERSHIPSTATE = 'ACTIVE'.*?COMMIT TRANSACTION", existing)
+    assert re.search(r"@LOCKEDOWNERSHIPSTATE <> 'ACTIVE'.*?THROW", existing)
+    assert re.search(r"@LOCKEDMARKERVALID <> 1.*?THROW", existing)
+
+
+def test_new_classifier_creation_and_ownership_activation_are_one_transaction() -> None:
+    text = normalized("01-ConfigureInstance.sql")
+    start = text.index("IF OBJECT_ID(N'DBO.MCP_SQL_WORKSHOP_CLASSIFIER', N'FN') IS NULL")
+    end = text.index("DECLARE @CURRENTCLASSIFIERID", start)
+    creation = text[start:end]
+    assert re.search(
+        r"BEGIN TRANSACTION.*?'CLASSIFIER', N'MCP_SQL_WORKSHOP_CLASSIFIER', 'PENDING'.*?"
+        r"EXEC SYS.SP_EXECUTESQL @CLASSIFIERCREATESQL.*?SP_ADDEXTENDEDPROPERTY.*?"
+        r"SET OWNERSHIPSTATE = 'ACTIVE'.*?COMMIT TRANSACTION",
+        creation,
+    )
 
 
 def test_post_applock_work_is_globally_guarded_and_restores_on_failure() -> None:

@@ -4,6 +4,10 @@ Run only after 00-Preflight.sql succeeds in Infrastructure phase. This script ow
 only the MCP SQL workshop marker, utility database, Resource Governor objects, and
 classifier function named below. It never replaces an unrelated classifier.
 
+The bootstrap must set ExpectedServerName and DatabaseName on the same connection with
+parameterized SqlCommand calls to sys.sp_set_session_context. SQLCMD variables must not
+be substituted into this SQL text because substitution precedes T-SQL validation.
+
 Microsoft Learn — server memory configuration:
 https://learn.microsoft.com/sql/database-engine/configure-windows/server-memory-server-configuration-options
 Microsoft Learn — Resource Governor:
@@ -14,8 +18,8 @@ https://learn.microsoft.com/sql/relational-databases/resource-governor/resource-
 SET NOCOUNT ON;
 SET XACT_ABORT ON;
 
-DECLARE @DatabaseName sysname = NULLIF(LTRIM(RTRIM(N'$(DatabaseName)')), N'');
-DECLARE @ExpectedServerName nvarchar(256) = NULLIF(LOWER(LTRIM(RTRIM(N'$(ExpectedServerName)'))), N'');
+DECLARE @DatabaseName sysname = NULLIF(LTRIM(RTRIM(TRY_CONVERT(sysname, SESSION_CONTEXT(N'DatabaseName')))), N'');
+DECLARE @ExpectedServerName nvarchar(256) = NULLIF(LOWER(LTRIM(RTRIM(TRY_CONVERT(nvarchar(256), SESSION_CONTEXT(N'ExpectedServerName'))))), N'');
 DECLARE @WorkshopMarker uniqueidentifier = '68A70D6E-62D8-4A77-8F0A-9DA7934DBA7C';
 DECLARE @WorkshopSchemaVersion int = 1;
 DECLARE @CurrentClassifierId int;
@@ -138,13 +142,46 @@ BEGIN
         QueryStoreDesiredStateDesc nvarchar(60) NULL,
         QueryStoreMaxStorageSizeMB bigint NULL,
         QueryStoreCaptureModeDesc nvarchar(60) NULL,
-        RowModeMemoryGrantFeedback nvarchar(60) NULL,
-        BatchModeMemoryGrantFeedback nvarchar(60) NULL,
-        MemoryGrantFeedbackPercentileGrant nvarchar(60) NULL,
-        MemoryGrantFeedbackPersistence nvarchar(60) NULL,
+        RowModeMemoryGrantFeedback int NULL,
+        RowModeMemoryGrantFeedbackForSecondary int NULL,
+        BatchModeMemoryGrantFeedback int NULL,
+        BatchModeMemoryGrantFeedbackForSecondary int NULL,
+        MemoryGrantFeedbackPercentileGrant int NULL,
+        MemoryGrantFeedbackPercentileGrantForSecondary int NULL,
+        MemoryGrantFeedbackPersistence int NULL,
+        MemoryGrantFeedbackPersistenceForSecondary int NULL,
         CONSTRAINT PK_DatabaseConfigurationBackup PRIMARY KEY (MarkerId, SchemaVersion, DatabaseName)
     );
 END;
+
+IF EXISTS
+(
+    SELECT 1
+    FROM dbo.DatabaseConfigurationBackup
+    WHERE (RowModeMemoryGrantFeedback IS NOT NULL AND TRY_CONVERT(int, RowModeMemoryGrantFeedback) IS NULL)
+       OR (BatchModeMemoryGrantFeedback IS NOT NULL AND TRY_CONVERT(int, BatchModeMemoryGrantFeedback) IS NULL)
+       OR (MemoryGrantFeedbackPercentileGrant IS NOT NULL AND TRY_CONVERT(int, MemoryGrantFeedbackPercentileGrant) IS NULL)
+       OR (MemoryGrantFeedbackPersistence IS NOT NULL AND TRY_CONVERT(int, MemoryGrantFeedbackPersistence) IS NULL)
+)
+    THROW 51122, 'Cannot migrate non-numeric memory grant feedback backup values.', 1;
+
+IF EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'dbo.DatabaseConfigurationBackup') AND name = N'RowModeMemoryGrantFeedback' AND system_type_id <> TYPE_ID(N'int'))
+    ALTER TABLE dbo.DatabaseConfigurationBackup ALTER COLUMN RowModeMemoryGrantFeedback int NULL;
+IF EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'dbo.DatabaseConfigurationBackup') AND name = N'BatchModeMemoryGrantFeedback' AND system_type_id <> TYPE_ID(N'int'))
+    ALTER TABLE dbo.DatabaseConfigurationBackup ALTER COLUMN BatchModeMemoryGrantFeedback int NULL;
+IF EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'dbo.DatabaseConfigurationBackup') AND name = N'MemoryGrantFeedbackPercentileGrant' AND system_type_id <> TYPE_ID(N'int'))
+    ALTER TABLE dbo.DatabaseConfigurationBackup ALTER COLUMN MemoryGrantFeedbackPercentileGrant int NULL;
+IF EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'dbo.DatabaseConfigurationBackup') AND name = N'MemoryGrantFeedbackPersistence' AND system_type_id <> TYPE_ID(N'int'))
+    ALTER TABLE dbo.DatabaseConfigurationBackup ALTER COLUMN MemoryGrantFeedbackPersistence int NULL;
+
+IF COL_LENGTH(N'dbo.DatabaseConfigurationBackup', N'RowModeMemoryGrantFeedbackForSecondary') IS NULL
+    ALTER TABLE dbo.DatabaseConfigurationBackup ADD RowModeMemoryGrantFeedbackForSecondary int NULL;
+IF COL_LENGTH(N'dbo.DatabaseConfigurationBackup', N'BatchModeMemoryGrantFeedbackForSecondary') IS NULL
+    ALTER TABLE dbo.DatabaseConfigurationBackup ADD BatchModeMemoryGrantFeedbackForSecondary int NULL;
+IF COL_LENGTH(N'dbo.DatabaseConfigurationBackup', N'MemoryGrantFeedbackPercentileGrantForSecondary') IS NULL
+    ALTER TABLE dbo.DatabaseConfigurationBackup ADD MemoryGrantFeedbackPercentileGrantForSecondary int NULL;
+IF COL_LENGTH(N'dbo.DatabaseConfigurationBackup', N'MemoryGrantFeedbackPersistenceForSecondary') IS NULL
+    ALTER TABLE dbo.DatabaseConfigurationBackup ADD MemoryGrantFeedbackPersistenceForSecondary int NULL;
 
 IF OBJECT_ID(N'dbo.ResourceGovernorObjectOwnership', N'U') IS NULL
 BEGIN
@@ -177,7 +214,7 @@ SET XACT_ABORT ON;
 
 DECLARE @WorkshopMarker uniqueidentifier = '68A70D6E-62D8-4A77-8F0A-9DA7934DBA7C';
 DECLARE @WorkshopSchemaVersion int = 1;
-DECLARE @DatabaseName sysname = NULLIF(LTRIM(RTRIM(N'$(DatabaseName)')), N'');
+DECLARE @DatabaseName sysname = NULLIF(LTRIM(RTRIM(TRY_CONVERT(sysname, SESSION_CONTEXT(N'DatabaseName')))), N'');
 
 BEGIN TRY
     BEGIN TRANSACTION;
@@ -234,16 +271,22 @@ BEGIN TRY
                   MarkerId, SchemaVersion, DatabaseName,
                   QueryStoreActualStateDesc, QueryStoreDesiredStateDesc,
                   QueryStoreMaxStorageSizeMB, QueryStoreCaptureModeDesc,
-                  RowModeMemoryGrantFeedback, BatchModeMemoryGrantFeedback,
-                  MemoryGrantFeedbackPercentileGrant, MemoryGrantFeedbackPersistence
+                  RowModeMemoryGrantFeedback, RowModeMemoryGrantFeedbackForSecondary,
+                  BatchModeMemoryGrantFeedback, BatchModeMemoryGrantFeedbackForSecondary,
+                  MemoryGrantFeedbackPercentileGrant, MemoryGrantFeedbackPercentileGrantForSecondary,
+                  MemoryGrantFeedbackPersistence, MemoryGrantFeedbackPersistenceForSecondary
               )
               SELECT @MarkerId, @Version, DB_NAME(),
                      q.actual_state_desc, q.desired_state_desc,
                      q.max_storage_size_mb, q.query_capture_mode_desc,
-                     MAX(CASE WHEN d.name = N''ROW_MODE_MEMORY_GRANT_FEEDBACK'' THEN CONVERT(nvarchar(60), d.value) END),
-                     MAX(CASE WHEN d.name = N''BATCH_MODE_MEMORY_GRANT_FEEDBACK'' THEN CONVERT(nvarchar(60), d.value) END),
-                     MAX(CASE WHEN d.name = N''MEMORY_GRANT_FEEDBACK_PERCENTILE_GRANT'' THEN CONVERT(nvarchar(60), d.value) END),
-                     MAX(CASE WHEN d.name = N''MEMORY_GRANT_FEEDBACK_PERSISTENCE'' THEN CONVERT(nvarchar(60), d.value) END)
+                     MAX(CASE WHEN d.name = N''ROW_MODE_MEMORY_GRANT_FEEDBACK'' THEN CASE WHEN TRY_CONVERT(int, d.value) = 0 THEN 0 WHEN TRY_CONVERT(int, d.value) = 1 THEN 1 END END),
+                     MAX(CASE WHEN d.name = N''ROW_MODE_MEMORY_GRANT_FEEDBACK'' THEN CASE WHEN TRY_CONVERT(int, d.value_for_secondary) = 0 THEN 0 WHEN TRY_CONVERT(int, d.value_for_secondary) = 1 THEN 1 END END),
+                     MAX(CASE WHEN d.name = N''BATCH_MODE_MEMORY_GRANT_FEEDBACK'' THEN CASE WHEN TRY_CONVERT(int, d.value) = 0 THEN 0 WHEN TRY_CONVERT(int, d.value) = 1 THEN 1 END END),
+                     MAX(CASE WHEN d.name = N''BATCH_MODE_MEMORY_GRANT_FEEDBACK'' THEN CASE WHEN TRY_CONVERT(int, d.value_for_secondary) = 0 THEN 0 WHEN TRY_CONVERT(int, d.value_for_secondary) = 1 THEN 1 END END),
+                     MAX(CASE WHEN d.name = N''MEMORY_GRANT_FEEDBACK_PERCENTILE_GRANT'' THEN CASE WHEN TRY_CONVERT(int, d.value) = 0 THEN 0 WHEN TRY_CONVERT(int, d.value) = 1 THEN 1 END END),
+                     MAX(CASE WHEN d.name = N''MEMORY_GRANT_FEEDBACK_PERCENTILE_GRANT'' THEN CASE WHEN TRY_CONVERT(int, d.value_for_secondary) = 0 THEN 0 WHEN TRY_CONVERT(int, d.value_for_secondary) = 1 THEN 1 END END),
+                     MAX(CASE WHEN d.name = N''MEMORY_GRANT_FEEDBACK_PERSISTENCE'' THEN CASE WHEN TRY_CONVERT(int, d.value) = 0 THEN 0 WHEN TRY_CONVERT(int, d.value) = 1 THEN 1 END END),
+                     MAX(CASE WHEN d.name = N''MEMORY_GRANT_FEEDBACK_PERSISTENCE'' THEN CASE WHEN TRY_CONVERT(int, d.value_for_secondary) = 0 THEN 0 WHEN TRY_CONVERT(int, d.value_for_secondary) = 1 THEN 1 END END)
               FROM sys.database_query_store_options AS q
               CROSS JOIN sys.database_scoped_configurations AS d
               GROUP BY q.actual_state_desc, q.desired_state_desc,
@@ -271,7 +314,7 @@ SET NOCOUNT ON;
 DECLARE @WorkshopMarker uniqueidentifier = '68A70D6E-62D8-4A77-8F0A-9DA7934DBA7C';
 DECLARE @WorkshopSchemaVersion int = 1;
 DECLARE @ApplicationLockResult int;
-DECLARE @DatabaseName sysname = NULLIF(LTRIM(RTRIM(N'$(DatabaseName)')), N'');
+DECLARE @DatabaseName sysname = NULLIF(LTRIM(RTRIM(TRY_CONVERT(sysname, SESSION_CONTEXT(N'DatabaseName')))), N'');
 DECLARE @OriginalShowAdvancedOptions int;
 DECLARE @OriginalMaxServerMemoryMB int;
 DECLARE @OriginalMinServerMemoryMB int;
@@ -279,8 +322,8 @@ DECLARE @OriginalResourceGovernorEnabled bit;
 DECLARE @OriginalClassifierId int;
 DECLARE @OriginalClassifierSchema sysname;
 DECLARE @OriginalClassifierName sysname;
-DECLARE @OriginalRowModeMemoryGrantFeedback nvarchar(60);
-DECLARE @OriginalBatchModeMemoryGrantFeedback nvarchar(60);
+DECLARE @OriginalRowModeMemoryGrantFeedback int;
+DECLARE @OriginalBatchModeMemoryGrantFeedback int;
 DECLARE @CreatedPool bit = 0;
 DECLARE @CreatedGroup bit = 0;
 DECLARE @CreatedClassifier bit = 0;
@@ -324,11 +367,11 @@ FROM sys.resource_governor_configuration;
 IF DB_ID(@DatabaseName) IS NOT NULL
 BEGIN
     DECLARE @CaptureCurrentFeedbackSql nvarchar(max) = N'USE ' + QUOTENAME(@DatabaseName) + N';
-        SELECT @RowMode = MAX(CASE WHEN name = N''ROW_MODE_MEMORY_GRANT_FEEDBACK'' THEN CONVERT(nvarchar(60), value) END),
-               @BatchMode = MAX(CASE WHEN name = N''BATCH_MODE_MEMORY_GRANT_FEEDBACK'' THEN CONVERT(nvarchar(60), value) END)
+         SELECT @RowMode = MAX(CASE WHEN name = N''ROW_MODE_MEMORY_GRANT_FEEDBACK'' THEN TRY_CONVERT(int, value) END),
+             @BatchMode = MAX(CASE WHEN name = N''BATCH_MODE_MEMORY_GRANT_FEEDBACK'' THEN TRY_CONVERT(int, value) END)
         FROM sys.database_scoped_configurations;';
     EXEC sys.sp_executesql @CaptureCurrentFeedbackSql,
-        N'@RowMode nvarchar(60) OUTPUT, @BatchMode nvarchar(60) OUTPUT',
+         N'@RowMode int OUTPUT, @BatchMode int OUTPUT',
         @RowMode = @OriginalRowModeMemoryGrantFeedback OUTPUT,
         @BatchMode = @OriginalBatchModeMemoryGrantFeedback OUTPUT;
 END;
@@ -341,6 +384,7 @@ BEGIN
         DECLARE @LockedHash varbinary(32) = HASHBYTES('SHA2_256', CONVERT(varbinary(max), @LockedNormalized));
         DECLARE @LockedOwnershipState varchar(10);
         DECLARE @LockedStoredHash varbinary(32);
+        DECLARE @LockedMarkerPresent bit = 0;
         DECLARE @LockedMarkerValid bit = 0;
 
         SELECT @LockedOwnershipState = OwnershipState, @LockedStoredHash = DefinitionHash
@@ -352,8 +396,16 @@ BEGIN
         (
                 SELECT 1 FROM sys.extended_properties
                 WHERE class = 1 AND major_id = @LockedWorkshopClassifierId AND minor_id = 0
-                    AND name = N'MCP_SQL_WORKSHOP'
-                    AND TRY_CONVERT(uniqueidentifier, value) = @WorkshopMarker
+                AND name = N'MCP_SQL_WORKSHOP'
+        )
+            SET @LockedMarkerPresent = 1;
+
+        IF EXISTS
+        (
+            SELECT 1 FROM sys.extended_properties
+            WHERE class = 1 AND major_id = @LockedWorkshopClassifierId AND minor_id = 0
+                AND name = N'MCP_SQL_WORKSHOP'
+                AND TRY_CONVERT(uniqueidentifier, value) = @WorkshopMarker
         )
                 SET @LockedMarkerValid = 1;
 
@@ -364,8 +416,33 @@ BEGIN
              OR ISNULL(OBJECTPROPERTYEX(@LockedWorkshopClassifierId, N'IsSchemaBound'), 0) <> 1
              OR @LockedHash <> @ExpectedClassifierHash
              OR @LockedStoredHash <> @ExpectedClassifierHash
-             OR @LockedOwnershipState <> 'Active'
-             OR @LockedMarkerValid <> 1
+                THROW 51106, 'The existing workshop classifier name has an unexpected function definition or ownership.', 1;
+
+        IF @LockedOwnershipState = 'Pending'
+           AND @LockedHash = @ExpectedClassifierHash
+           AND @LockedStoredHash = @ExpectedClassifierHash
+           AND (@LockedMarkerPresent = 0 OR @LockedMarkerValid = 1)
+        BEGIN
+                BEGIN TRANSACTION;
+                IF @LockedMarkerPresent = 0
+                    EXEC sys.sp_addextendedproperty
+                        @name = N'MCP_SQL_WORKSHOP', @value = @WorkshopMarker,
+                        @level0type = N'SCHEMA', @level0name = N'dbo',
+                        @level1type = N'FUNCTION', @level1name = N'mcp_sql_workshop_classifier';
+
+                UPDATE WorkshopAdmin.dbo.ResourceGovernorObjectOwnership
+                SET OwnershipState = 'Active', DefinitionHash = @ExpectedClassifierHash, UpdatedAtUtc = SYSUTCDATETIME()
+                WHERE MarkerId = @WorkshopMarker AND SchemaVersion = @WorkshopSchemaVersion
+                    AND ObjectType = 'CLASSIFIER' AND ObjectName = N'mcp_sql_workshop_classifier'
+                    AND OwnershipState = 'Pending' AND DefinitionHash = @ExpectedClassifierHash;
+                IF @@ROWCOUNT <> 1
+                    THROW 51119, 'Pending classifier ownership changed during recovery.', 1;
+                COMMIT TRANSACTION;
+                SET @LockedOwnershipState = 'Active';
+                SET @LockedMarkerValid = 1;
+        END;
+
+        IF @LockedOwnershipState <> 'Active' OR @LockedMarkerValid <> 1
                 THROW 51106, 'The existing workshop classifier name has an unexpected function definition or ownership.', 1;
 END;
 
@@ -493,9 +570,9 @@ WHERE MarkerId = @WorkshopMarker
 
 EXEC sys.sp_configure N'show advanced options', 1;
 RECONFIGURE;
-EXEC sys.sp_configure N'max server memory (MB)', 49152;
-RECONFIGURE;
 EXEC sys.sp_configure N'min server memory (MB)', 0;
+RECONFIGURE;
+EXEC sys.sp_configure N'max server memory (MB)', 49152;
 RECONFIGURE;
 
 IF EXISTS
@@ -507,10 +584,10 @@ IF EXISTS
 )
     THROW 51109, 'Effective max/min server memory values do not match the workshop contract.', 1;
 
-IF DB_ID(N'$(DatabaseName)') IS NOT NULL
+IF DB_ID(@DatabaseName) IS NOT NULL
 BEGIN
     DECLARE @DisableMemoryGrantFeedbackSql nvarchar(max) =
-        N'USE ' + QUOTENAME(N'$(DatabaseName)') + N';
+        N'USE ' + QUOTENAME(@DatabaseName) + N';
           ALTER DATABASE SCOPED CONFIGURATION SET ROW_MODE_MEMORY_GRANT_FEEDBACK = OFF;
           ALTER DATABASE SCOPED CONFIGURATION SET BATCH_MODE_MEMORY_GRANT_FEEDBACK = OFF;';
     EXEC sys.sp_executesql @DisableMemoryGrantFeedbackSql;
@@ -599,7 +676,15 @@ BEGIN
             (MarkerId, SchemaVersion, ObjectType, ObjectName, OwnershipState, DefinitionHash)
         VALUES
             (@WorkshopMarker, @WorkshopSchemaVersion, 'CLASSIFIER', N'mcp_sql_workshop_classifier', 'Pending', @ExpectedClassifierHash);
-    COMMIT TRANSACTION;
+
+    IF NOT EXISTS
+    (
+        SELECT 1 FROM WorkshopAdmin.dbo.ResourceGovernorObjectOwnership
+        WHERE MarkerId = @WorkshopMarker AND SchemaVersion = @WorkshopSchemaVersion
+          AND ObjectType = 'CLASSIFIER' AND ObjectName = N'mcp_sql_workshop_classifier'
+          AND OwnershipState = 'Pending' AND DefinitionHash = @ExpectedClassifierHash
+    )
+        THROW 51120, 'Classifier ownership metadata is not an exact Pending claim.', 1;
 
     EXEC sys.sp_executesql @ClassifierCreateSql;
     SET @CreatedClassifier = 1;
@@ -607,12 +692,16 @@ BEGIN
         @name = N'MCP_SQL_WORKSHOP', @value = @WorkshopMarker,
         @level0type = N'SCHEMA', @level0name = N'dbo',
         @level1type = N'FUNCTION', @level1name = N'mcp_sql_workshop_classifier';
-END;
 
-UPDATE WorkshopAdmin.dbo.ResourceGovernorObjectOwnership
-SET OwnershipState = 'Active', DefinitionHash = @ExpectedClassifierHash, UpdatedAtUtc = SYSUTCDATETIME()
-WHERE MarkerId = @WorkshopMarker AND SchemaVersion = @WorkshopSchemaVersion
-    AND ObjectType = 'CLASSIFIER' AND ObjectName = N'mcp_sql_workshop_classifier';
+    UPDATE WorkshopAdmin.dbo.ResourceGovernorObjectOwnership
+    SET OwnershipState = 'Active', DefinitionHash = @ExpectedClassifierHash, UpdatedAtUtc = SYSUTCDATETIME()
+    WHERE MarkerId = @WorkshopMarker AND SchemaVersion = @WorkshopSchemaVersion
+        AND ObjectType = 'CLASSIFIER' AND ObjectName = N'mcp_sql_workshop_classifier'
+        AND OwnershipState = 'Pending' AND DefinitionHash = @ExpectedClassifierHash;
+    IF @@ROWCOUNT <> 1
+        THROW 51121, 'Classifier ownership activation failed.', 1;
+    COMMIT TRANSACTION;
+END;
 
 DECLARE @CurrentClassifierId int;
 DECLARE @WorkshopClassifierId int = OBJECT_ID(N'dbo.mcp_sql_workshop_classifier', N'FN');
@@ -746,12 +835,14 @@ BEGIN CATCH
 
     BEGIN TRY
         IF DB_ID(@DatabaseName) IS NOT NULL
-           AND @OriginalRowModeMemoryGrantFeedback IN (N'ON', N'OFF')
-           AND @OriginalBatchModeMemoryGrantFeedback IN (N'ON', N'OFF')
+           AND @OriginalRowModeMemoryGrantFeedback IN (0, 1)
+           AND @OriginalBatchModeMemoryGrantFeedback IN (0, 1)
         BEGIN
+            DECLARE @RestoreRowModeKeyword nvarchar(3) = CASE @OriginalRowModeMemoryGrantFeedback WHEN 0 THEN N'OFF' WHEN 1 THEN N'ON' END;
+            DECLARE @RestoreBatchModeKeyword nvarchar(3) = CASE @OriginalBatchModeMemoryGrantFeedback WHEN 0 THEN N'OFF' WHEN 1 THEN N'ON' END;
             DECLARE @RestoreFeedbackSql nvarchar(max) = N'USE ' + QUOTENAME(@DatabaseName)
-                + N'; ALTER DATABASE SCOPED CONFIGURATION SET ROW_MODE_MEMORY_GRANT_FEEDBACK = ' + @OriginalRowModeMemoryGrantFeedback
-                + N'; ALTER DATABASE SCOPED CONFIGURATION SET BATCH_MODE_MEMORY_GRANT_FEEDBACK = ' + @OriginalBatchModeMemoryGrantFeedback + N';';
+                + N'; ALTER DATABASE SCOPED CONFIGURATION SET ROW_MODE_MEMORY_GRANT_FEEDBACK = ' + @RestoreRowModeKeyword
+                + N'; ALTER DATABASE SCOPED CONFIGURATION SET BATCH_MODE_MEMORY_GRANT_FEEDBACK = ' + @RestoreBatchModeKeyword + N';';
             EXEC sys.sp_executesql @RestoreFeedbackSql;
         END;
     END TRY
@@ -762,6 +853,15 @@ BEGIN CATCH
     BEGIN TRY
         EXEC sys.sp_configure N'show advanced options', 1;
         RECONFIGURE;
+        DECLARE @CompensationCurrentMinServerMemoryMB int;
+        SELECT @CompensationCurrentMinServerMemoryMB = CONVERT(int, value_in_use)
+        FROM sys.configurations
+        WHERE name = N'min server memory (MB)';
+        IF @CompensationCurrentMinServerMemoryMB > @OriginalMaxServerMemoryMB
+        BEGIN
+            EXEC sys.sp_configure N'min server memory (MB)', 0;
+            RECONFIGURE;
+        END;
         EXEC sys.sp_configure N'max server memory (MB)', @OriginalMaxServerMemoryMB;
         RECONFIGURE;
         EXEC sys.sp_configure N'min server memory (MB)', @OriginalMinServerMemoryMB;
