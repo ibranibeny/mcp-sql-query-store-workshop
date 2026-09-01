@@ -120,6 +120,8 @@ def _expected_outcome(document: Mapping[str, Any]) -> str:
         return "ManualStop"
     if termination["safetyStopTriggered"]:
         return "SafetyStop"
+    if document["status"] == "Failed":
+        return "Failed"
 
     peaks = document["measuredPeaks"]
     baseline_value = peaks["baseline"]
@@ -185,6 +187,7 @@ def _validation_hash(trials: Sequence[Mapping[str, Any]]) -> str:
             "actualRowCount": trial["actualRowCount"],
             "differenceCount": trial["differenceCount"],
             "correct": trial["correct"],
+            "validationBatchId": trial["validationBatchId"],
         }
         for trial in trials
     ]
@@ -270,6 +273,7 @@ def _validate_semantics(document: Mapping[str, Any]) -> list[str]:
         if document["correctness"]["additionalMetricImproved"]:
             issues.append("$.correctness.additionalMetricImproved must be false for an incomplete comparison.")
     if len(trials) == 12:
+        trial_linkage_valid = True
         expected_phases = (
             "Baseline", "Optimized", "Optimized", "Baseline",
             "Optimized", "Baseline", "Baseline", "Optimized",
@@ -278,15 +282,19 @@ def _validate_semantics(document: Mapping[str, Any]) -> list[str]:
         batch_ids = {trial["validationBatchId"] for trial in trials}
         if len(batch_ids) != 1:
             issues.append("$.trials must use one validation batch identifier.")
+            trial_linkage_valid = False
         for index, trial in enumerate(trials):
             if trial["trialSequence"] != index + 1:
                 issues.append("$.trials trialSequence values must be contiguous from one through twelve.")
+                trial_linkage_valid = False
                 break
             if trial["parameterSlot"] != index // 2 + 1:
                 issues.append("$.trials parameterSlot values must form six adjacent A/B pairs.")
+                trial_linkage_valid = False
                 break
             if trial["phase"] != expected_phases[index]:
                 issues.append("$.trials phase order must be ABBA BAAB ABBA.")
+                trial_linkage_valid = False
                 break
         for slot in range(1, 7):
             pair = [trial for trial in trials if trial["parameterSlot"] == slot]
@@ -294,6 +302,7 @@ def _validate_semantics(document: Mapping[str, Any]) -> list[str]:
             optimized = [trial for trial in pair if trial["phase"] == "Optimized"]
             if len(pair) != 2 or len(baseline) != 1 or len(optimized) != 1:
                 issues.append(f"$.trials parameter slot {slot} must contain one A and one B trial.")
+                trial_linkage_valid = False
                 continue
             expected_count = baseline[0]["resultRowCount"]
             actual_count = optimized[0]["resultRowCount"]
@@ -301,17 +310,19 @@ def _validate_semantics(document: Mapping[str, Any]) -> list[str]:
                 expected_count == actual_count
                 and baseline[0]["resultHash"] == optimized[0]["resultHash"]
             )
-            difference = 0 if correct else 1
             for trial in pair:
                 if (
                     trial["expectedRowCount"] != expected_count
                     or trial["actualRowCount"] != actual_count
-                    or trial["differenceCount"] != difference
-                    or trial["correct"] is not correct
+                    or trial["expectedRowCount"] != trial["actualRowCount"]
+                    or trial["differenceCount"] != 0
+                    or not trial["correct"]
                 ):
-                    issues.append(f"$.trials parameter slot {slot} correctness linkage is invalid.")
-                    break
-        all_trials_correct = all(trial["correct"] for trial in trials)
+                    correct = False
+            if not correct:
+                trial_linkage_valid = False
+                issues.append(f"$.trials parameter slot {slot} correctness linkage is invalid.")
+        all_trials_correct = trial_linkage_valid and all(trial["correct"] for trial in trials)
         if document["correctness"]["passed"] is not all_trials_correct:
             issues.append("$.correctness.passed must equal aggregate trial correctness.")
         material_regression, additional_improvement = _trial_assessment(trials)
@@ -320,7 +331,7 @@ def _validate_semantics(document: Mapping[str, Any]) -> list[str]:
         if document["correctness"]["additionalMetricImproved"] is not additional_improvement:
             issues.append("$.correctness.additionalMetricImproved must be derived from trial metrics.")
 
-    if document["outcome"] != "Failed" and document["outcome"] != _expected_outcome(document):
+    if document["outcome"] != _expected_outcome(document):
         issues.append("$.outcome does not match the measured evidence outcome rules.")
     return issues
 

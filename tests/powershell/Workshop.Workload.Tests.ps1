@@ -48,9 +48,10 @@ BeforeAll {
     function Get-ValidTrial {
         $phases = @('Baseline','Optimized','Optimized','Baseline','Optimized','Baseline','Baseline','Optimized','Baseline','Optimized','Optimized','Baseline')
         for ($index = 0; $index -lt 12; $index++) {
+            $optimized = $phases[$index] -eq 'Optimized'
             [pscustomobject][ordered]@{
                 TrialSequence=$index+1; ParameterSlot=[math]::Floor($index/2)+1; Phase=$phases[$index]
-                DurationMs=10; CpuMs=5; LogicalReads=20; GrantedKB=30; UsedKB=25; SpillKB=0; WaitMs=1
+                DurationMs=$(if ($optimized) { 9 } else { 10 }); CpuMs=5; LogicalReads=20; GrantedKB=30; UsedKB=25; SpillKB=0; WaitMs=1
                 ResultRowCount=2; ResultHash=('ab'*32); ExpectedRowCount=2; ActualRowCount=2
                 DifferenceCount=0; Correct=$true; ValidationBatchID='11111111-1111-1111-1111-111111111111'
                 StartedAtUtc='2026-09-01T10:00:00.0000000Z'; CompletedAtUtc='2026-09-01T10:00:01.0000000Z'
@@ -91,11 +92,31 @@ BeforeAll {
     }
 
     function Get-ValidValidation {
+        param([object[]] $Trials = (Get-ValidTrial))
+        $assessment = Get-WorkshopTrialAssessment -Trials $Trials
+        $linkage = @($assessment.Trials | ForEach-Object {
+            [ordered]@{
+                sequence = [int]$_.TrialSequence
+                slot = [int]$_.ParameterSlot
+                phase = [string]$_.Phase
+                resultRowCount = [int64]$_.ResultRowCount
+                resultHash = ([string]$_.ResultHash).ToLowerInvariant()
+                expectedRowCount = [int64]$_.ExpectedRowCount
+                actualRowCount = [int64]$_.ActualRowCount
+                differenceCount = [int64]$_.DifferenceCount
+                correct = [bool]$_.Correct
+                validationBatchId = ([guid]$_.ValidationBatchID).ToString('D')
+            }
+        })
+        $json = ConvertTo-Json $linkage -Depth 8 -Compress
+        $hash = [Convert]::ToHexString(
+            [Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($json))
+        ).ToLowerInvariant()
         [ordered]@{
-            passed = $true
-            materialRegression = $false
-            additionalMetricImproved = $true
-            validationHash = ('c' * 64)
+            passed = $assessment.CorrectnessPassed
+            materialRegression = $assessment.MaterialRegression
+            additionalMetricImproved = $assessment.AdditionalMetricImproved
+            validationHash = $hash
         }
     }
 }
@@ -547,6 +568,41 @@ Describe 'ConvertTo-WorkshopEvidence' {
         { ConvertTo-WorkshopEvidence -RunRecord (Get-MeasuredRun) -Samples (Get-ValidSample) `
                 -RequestSamples (Get-ValidRequestSample) -Validation $validation `
                 -Outcome TargetMet } | Should -Throw
+    }
+
+    It 'derives NoMaterialImprovement from identical A/B trial metrics despite 80/40 peaks' {
+        $trials = @(Get-ValidTrial)
+        foreach ($trial in $trials | Where-Object Phase -eq 'Optimized') {
+            $trial.DurationMs = 10
+        }
+        $run = Get-MeasuredRun
+        $run.Trials = $trials
+        $validation = Get-ValidValidation -Trials $trials
+
+        $result = ConvertTo-WorkshopEvidence -RunRecord $run -Samples (Get-ValidSample) `
+            -RequestSamples (Get-ValidRequestSample) -Validation $validation `
+            -Outcome NoMaterialImprovement
+
+        $result.correctness.additionalMetricImproved | Should -BeFalse
+        $result.outcome | Should -BeExactly 'NoMaterialImprovement'
+        { ConvertTo-WorkshopEvidence -RunRecord $run -Samples (Get-ValidSample) `
+                -RequestSamples (Get-ValidRequestSample) -Validation $validation `
+                -Outcome TargetMet } | Should -Throw '*does not match the measured evidence outcome*'
+    }
+
+    It 'rejects forged caller success fields when paired trial hashes do not match' {
+        $trials = @(Get-ValidTrial)
+        ($trials | Where-Object { $_.ParameterSlot -eq 1 -and $_.Phase -eq 'Optimized' }).ResultHash = ('cd' * 32)
+        $run = Get-MeasuredRun
+        $run.Trials = $trials
+        $validation = Get-ValidValidation -Trials $trials
+        $validation.passed = $true
+        $validation.materialRegression = $false
+        $validation.additionalMetricImproved = $true
+
+        { ConvertTo-WorkshopEvidence -RunRecord $run -Samples (Get-ValidSample) `
+                -RequestSamples (Get-ValidRequestSample) -Validation $validation `
+                -Outcome TargetMet } | Should -Throw '*does not match values derived from trials*'
     }
 
     It 'emits target evidence with no measured claims' {

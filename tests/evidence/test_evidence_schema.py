@@ -75,6 +75,7 @@ def measured_evidence(target: dict, *, outcome: str = "TargetMet") -> dict:
             "resultHash": trial["resultHash"], "expectedRowCount": trial["expectedRowCount"],
             "actualRowCount": trial["actualRowCount"], "differenceCount": trial["differenceCount"],
             "correct": trial["correct"],
+            "validationBatchId": trial["validationBatchId"],
         }
         for trial in trials
     ]
@@ -137,6 +138,7 @@ def set_validation_hash(document: dict) -> None:
             "resultHash": trial["resultHash"], "expectedRowCount": trial["expectedRowCount"],
             "actualRowCount": trial["actualRowCount"], "differenceCount": trial["differenceCount"],
             "correct": trial["correct"],
+            "validationBatchId": trial["validationBatchId"],
         }
         for trial in document["trials"]
     ]

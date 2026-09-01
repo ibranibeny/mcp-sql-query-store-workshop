@@ -1074,6 +1074,90 @@ function ConvertTo-WorkshopEvidence {
             throw 'validationHash must be a SHA-256 hash.'
         }
         $Outcome = Resolve-CanonicalEnum $Outcome $script:OutcomeValues 'outcome'
+        $trialLinkage = @($trialEvidence | ForEach-Object {
+            [ordered]@{
+                sequence = [int]$_.trialSequence
+                slot = [int]$_.parameterSlot
+                phase = [string]$_.phase
+                resultRowCount = [int64]$_.resultRowCount
+                resultHash = [string]$_.resultHash
+                expectedRowCount = [int64]$_.expectedRowCount
+                actualRowCount = [int64]$_.actualRowCount
+                differenceCount = [int64]$_.differenceCount
+                correct = [bool]$_.correct
+                validationBatchId = [string]$_.validationBatchId
+            }
+        })
+        $derivedPassed = $false
+        $derivedMaterialRegression = $false
+        $derivedAdditionalMetricImproved = $false
+        if ($trialEvidence.Count -eq 12) {
+            $expectedPhases = @('Baseline','Optimized','Optimized','Baseline','Optimized','Baseline','Baseline','Optimized','Baseline','Optimized','Optimized','Baseline')
+            $batchIds = @($trialEvidence.validationBatchId | Select-Object -Unique)
+            if ($batchIds.Count -ne 1) {
+                throw 'Completed comparison trials must use one ValidationBatchId.'
+            }
+            $derivedPassed = $true
+            for ($index = 0; $index -lt 12; $index++) {
+                $trial = $trialEvidence[$index]
+                if ($trial.trialSequence -ne ($index + 1) -or
+                    $trial.parameterSlot -ne ([math]::Floor($index / 2) + 1) -or
+                    $trial.phase -cne $expectedPhases[$index]) {
+                    throw 'Completed comparison trials must be contiguous ABBA BAAB ABBA pairs across six parameter slots.'
+                }
+            }
+            foreach ($slot in 1..6) {
+                $pair = @($trialEvidence | Where-Object parameterSlot -eq $slot)
+                $baselinePair = @($pair | Where-Object phase -ceq 'Baseline')
+                $optimizedPair = @($pair | Where-Object phase -ceq 'Optimized')
+                if ($pair.Count -ne 2 -or $baselinePair.Count -ne 1 -or $optimizedPair.Count -ne 1) {
+                    throw "Parameter slot $slot must have exactly one Baseline and one Optimized trial."
+                }
+                $expectedCount = [int64]$baselinePair[0].resultRowCount
+                $actualCount = [int64]$optimizedPair[0].resultRowCount
+                $pairCorrect = $expectedCount -eq $actualCount -and
+                    $baselinePair[0].resultHash -ceq $optimizedPair[0].resultHash
+                foreach ($trial in $pair) {
+                    if (-not $trial.correct -or
+                        $trial.expectedRowCount -ne $expectedCount -or
+                        $trial.actualRowCount -ne $actualCount -or
+                        $trial.expectedRowCount -ne $trial.actualRowCount -or
+                        $trial.differenceCount -ne 0) {
+                        $pairCorrect = $false
+                    }
+                }
+                if (-not $pairCorrect) { $derivedPassed = $false }
+            }
+
+            $baselineTrials = @($trialEvidence | Where-Object phase -ceq 'Baseline')
+            $optimizedTrials = @($trialEvidence | Where-Object phase -ceq 'Optimized')
+            foreach ($metric in @('durationMs', 'cpuMs', 'logicalReads', 'spillKB', 'waitMs')) {
+                [decimal]$baselineTotal = 0
+                [decimal]$optimizedTotal = 0
+                foreach ($trial in $baselineTrials) { $baselineTotal += [decimal]$trial.$metric }
+                foreach ($trial in $optimizedTrials) { $optimizedTotal += [decimal]$trial.$metric }
+                $baselineAverage = $baselineTotal / [decimal]$baselineTrials.Count
+                $optimizedAverage = $optimizedTotal / [decimal]$optimizedTrials.Count
+                if ($baselineAverage -gt 0 -and $optimizedAverage -le ($baselineAverage * [decimal]'0.90')) {
+                    $derivedAdditionalMetricImproved = $true
+                }
+                if (($baselineAverage -eq 0 -and $optimizedAverage -gt 0) -or
+                    ($baselineAverage -gt 0 -and $optimizedAverage -gt ($baselineAverage * [decimal]'1.10'))) {
+                    $derivedMaterialRegression = $true
+                }
+            }
+        }
+        $derivedValidation = [ordered]@{
+            passed = $derivedPassed
+            materialRegression = $derivedMaterialRegression
+            additionalMetricImproved = $derivedAdditionalMetricImproved
+            validationHash = Get-Sha256 (ConvertTo-Json $trialLinkage -Depth 8 -Compress)
+        }
+        foreach ($name in @('passed', 'materialRegression', 'additionalMetricImproved', 'validationHash')) {
+            if ((Get-ObjectValue $Validation $name -Required) -cne $derivedValidation[$name]) {
+                throw 'Validation does not match values derived from trials.'
+            }
+        }
         $baselineSamples = @($Samples | Where-Object {
             (Get-ObjectValue $_ phase -Required) -ceq 'Baseline'
         })
@@ -1124,14 +1208,19 @@ function ConvertTo-WorkshopEvidence {
         if ($Outcome -in @('TargetMet', 'ImprovedOutsideTarget') -and $termination.timeout) {
             throw "Outcome '$Outcome' cannot claim a timeout."
         }
-        $expectedOutcome = Get-WorkshopOutcome -BaselinePeak $baselinePeak `
-            -OptimizedPeak $optimizedPeak `
-            -CorrectnessPassed (Get-ObjectValue $Validation passed -Required) `
-            -MaterialRegression (Get-ObjectValue $Validation materialRegression -Required) `
-            -AdditionalMetricImproved (Get-ObjectValue $Validation additionalMetricImproved -Required) `
-            -SafetyStopped $termination.safetyStopTriggered `
-            -ManualStopped $termination.manualStopRequested
-        if ($Outcome -cne 'Failed' -and $Outcome -cne $expectedOutcome) {
+        $expectedOutcome = if ($status -ceq 'Failed') {
+            'Failed'
+        }
+        else {
+            Get-WorkshopOutcome -BaselinePeak $baselinePeak `
+                -OptimizedPeak $optimizedPeak `
+                -CorrectnessPassed $derivedValidation.passed `
+                -MaterialRegression $derivedValidation.materialRegression `
+                -AdditionalMetricImproved $derivedValidation.additionalMetricImproved `
+                -SafetyStopped $termination.safetyStopTriggered `
+                -ManualStopped $termination.manualStopRequested
+        }
+        if ($Outcome -cne $expectedOutcome) {
             throw "Outcome '$Outcome' does not match the measured evidence outcome '$expectedOutcome'."
         }
         $expectedStatus = if ($Outcome -in @('TargetMet', 'ImprovedOutsideTarget', 'NoMaterialImprovement')) {
@@ -1143,7 +1232,7 @@ function ConvertTo-WorkshopEvidence {
         if ($status -cne $expectedStatus) {
             throw "Status '$status' does not match outcome '$Outcome'."
         }
-        $correctness = ConvertTo-CanonicalValue $Validation
+        $correctness = ConvertTo-CanonicalValue $derivedValidation
     }
 
     return [pscustomobject][ordered]@{
@@ -1466,17 +1555,19 @@ function Get-WorkshopTrialAssessment {
     $metrics = @('DurationMs', 'CpuMs', 'LogicalReads', 'SpillKB', 'WaitMs')
     $improved = $false
     $materialRegression = $false
-    if ($correctnessPassed) {
-        foreach ($metric in $metrics) {
-            $baselineAverage = [decimal] (($baseline | Measure-Object -Property $metric -Average).Average)
-            $optimizedAverage = [decimal] (($optimized | Measure-Object -Property $metric -Average).Average)
-            if ($baselineAverage -gt 0 -and $optimizedAverage -le ($baselineAverage * [decimal]'0.90')) {
-                $improved = $true
-            }
-            if (($baselineAverage -eq 0 -and $optimizedAverage -gt 0) -or
-                ($baselineAverage -gt 0 -and $optimizedAverage -gt ($baselineAverage * [decimal]'1.10'))) {
-                $materialRegression = $true
-            }
+    foreach ($metric in $metrics) {
+        [decimal]$baselineTotal = 0
+        [decimal]$optimizedTotal = 0
+        foreach ($trial in $baseline) { $baselineTotal += [decimal]$trial.$metric }
+        foreach ($trial in $optimized) { $optimizedTotal += [decimal]$trial.$metric }
+        $baselineAverage = $baselineTotal / [decimal]$baseline.Count
+        $optimizedAverage = $optimizedTotal / [decimal]$optimized.Count
+        if ($baselineAverage -gt 0 -and $optimizedAverage -le ($baselineAverage * [decimal]'0.90')) {
+            $improved = $true
+        }
+        if (($baselineAverage -eq 0 -and $optimizedAverage -gt 0) -or
+            ($baselineAverage -gt 0 -and $optimizedAverage -gt ($baselineAverage * [decimal]'1.10'))) {
+            $materialRegression = $true
         }
     }
     return [pscustomobject]@{
@@ -1564,6 +1655,7 @@ function Build-WorkshopExperimentResult {
             actualRowCount = [int64]$_.ActualRowCount
             differenceCount = [int64]$_.DifferenceCount
             correct = [bool]$_.Correct
+            validationBatchId = ([guid]$_.ValidationBatchID).ToString('D')
         }
     })
     $validation = [ordered]@{
