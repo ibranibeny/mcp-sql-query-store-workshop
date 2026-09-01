@@ -95,7 +95,7 @@ Describe 'Offline development dependency installer behavior' {
 
         Should -Invoke Invoke-PipInstall -Times 1 -Exactly -ParameterFilter {
             $NoIndex -and $FindLinks -eq [System.IO.Path]::GetFullPath($wheelhouse) -and
-            -not $UsePublicIndex -and -not $UseConfiguredIndex
+            -not $UseConfiguredIndex
         }
     }
 
@@ -111,7 +111,7 @@ Describe 'Offline development dependency installer behavior' {
             -AllowPublicPackageIndex
 
         Should -Invoke Invoke-PipInstall -Times 1 -Exactly -ParameterFilter {
-            $UsePublicIndex -and -not $UseConfiguredIndex -and -not $NoIndex
+            -not $UseConfiguredIndex -and -not $NoIndex
         }
     }
 
@@ -130,7 +130,7 @@ Describe 'Offline development dependency installer behavior' {
                 -AllowConfiguredPackageIndex
 
             Should -Invoke Invoke-PipInstall -Times 1 -Exactly -ParameterFilter {
-                $UseConfiguredIndex -and -not $UsePublicIndex -and -not $NoIndex
+                $UseConfiguredIndex -and -not $NoIndex
             }
         }
         finally {
@@ -178,31 +178,98 @@ Describe 'Offline development dependency installer behavior' {
 }
 
 Describe 'Configured Python index process isolation' {
-    It 'isolates the configured index from extra indexes and pip configuration' {
-        $previousIndex = $env:PIP_INDEX_URL
-        $previousExtraIndex = $env:PIP_EXTRA_INDEX_URL
+    It 'passes the configured index only through the child environment and redacts it' {
+        $names = @(
+            'PIP_INDEX_URL',
+            'PIP_EXTRA_INDEX_URL',
+            'PIP_TRUSTED_HOST',
+            'PIP_PROXY',
+            'PIP_CONFIG_FILE',
+            'PIP_NO_INDEX',
+            'HTTPS_PROXY'
+        )
+        $previous = @{}
+        foreach ($name in $names) {
+            $previous[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
+        }
         try {
-            $env:PIP_INDEX_URL = 'https://internal.invalid/simple'
+            $indexUrl = 'https://user:secret@internal.invalid/simple'
+            $env:PIP_INDEX_URL = $indexUrl
             $env:PIP_EXTRA_INDEX_URL = 'https://must-not-be-used.invalid/simple'
+            $env:PIP_TRUSTED_HOST = 'must-not-be-used.invalid'
+            $env:PIP_PROXY = 'https://proxy-user:proxy-secret@proxy.invalid'
+            $env:PIP_NO_INDEX = '1'
+            $env:HTTPS_PROXY = 'https://corporate-proxy.invalid:443'
             $script:NativeArguments = @()
             Mock Invoke-SanitizedNativeCommand {
                 $script:NativeArguments = @($ArgumentList)
-                $script:NativePipConfig = $env:PIP_CONFIG_FILE
+                $script:ChildEnvironment = @{}
+                foreach ($name in $names) {
+                    $script:ChildEnvironment[$name] =
+                        [Environment]::GetEnvironmentVariable($name, 'Process')
+                }
                 return 0
             }
 
-            Invoke-PipInstall -PythonPath 'python.exe' -RequirementsPath 'requirements-dev.txt' `
-                -UseConfiguredIndex
+            $output = & {
+                Invoke-PipInstall -PythonPath 'python.exe' `
+                    -RequirementsPath 'requirements-dev.txt' -UseConfiguredIndex
+            } 6>&1 | Out-String
 
-            $script:NativeArguments | Should -Contain '--isolated'
-            $script:NativeArguments | Should -Contain '--index-url'
-            $script:NativeArguments | Should -Contain $env:PIP_INDEX_URL
-            $script:NativeArguments | Should -Not -Contain $env:PIP_EXTRA_INDEX_URL
-            $script:NativePipConfig | Should -Be 'NUL'
+            $script:NativeArguments | Should -Be @(
+                '-m', 'pip', 'install', '-r', 'requirements-dev.txt'
+            )
+            ($script:NativeArguments -join ' ') | Should -Not -Match 'https?://'
+            $output | Should -Not -Match ([regex]::Escape($indexUrl))
+            $script:ChildEnvironment.PIP_INDEX_URL | Should -Be $indexUrl
+            $script:ChildEnvironment.PIP_EXTRA_INDEX_URL | Should -BeNullOrEmpty
+            $script:ChildEnvironment.PIP_TRUSTED_HOST | Should -BeNullOrEmpty
+            $script:ChildEnvironment.PIP_PROXY | Should -BeNullOrEmpty
+            $script:ChildEnvironment.PIP_NO_INDEX | Should -BeNullOrEmpty
+            $script:ChildEnvironment.PIP_CONFIG_FILE | Should -Be $(
+                if ([System.IO.Path]::DirectorySeparatorChar -eq '\') { 'NUL' } else { '/dev/null' }
+            )
+            $script:ChildEnvironment.HTTPS_PROXY | Should -Be 'https://corporate-proxy.invalid:443'
         }
         finally {
-            $env:PIP_INDEX_URL = $previousIndex
-            $env:PIP_EXTRA_INDEX_URL = $previousExtraIndex
+            foreach ($name in $names) {
+                [Environment]::SetEnvironmentVariable($name, $previous[$name], 'Process')
+            }
+        }
+    }
+
+    It 'restores the complete parent pip environment when invocation fails' {
+        $expected = @{
+            PIP_INDEX_URL = 'https://internal.invalid/simple'
+            PIP_EXTRA_INDEX_URL = 'https://original-extra.invalid/simple'
+            PIP_TRUSTED_HOST = 'original-host.invalid'
+            PIP_PROXY = 'https://original-proxy.invalid'
+            PIP_CONFIG_FILE = 'original-pip.ini'
+            PIP_NO_INDEX = 'original-no-index'
+            HTTPS_PROXY = 'https://corporate-proxy.invalid:443'
+        }
+        $original = @{}
+        foreach ($entry in $expected.GetEnumerator()) {
+            $original[$entry.Key] = [Environment]::GetEnvironmentVariable($entry.Key, 'Process')
+            [Environment]::SetEnvironmentVariable($entry.Key, $entry.Value, 'Process')
+        }
+        Mock Invoke-SanitizedNativeCommand { throw 'simulated child failure' }
+
+        try {
+            {
+                Invoke-PipInstall -PythonPath 'python.exe' `
+                    -RequirementsPath 'requirements-dev.txt' -UseConfiguredIndex
+            } | Should -Throw '*simulated child failure*'
+
+            foreach ($entry in $expected.GetEnumerator()) {
+                [Environment]::GetEnvironmentVariable($entry.Key, 'Process') |
+                    Should -Be $entry.Value
+            }
+        }
+        finally {
+            foreach ($entry in $original.GetEnumerator()) {
+                [Environment]::SetEnvironmentVariable($entry.Key, $entry.Value, 'Process')
+            }
         }
     }
 }

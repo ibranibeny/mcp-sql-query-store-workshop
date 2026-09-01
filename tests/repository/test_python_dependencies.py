@@ -1,12 +1,27 @@
 from __future__ import annotations
 
+import importlib.util
 from pathlib import Path
 import subprocess
 import sys
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[2]
 VERIFIER = ROOT / "build" / "Test-PythonDependencies.py"
+
+
+def load_verifier_module():
+    spec = importlib.util.spec_from_file_location("python_dependency_verifier", VERIFIER)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+VERIFIER_MODULE = load_verifier_module()
 
 
 def write_distribution(site_packages: Path, name: str, version: str) -> None:
@@ -111,3 +126,59 @@ def test_verifier_excludes_prerelease_of_the_exclusive_upper_bound(tmp_path: Pat
 
     assert result.returncode == 1
     assert "status: out-of-bounds" in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("left", "right", "expected"),
+    [
+        ("1.0-1", "1.0", 1),
+        ("1.0alpha1", "1.0a2", -1),
+        ("1.0beta1", "1.0b1", 0),
+        ("1.0c1", "1.0rc1", 0),
+        ("1.0pre1", "1.0preview2", -1),
+        ("1!1.0", "2.0", 1),
+        ("1.0.dev1", "1.0a1", -1),
+        ("1.0rc1.dev1", "1.0rc1", -1),
+        ("1.0", "1.0.post1.dev1", -1),
+        ("1.0.post1.dev1", "1.0.post1", -1),
+        ("1.0", "1.0+corp.1", -1),
+        ("1.0+corp.1", "1.0+corp.2", -1),
+        ("1.0+corp.1", "1.0+corp.alpha", 1),
+        ("1.0", "1.0.0", 0),
+    ],
+)
+def test_pep440_version_ordering(left: str, right: str, expected: int) -> None:
+    assert VERIFIER_MODULE.compare_versions(left, right) == expected
+    assert VERIFIER_MODULE.compare_versions(right, left) == -expected
+
+
+def test_verifier_accepts_pep440_versions_in_bounds(tmp_path: Path) -> None:
+    requirements = tmp_path / "requirements-dev.txt"
+    requirements.write_text("Demo>=1!1.0rc1,<1!2.0\n", encoding="utf-8")
+    site_packages = tmp_path / "site-packages"
+    site_packages.mkdir()
+    write_distribution(site_packages, "Demo", "1!1.0.post1+corp.7")
+
+    result = run_verifier(requirements, site_packages)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "status: satisfied" in result.stdout
+
+
+@pytest.mark.parametrize("invalid", ["1..0", "1.0+bad!local", "not-a-version"])
+def test_pep440_parser_rejects_invalid_versions_clearly(invalid: str) -> None:
+    with pytest.raises(ValueError, match="Invalid PEP 440 version"):
+        VERIFIER_MODULE.parse_version(invalid)
+
+
+def test_verifier_reports_an_invalid_installed_version_clearly(tmp_path: Path) -> None:
+    requirements = tmp_path / "requirements-dev.txt"
+    requirements.write_text("Demo>=1,<2\n", encoding="utf-8")
+    site_packages = tmp_path / "site-packages"
+    site_packages.mkdir()
+    write_distribution(site_packages, "Demo", "not-a-version")
+
+    result = run_verifier(requirements, site_packages)
+
+    assert result.returncode == 1
+    assert "detected: not-a-version | status: invalid-version" in result.stdout

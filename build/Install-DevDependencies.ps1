@@ -169,32 +169,72 @@ function Invoke-PipInstall {
         [string] $FindLinks,
 
         [Parameter()]
-        [switch] $UsePublicIndex,
-
-        [Parameter()]
         [switch] $UseConfiguredIndex
     )
 
-    $arguments = @('-m', 'pip')
-    if ($NoIndex -or $UsePublicIndex -or $UseConfiguredIndex) {
-        $arguments += '--isolated'
-    }
-    $arguments += @('install', '--disable-pip-version-check')
+    $arguments = @('-m', 'pip', 'install')
     if ($NoIndex) {
         $arguments += @('--no-index', '--find-links', $FindLinks)
     }
-    elseif ($UseConfiguredIndex) {
-        $arguments += @('--index-url', $env:PIP_INDEX_URL)
-    }
-    $arguments += @('--requirement', $RequirementsPath)
+    $arguments += @('-r', $RequirementsPath)
 
-    $previousPipConfigFile = $env:PIP_CONFIG_FILE
+    $configuredIndexUrl = if ($UseConfiguredIndex) { $env:PIP_INDEX_URL } else { $null }
+    $environmentNames = @(
+        'PIP_CONFIG_FILE',
+        'PIP_DISABLE_PIP_VERSION_CHECK',
+        'PIP_INDEX_URL',
+        'PIP_EXTRA_INDEX_URL',
+        'PIP_TRUSTED_HOST',
+        'PIP_PROXY',
+        'PIP_FIND_LINKS',
+        'PIP_NO_INDEX'
+    )
+    $previousEnvironment = @{}
+    foreach ($name in $environmentNames) {
+        $previousEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
+    }
+
     try {
-        $env:PIP_CONFIG_FILE = 'NUL'
+        $nullDevice = if ([System.IO.Path]::DirectorySeparatorChar -eq '\') {
+            'NUL'
+        }
+        else {
+            '/dev/null'
+        }
+        [Environment]::SetEnvironmentVariable('PIP_CONFIG_FILE', $nullDevice, 'Process')
+        [Environment]::SetEnvironmentVariable('PIP_DISABLE_PIP_VERSION_CHECK', '1', 'Process')
+        foreach ($name in @(
+            'PIP_EXTRA_INDEX_URL',
+            'PIP_TRUSTED_HOST',
+            'PIP_PROXY',
+            'PIP_FIND_LINKS'
+        )) {
+            [Environment]::SetEnvironmentVariable($name, $null, 'Process')
+        }
+
+        if ($UseConfiguredIndex) {
+            [Environment]::SetEnvironmentVariable('PIP_INDEX_URL', $configuredIndexUrl, 'Process')
+            [Environment]::SetEnvironmentVariable('PIP_NO_INDEX', $null, 'Process')
+        }
+        elseif ($NoIndex) {
+            [Environment]::SetEnvironmentVariable('PIP_INDEX_URL', $null, 'Process')
+            [Environment]::SetEnvironmentVariable('PIP_NO_INDEX', '1', 'Process')
+        }
+        else {
+            [Environment]::SetEnvironmentVariable('PIP_INDEX_URL', $null, 'Process')
+            [Environment]::SetEnvironmentVariable('PIP_NO_INDEX', $null, 'Process')
+        }
+
         $exitCode = Invoke-SanitizedNativeCommand -FilePath $PythonPath -ArgumentList $arguments
     }
     finally {
-        $env:PIP_CONFIG_FILE = $previousPipConfigFile
+        foreach ($name in $environmentNames) {
+            [Environment]::SetEnvironmentVariable(
+                $name,
+                $previousEnvironment[$name],
+                'Process'
+            )
+        }
     }
     if ($exitCode -ne 0) {
         throw "pip failed to install development dependencies (exit code $exitCode)."
@@ -306,8 +346,7 @@ function Invoke-DevDependencyInstallation {
     }
     elseif ($AllowPublicPackageIndex) {
         Write-Warning 'Public package network access was explicitly enabled for this run.'
-        Invoke-PipInstall -PythonPath $pythonPath -RequirementsPath $requirementsPath `
-            -UsePublicIndex
+        Invoke-PipInstall -PythonPath $pythonPath -RequirementsPath $requirementsPath
     }
     elseif ($AllowConfiguredPackageIndex) {
         Write-Output 'Installing from the explicitly enabled configured package index (URL redacted).'
