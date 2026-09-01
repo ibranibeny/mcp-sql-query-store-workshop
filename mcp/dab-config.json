@@ -1,0 +1,318 @@
+{
+  "$schema": "https://github.com/Azure/data-api-builder/releases/download/v2.0.0/dab.draft.schema.json",
+  "data-source": {
+    "database-type": "mssql",
+    "connection-string": "@env('MSSQL_CONNECTION_STRING')",
+    "options": {
+      "set-session-context": false
+    }
+  },
+  "runtime": {
+    "rest": {
+      "enabled": false
+    },
+    "graphql": {
+      "enabled": false
+    },
+    "mcp": {
+      "enabled": true,
+      "path": "/mcp",
+      "description": "Read-only SQL Server diagnostic evidence for the MCP SQL Query Store workshop. Use configured summary views and bounded diagnostic procedures only.",
+      "dml-tools": {
+        "describe-entities": true,
+        "create-record": false,
+        "read-records": true,
+        "update-record": false,
+        "delete-record": false,
+        "execute-entity": true,
+        "aggregate-records": {
+          "enabled": true,
+          "query-timeout": 30
+        }
+      }
+    }
+  },
+  "entities": {
+    "WorkshopRunSummary": {
+      "description": "Read-only summaries of bounded workshop runs and measured comparison outcomes. TARGET values are not measurements; use only rows classified as LAB-MEASURED for observed results.",
+      "source": {
+        "object": "lab.vw_WorkshopRunSummary",
+        "object-description": "Curated projection of workshop run status, evidence classification, Query Store identifiers, and measured performance totals.",
+        "type": "view"
+      },
+      "fields": [
+        { "name": "RunID", "description": "Unique identifier for the workshop run or comparison.", "primary-key": true },
+        { "name": "ParentComparisonID", "description": "Optional identifier linking a phase run to its parent comparison run." },
+        { "name": "EvidenceClassification", "description": "Evidence provenance classification; LAB-MEASURED denotes executed lab evidence and TARGET denotes a goal only." },
+        { "name": "Phase", "description": "Run phase: Baseline, Optimized, or Comparison." },
+        { "name": "RunStatus", "description": "Lifecycle status: Pending, Running, Completed, Failed, or Stopped." },
+        { "name": "Outcome", "description": "Final bounded outcome classification, or null until the run is classified." },
+        { "name": "StartedAtUtc", "description": "Run start timestamp in UTC." },
+        { "name": "CompletedAtUtc", "description": "Run completion timestamp in UTC, or null while incomplete." },
+        { "name": "BaselineQueryID", "description": "Query Store query identifier captured for the baseline procedure, or null when unavailable." },
+        { "name": "BaselinePlanID", "description": "Query Store plan identifier captured for the baseline procedure, or null when unavailable." },
+        { "name": "OptimizedQueryID", "description": "Query Store query identifier captured for the optimized procedure, or null when unavailable." },
+        { "name": "OptimizedPlanID", "description": "Query Store plan identifier captured for the optimized procedure, or null when unavailable." },
+        { "name": "DurationMs", "description": "Measured elapsed duration in milliseconds, or null when not recorded." },
+        { "name": "CpuMs", "description": "Measured CPU time in milliseconds, or null when not recorded." },
+        { "name": "LogicalReads", "description": "Measured logical page reads, or null when not recorded." },
+        { "name": "Spills", "description": "Measured spill quantity recorded by the workshop, or null when not recorded." },
+        { "name": "WaitTimeMs", "description": "Measured wait time in milliseconds, or null when not recorded." }
+      ],
+      "permissions": [
+        {
+          "role": "workshop-reader",
+          "actions": [
+            {
+              "action": "read",
+              "fields": {
+                "include": ["RunID", "ParentComparisonID", "EvidenceClassification", "Phase", "RunStatus", "Outcome", "StartedAtUtc", "CompletedAtUtc", "BaselineQueryID", "BaselinePlanID", "OptimizedQueryID", "OptimizedPlanID", "DurationMs", "CpuMs", "LogicalReads", "Spills", "WaitTimeMs"]
+              }
+            }
+          ]
+        }
+      ],
+      "mcp": { "dml-tools": true, "custom-tool": false },
+      "rest": { "enabled": false },
+      "graphql": { "enabled": false }
+    },
+    "WorkshopSampleSummary": {
+      "description": "Read-only time-series memory samples collected during bounded baseline and optimized phases. Values are observations only when their run is LAB-MEASURED.",
+      "source": {
+        "object": "lab.vw_WorkshopSampleSummary",
+        "object-description": "Curated projection of workshop resource-pool, host, process, and SQL Server memory samples.",
+        "type": "view"
+      },
+      "fields": [
+        { "name": "RunID", "description": "Unique identifier of the sampled workshop run.", "primary-key": true },
+        { "name": "SampleSequence", "description": "Positive sequence number unique within the run.", "primary-key": true },
+        { "name": "SampledAtUtc", "description": "Sample timestamp in UTC." },
+        { "name": "Phase", "description": "Measured phase: Baseline or Optimized." },
+        { "name": "PoolTotalMemoryKB", "description": "Total regular resource-semaphore memory for the workshop pool in KiB." },
+        { "name": "PoolGrantedMemoryKB", "description": "Memory currently granted from the workshop pool in KiB." },
+        { "name": "PoolUsedMemoryKB", "description": "Granted workshop-pool memory currently used in KiB." },
+        { "name": "PoolAvailableMemoryKB", "description": "Workshop-pool semaphore memory not currently granted in KiB." },
+        { "name": "GrantUtilizationPercent", "description": "Measured percent of pool semaphore memory granted, from 0.00 through 100.00." },
+        { "name": "GranteeCount", "description": "Number of requests holding grants in the regular workshop semaphore." },
+        { "name": "WaiterCount", "description": "Number of requests waiting for grants in the regular workshop semaphore." },
+        { "name": "HostAvailableMemoryKB", "description": "Physical memory available on the SQL host in KiB." },
+        { "name": "ProcessPhysicalMemoryKB", "description": "Physical memory used by the SQL Server process in KiB." },
+        { "name": "TotalServerMemoryKB", "description": "SQL Server Total Server Memory performance counter in KiB." },
+        { "name": "TargetServerMemoryKB", "description": "SQL Server Target Server Memory performance counter in KiB." },
+        { "name": "SystemLowMemorySignal", "description": "True when Windows reports a system low-memory signal." },
+        { "name": "ProcessLowMemorySignal", "description": "True when SQL Server reports a process physical low-memory signal." }
+      ],
+      "permissions": [
+        {
+          "role": "workshop-reader",
+          "actions": [
+            {
+              "action": "read",
+              "fields": {
+                "include": ["RunID", "SampleSequence", "SampledAtUtc", "Phase", "PoolTotalMemoryKB", "PoolGrantedMemoryKB", "PoolUsedMemoryKB", "PoolAvailableMemoryKB", "GrantUtilizationPercent", "GranteeCount", "WaiterCount", "HostAvailableMemoryKB", "ProcessPhysicalMemoryKB", "TotalServerMemoryKB", "TargetServerMemoryKB", "SystemLowMemorySignal", "ProcessLowMemorySignal"]
+              }
+            }
+          ]
+        }
+      ],
+      "mcp": { "dml-tools": true, "custom-tool": false },
+      "rest": { "enabled": false },
+      "graphql": { "enabled": false }
+    },
+    "GetMemorySnapshot": {
+      "description": "Returns one current read-only memory snapshot for the workshop resource pool regular semaphore and host. No parameters or parameter bounds apply; values are point-in-time evidence, not a completed benchmark.",
+      "source": {
+        "object": "lab.usp_GetMemorySnapshot",
+        "object-description": "Bounded diagnostic procedure that reads the workshop pool, SQL Server, process, and host memory DMVs without changing state.",
+        "type": "stored-procedure"
+      },
+      "fields": [
+        { "name": "ResourcePoolID", "description": "SQL Server identifier of the workshop Resource Governor pool." },
+        { "name": "ResourcePoolName", "description": "Resource Governor pool name; expected to be mcp_sql_workshop_pool." },
+        { "name": "ResourceSemaphoreID", "description": "Semaphore identifier; zero denotes the regular query-workspace semaphore." },
+        { "name": "PoolTotalMemoryKB", "description": "Total regular-semaphore memory in KiB." },
+        { "name": "PoolGrantedMemoryKB", "description": "Currently granted regular-semaphore memory in KiB." },
+        { "name": "PoolUsedMemoryKB", "description": "Currently used granted memory in KiB." },
+        { "name": "PoolAvailableMemoryKB", "description": "Regular-semaphore memory not currently granted in KiB." },
+        { "name": "GrantUtilizationPercent", "description": "Point-in-time granted memory as a percent of total semaphore memory." },
+        { "name": "GranteeCount", "description": "Current requests holding memory grants." },
+        { "name": "WaiterCount", "description": "Current requests waiting for memory grants." },
+        { "name": "HostAvailableMemoryKB", "description": "Host physical memory currently available in KiB." },
+        { "name": "HostUsedMemoryKB", "description": "Host physical memory currently used in KiB." },
+        { "name": "ProcessPhysicalMemoryKB", "description": "SQL Server process physical memory in use in KiB." },
+        { "name": "TotalServerMemoryKB", "description": "SQL Server Total Server Memory in KiB." },
+        { "name": "TargetServerMemoryKB", "description": "SQL Server Target Server Memory in KiB." },
+        { "name": "SystemLowMemorySignal", "description": "True when the operating system signals low physical memory." },
+        { "name": "ProcessLowMemorySignal", "description": "True when SQL Server signals low process physical memory." },
+        { "name": "ProcessPhysicalMemoryLow", "description": "SQL Server process physical-memory-low flag." },
+        { "name": "ProcessVirtualMemoryLow", "description": "SQL Server process virtual-memory-low flag." },
+        { "name": "SystemPhysicalMemoryLow", "description": "Operating-system physical-memory-low flag." },
+        { "name": "SystemPhysicalMemoryHigh", "description": "Operating-system physical-memory-high flag." },
+        { "name": "SampledAtUtc", "description": "UTC timestamp at which the snapshot was produced." }
+      ],
+      "permissions": [{ "role": "workshop-reader", "actions": ["execute"] }],
+      "mcp": { "dml-tools": true, "custom-tool": true },
+      "rest": { "enabled": false },
+      "graphql": { "enabled": false }
+    },
+    "GetActiveWorkshopGrants": {
+      "description": "Returns active memory grants only for doubly scoped workshop sessions. Parameter bounds: Top is 1-100 and defaults to 20; RunID is optional and limits evidence to one workshop run.",
+      "source": {
+        "object": "lab.usp_GetActiveWorkshopGrants",
+        "object-description": "Bounded DMV diagnostic for active or waiting query-memory grants from workshop-tagged sessions.",
+        "type": "stored-procedure",
+        "parameters": [
+          { "name": "Top", "required": false, "default": 20, "description": "Maximum rows to return; integer from 1 through 100." },
+          { "name": "RunID", "required": false, "default": null, "description": "Optional workshop run UUID; null returns all currently tagged workshop runs." }
+        ]
+      },
+      "fields": [
+        { "name": "RunID", "description": "Workshop run identifier decoded from the tagged session." },
+        { "name": "SessionID", "description": "SQL Server session identifier holding or waiting for the grant." },
+        { "name": "RequestID", "description": "Request identifier within the session." },
+        { "name": "RequestStatus", "description": "Current SQL request status." },
+        { "name": "RequestCommand", "description": "Current SQL request command." },
+        { "name": "RequestedMemoryKB", "description": "Requested query workspace memory in KiB." },
+        { "name": "GrantedMemoryKB", "description": "Granted query workspace memory in KiB." },
+        { "name": "RequiredMemoryKB", "description": "Minimum required query workspace memory in KiB." },
+        { "name": "IdealMemoryKB", "description": "Optimizer-estimated ideal query workspace memory in KiB." },
+        { "name": "UsedMemoryKB", "description": "Current used portion of the grant in KiB." },
+        { "name": "MaxUsedMemoryKB", "description": "Peak used portion of the grant in KiB." },
+        { "name": "QueueID", "description": "Resource semaphore queue identifier." },
+        { "name": "WaitOrder", "description": "Position in the memory grant wait queue, or null when granted." },
+        { "name": "WaitTimeMs", "description": "Memory grant wait duration in milliseconds." },
+        { "name": "QueryCost", "description": "Optimizer query cost associated with the grant." },
+        { "name": "DegreeOfParallelism", "description": "Degree of parallelism for the request." }
+      ],
+      "permissions": [{ "role": "workshop-reader", "actions": ["execute"] }],
+      "mcp": { "dml-tools": true, "custom-tool": true },
+      "rest": { "enabled": false },
+      "graphql": { "enabled": false }
+    },
+    "GetQueryStoreTopQueries": {
+      "description": "Returns bounded Query Store runtime evidence only for the baseline and optimized workshop procedures. Parameter bounds: StartUtc precedes EndUtc, the window is at most 24 hours, and Top is 1-100 with default 20.",
+      "source": {
+        "object": "lab.usp_GetQueryStoreTopQueries",
+        "object-description": "Read-only bounded Query Store runtime aggregate for the two workshop procedure object identifiers.",
+        "type": "stored-procedure",
+        "parameters": [
+          { "name": "StartUtc", "required": true, "description": "Inclusive UTC start of the evidence window; must precede EndUtc." },
+          { "name": "EndUtc", "required": true, "description": "Exclusive UTC end of the evidence window; no more than 24 hours after StartUtc." },
+          { "name": "Top", "required": false, "default": 20, "description": "Maximum rows to return; integer from 1 through 100." }
+        ]
+      },
+      "fields": [
+        { "name": "QueryID", "description": "Query Store query identifier for a configured workshop procedure." },
+        { "name": "PlanID", "description": "Query Store plan identifier for the query." },
+        { "name": "ProcedurePhase", "description": "Workshop procedure phase: Baseline or Optimized." },
+        { "name": "ExecutionCount", "description": "Executions represented by overlapping Query Store intervals." },
+        { "name": "AverageDurationMicroseconds", "description": "Execution-count-weighted average duration in microseconds." },
+        { "name": "AverageCpuMicroseconds", "description": "Execution-count-weighted average CPU time in microseconds." },
+        { "name": "AverageLogicalReads", "description": "Execution-count-weighted average logical page reads." },
+        { "name": "AverageQueryMaxUsedMemoryPages", "description": "Execution-count-weighted average maximum query memory used in 8-KiB pages." },
+        { "name": "AveragePhysicalReads", "description": "Execution-count-weighted average physical page reads." },
+        { "name": "AverageLogBytesUsed", "description": "Execution-count-weighted average transaction log bytes used." },
+        { "name": "AverageTempdbSpaceUsedPages", "description": "Execution-count-weighted average tempdb space used in 8-KiB pages." }
+      ],
+      "permissions": [{ "role": "workshop-reader", "actions": ["execute"] }],
+      "mcp": { "dml-tools": true, "custom-tool": true },
+      "rest": { "enabled": false },
+      "graphql": { "enabled": false }
+    },
+    "GetQueryStoreWaits": {
+      "description": "Returns bounded Query Store wait evidence only for the baseline and optimized workshop procedures. Parameter bounds: StartUtc precedes EndUtc, the window is at most 24 hours, and Top is 1-100 with default 20.",
+      "source": {
+        "object": "lab.usp_GetQueryStoreWaits",
+        "object-description": "Read-only bounded Query Store wait-category aggregate for the two workshop procedure object identifiers.",
+        "type": "stored-procedure",
+        "parameters": [
+          { "name": "StartUtc", "required": true, "description": "Inclusive UTC start of the evidence window; must precede EndUtc." },
+          { "name": "EndUtc", "required": true, "description": "Exclusive UTC end of the evidence window; no more than 24 hours after StartUtc." },
+          { "name": "Top", "required": false, "default": 20, "description": "Maximum rows to return; integer from 1 through 100." }
+        ]
+      },
+      "fields": [
+        { "name": "QueryID", "description": "Query Store query identifier for a configured workshop procedure." },
+        { "name": "PlanID", "description": "Query Store plan identifier for the query." },
+        { "name": "ProcedurePhase", "description": "Workshop procedure phase: Baseline or Optimized." },
+        { "name": "WaitCategory", "description": "Query Store wait category description." },
+        { "name": "TotalQueryWaitTimeMs", "description": "Total Query Store wait time in milliseconds for the category and selected intervals." },
+        { "name": "AverageQueryWaitTimeMs", "description": "Average wait time in milliseconds per represented execution." }
+      ],
+      "permissions": [{ "role": "workshop-reader", "actions": ["execute"] }],
+      "mcp": { "dml-tools": true, "custom-tool": true },
+      "rest": { "enabled": false },
+      "graphql": { "enabled": false }
+    },
+    "GetProcedurePlanSummary": {
+      "description": "Returns bounded Query Store plan metadata for one workshop procedure. Parameter bounds: ProcedureName is exactly lab.usp_MonthEndSalesBaseline or lab.usp_MonthEndSalesOptimized; Top is 1-100 with default 20. PlanHash is evidence identity, not proof of performance.",
+      "source": {
+        "object": "lab.usp_GetProcedurePlanSummary",
+        "object-description": "Read-only bounded Query Store plan summary for only the baseline or optimized workshop procedure.",
+        "type": "stored-procedure",
+        "parameters": [
+          { "name": "ProcedureName", "required": true, "description": "Exact two-part name: lab.usp_MonthEndSalesBaseline or lab.usp_MonthEndSalesOptimized." },
+          { "name": "Top", "required": false, "default": 20, "description": "Maximum plans to return; integer from 1 through 100." }
+        ]
+      },
+      "fields": [
+        { "name": "QueryID", "description": "Query Store query identifier for the selected workshop procedure." },
+        { "name": "PlanID", "description": "Query Store plan identifier." },
+        { "name": "IsForcedPlan", "description": "True when Query Store currently forces this plan." },
+        { "name": "HasForceFailures", "description": "True when Query Store records one or more force failures." },
+        { "name": "LastForceFailureReason", "description": "Most recent Query Store plan-force failure reason, or NONE when no failure is recorded." },
+        { "name": "IsParallelPlan", "description": "True when the captured plan uses parallel execution." },
+        { "name": "LastExecutionTime", "description": "Most recent Query Store execution timestamp for the plan." },
+        { "name": "PlanHash", "description": "SHA-256 hash of the stored query plan bytes for evidence correlation." },
+        { "name": "PlanSizeBytes", "description": "Stored query plan size in bytes." }
+      ],
+      "permissions": [{ "role": "workshop-reader", "actions": ["execute"] }],
+      "mcp": { "dml-tools": true, "custom-tool": true },
+      "rest": { "enabled": false },
+      "graphql": { "enabled": false }
+    },
+    "CompareWorkshopRuns": {
+      "description": "Compares one completed, frozen workshop comparison using exactly twelve correct paired trials. Parameter bounds: RunID and ValidationBatchID are required UUIDs. Returns measured peak and median grant utilization plus duration, CPU, reads, spills, waits, regression flags, and final evidence outcome.",
+      "source": {
+        "object": "lab.usp_CompareWorkshopRuns",
+        "object-description": "Read-only evidence comparison that validates a completed comparison run and its exact validation batch before calculating outcomes.",
+        "type": "stored-procedure",
+        "parameters": [
+          { "name": "RunID", "required": true, "description": "UUID of a completed Comparison-phase workshop run with frozen settings and both phase samples." },
+          { "name": "ValidationBatchID", "required": true, "description": "UUID of the validation batch containing exactly twelve correct paired trials for RunID." }
+        ]
+      },
+      "fields": [
+        { "name": "RunID", "description": "Completed comparison run identifier." },
+        { "name": "BaselinePeakGrantUtilizationPercent", "description": "Maximum measured baseline grant utilization percent." },
+        { "name": "OptimizedPeakGrantUtilizationPercent", "description": "Maximum measured optimized grant utilization percent." },
+        { "name": "BaselineMedianGrantUtilizationPercent", "description": "Median measured baseline grant utilization percent." },
+        { "name": "OptimizedMedianGrantUtilizationPercent", "description": "Median measured optimized grant utilization percent." },
+        { "name": "BaselineDurationMs", "description": "Mean measured baseline trial duration in milliseconds." },
+        { "name": "OptimizedDurationMs", "description": "Mean measured optimized trial duration in milliseconds." },
+        { "name": "BaselineCpuMs", "description": "Mean measured baseline trial CPU time in milliseconds." },
+        { "name": "OptimizedCpuMs", "description": "Mean measured optimized trial CPU time in milliseconds." },
+        { "name": "BaselineLogicalReads", "description": "Mean measured baseline trial logical reads." },
+        { "name": "OptimizedLogicalReads", "description": "Mean measured optimized trial logical reads." },
+        { "name": "BaselineSpills", "description": "Mean measured baseline trial spilled KiB." },
+        { "name": "OptimizedSpills", "description": "Mean measured optimized trial spilled KiB." },
+        { "name": "BaselineWaitTimeMs", "description": "Mean measured baseline trial wait time in milliseconds." },
+        { "name": "OptimizedWaitTimeMs", "description": "Mean measured optimized trial wait time in milliseconds." },
+        { "name": "CorrectnessPassed", "description": "True only when all twelve paired trials passed correctness validation." },
+        { "name": "HasMaterialRegression", "description": "True when an optimized secondary metric regressed by more than ten percent." },
+        { "name": "HasAdditionalMetricImprovement", "description": "True when at least one secondary metric improved by at least ten percent." },
+        { "name": "DurationImprovedMaterially", "description": "True when mean optimized duration improved by at least ten percent." },
+        { "name": "CpuImprovedMaterially", "description": "True when mean optimized CPU improved by at least ten percent." },
+        { "name": "LogicalReadsImprovedMaterially", "description": "True when mean optimized logical reads improved by at least ten percent." },
+        { "name": "SpillsImprovedMaterially", "description": "True when mean optimized spills improved by at least ten percent." },
+        { "name": "WaitsImprovedMaterially", "description": "True when mean optimized wait time improved by at least ten percent." },
+        { "name": "MedianUtilizationReductionPoints", "description": "Baseline minus optimized median grant utilization in percentage points." },
+        { "name": "Outcome", "description": "Evidence-based final outcome classification; target bands alone never imply measured success." }
+      ],
+      "permissions": [{ "role": "workshop-reader", "actions": ["execute"] }],
+      "mcp": { "dml-tools": true, "custom-tool": true },
+      "rest": { "enabled": false },
+      "graphql": { "enabled": false }
+    }
+  }
+}

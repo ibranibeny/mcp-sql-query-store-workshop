@@ -1,0 +1,17 @@
+{
+  "servers": {
+    "mcp-sql-query-store-workshop": {
+      "type": "stdio",
+      "command": "dab",
+      "args": [
+        "start",
+        "--mcp-stdio",
+        "role:workshop-reader",
+        "--config",
+        "${workspaceFolder}/mcp/dab-config.json",
+        "--LogLevel",
+        "error"
+      ]
+    }
+  }
+}
