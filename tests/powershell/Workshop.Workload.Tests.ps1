@@ -1065,6 +1065,7 @@ Describe 'Task 12 workload orchestration' {
                 LockHeld = $false
                 LockAcquisitions = 0
                 LockReleases = 0
+                ControlConnectionDisposals = 0
                 OperationOrder = [System.Collections.Generic.List[string]]::new()
                 BaselineIndex = 0
                 OptimizedIndex = 0
@@ -1092,8 +1093,9 @@ Describe 'Task 12 workload orchestration' {
                     param([int]$RemainingSeconds)
                     Write-Verbose $RemainingSeconds
                     $state.OperationOrder.Add('ReleaseRunLock')
-                    $state.LockHeld = $false
                     $state.LockReleases++
+                    try { $state.LockHeld = $false }
+                    finally { $state.ControlConnectionDisposals++ }
                 }
                 OpenConnection = { param($Purpose) $state.OperationOrder.Add('OpenConnection'); Write-Verbose $Purpose; $true }
                 CaptureEnvironment = { $state.OperationOrder.Add('CaptureEnvironment'); $state.Preflight }
@@ -1176,6 +1178,7 @@ Describe 'Task 12 workload orchestration' {
         $result.Outcome | Should -BeExactly 'TargetMet'
         $fixture.State.LockAcquisitions | Should -BeExactly 1
         $fixture.State.LockReleases | Should -BeExactly 1
+        $fixture.State.ControlConnectionDisposals | Should -BeExactly 1
         $fixture.State.LockHeld | Should -BeFalse
         $fixture.State.OperationOrder.IndexOf('AcquireRunLock') |
             Should -BeLessThan $fixture.State.OperationOrder.IndexOf('CaptureEnvironment')
@@ -1242,6 +1245,77 @@ Describe 'Task 12 workload orchestration' {
         $fixture.State.LockAcquisitions | Should -BeExactly 1
         $fixture.State.LockReleases | Should -BeExactly 1
         $fixture.State.LockHeld | Should -BeFalse
+    }
+
+    It 'attempts cancellation, lock release, and control connection disposal exactly once while preserving Sample failure evidence' -ForEach @(
+        @{ Case = 'Sample failure'; KillThrows = $false; ReleaseThrows = $false }
+        @{ Case = 'Sample failure with KillTagged failure'; KillThrows = $true; ReleaseThrows = $false }
+        @{ Case = 'Sample failure with release failure'; KillThrows = $false; ReleaseThrows = $true }
+        @{ Case = 'Sample failure with cancellation and release failures'; KillThrows = $true; ReleaseThrows = $true }
+    ) {
+        $fixture = Get-TestOperationSet
+        $innerSample = $fixture.Operations.Sample
+        $fixture.State | Add-Member NoteProperty MemoryCalls 0
+        $fixture.Operations.Sample = {
+            param($RunId,$Phase,$Kind,$TrialPhase,$ScheduleEntry,$RemainingSeconds,$OperationDeadline)
+            if ($Kind -eq 'Memory') {
+                $fixture.State.MemoryCalls++
+                if ($fixture.State.MemoryCalls -eq 2) { throw 'original Sample failure' }
+            }
+            & $innerSample $RunId $Phase $Kind $TrialPhase $ScheduleEntry $RemainingSeconds $OperationDeadline
+        }.GetNewClosure()
+        $fixture.Operations.KillTagged = {
+            param($RunId,$RemainingSeconds)
+            Write-Verbose "$RunId $RemainingSeconds"
+            $fixture.State.KillCalls++
+            if ($KillThrows) { throw 'Password=worker-cancellation-canary' }
+            @()
+        }.GetNewClosure()
+        $fixture.Operations.ReleaseRunLock = {
+            param($RemainingSeconds)
+            Write-Verbose $RemainingSeconds
+            $fixture.State.OperationOrder.Add('ReleaseRunLock')
+            $fixture.State.LockReleases++
+            try {
+                if ($ReleaseThrows) { throw 'Password=release-canary' }
+                $fixture.State.LockHeld = $false
+            }
+            finally {
+                $fixture.State.LockHeld = $false
+                $fixture.State.ControlConnectionDisposals++
+            }
+        }.GetNewClosure()
+
+        $result = Invoke-WorkshopExperiment -RunId ([guid]::NewGuid()) -OperationSet $fixture.Operations `
+            -MaximumDurationSeconds 120 -WorkerRampSeconds 20
+
+        $result.Outcome | Should -BeExactly 'Failed' -Because $Case
+        $result.Evidence.terminationEvidence.failure.message | Should -BeExactly 'original Sample failure'
+        $fixture.State.KillCalls | Should -BeExactly 1
+        $fixture.State.LockReleases | Should -BeExactly 1
+        $fixture.State.ControlConnectionDisposals | Should -BeExactly 1
+        $fixture.State.LockHeld | Should -BeFalse
+        $fixture.State.Persisted.Count | Should -BeExactly 1
+        $fixture.State.Exported | Should -BeTrue
+        $warningJson = $result.Evidence.terminationEvidence.warnings | ConvertTo-Json -Compress
+        $warningJson | Should -Not -Match 'worker-cancellation-canary|release-canary|Password'
+        if ($KillThrows) { $warningJson | Should -Match 'cancellation' }
+        if ($ReleaseThrows) { $warningJson | Should -Match 'lock release' }
+    }
+
+    It 'attempts cancellation, release, and disposal once after a startup failure' {
+        $fixture = Get-TestOperationSet
+        $fixture.Operations.CaptureEnvironment = { throw 'original startup failure' }
+
+        $result = Invoke-WorkshopExperiment -RunId ([guid]::NewGuid()) -OperationSet $fixture.Operations `
+            -MaximumDurationSeconds 120 -WorkerRampSeconds 20
+
+        $result.Evidence.terminationEvidence.failure.message | Should -BeExactly 'original startup failure'
+        $fixture.State.KillCalls | Should -BeExactly 1
+        $fixture.State.LockReleases | Should -BeExactly 1
+        $fixture.State.ControlConnectionDisposals | Should -BeExactly 1
+        $fixture.State.Persisted.Count | Should -BeExactly 1
+        $fixture.State.Exported | Should -BeTrue
     }
 
     It 'never copies connection details from lock errors into evidence' {

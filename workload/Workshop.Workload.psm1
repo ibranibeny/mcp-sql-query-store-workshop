@@ -2038,7 +2038,8 @@ function Invoke-WorkshopExperiment {
     $timeout = $false
     $failure = $null
     $result = $null
-    $runLockHeld = $false
+    $finalizationState = [pscustomobject]@{ RunLockHeld = $false; Attempted = $false }
+    $finalizationWarnings = [System.Collections.Generic.List[string]]::new()
     $emergencyFinalizationBudgetSeconds = 5
     $operationState = [pscustomobject]@{ Stage = 'OpenConnection' }
     $sampleClockState = [pscustomobject]@{ Last = $start.AddTicks(-1) }
@@ -2058,6 +2059,50 @@ function Invoke-WorkshopExperiment {
         if ($workers.Count -eq 0) { return $true }
         $health = & $OperationSet.TestWorkerHealth $workers.ToArray()
         return $null -ne $health -and [bool]$health.Healthy
+    }.GetNewClosure()
+    $addFinalizationWarning = {
+        param([string]$Warning)
+        if ($finalizationWarnings.Count -lt 4 -and -not $finalizationWarnings.Contains($Warning)) {
+            $finalizationWarnings.Add($Warning.Substring(0, [math]::Min(160, $Warning.Length)))
+        }
+    }.GetNewClosure()
+    $appendFinalizationWarnings = {
+        param([AllowNull()][object]$TargetResult)
+        if ($null -eq $TargetResult -or $finalizationWarnings.Count -eq 0) { return }
+        $warnings = [string[]]@($finalizationWarnings)
+        $TargetResult.TerminationEvidence.warnings = $warnings
+        $TargetResult.Evidence.terminationEvidence.warnings = $warnings
+    }.GetNewClosure()
+    $invokeFinalization = {
+        param([string]$CaughtStage)
+        if ($finalizationState.Attempted) { return }
+        $finalizationState.Attempted = $true
+        try {
+            foreach ($worker in @($workers)) {
+                try { & $OperationSet.StopWorker $worker 1 }
+                catch { & $addFinalizationWarning 'Worker cleanup failed during finalization.' }
+            }
+            $workers.Clear()
+            if ($CaughtStage -and $CaughtStage -ne 'ConcurrentRunRejected') {
+                $cleanupBudget = if ((& $getRemainingSeconds) -gt 0) {
+                    [math]::Min(1, (& $getRemainingSeconds))
+                }
+                else { $emergencyFinalizationBudgetSeconds }
+                try { [void] (& $OperationSet.KillTagged $RunId $cleanupBudget) }
+                catch { & $addFinalizationWarning 'Tagged-session cancellation failed during finalization.' }
+            }
+        }
+        finally {
+            if ($finalizationState.RunLockHeld) {
+                $finalizationState.RunLockHeld = $false
+                $releaseBudget = if ((& $getRemainingSeconds) -gt 0) {
+                    [math]::Min(1, (& $getRemainingSeconds))
+                }
+                else { $emergencyFinalizationBudgetSeconds }
+                try { & $OperationSet.ReleaseRunLock $releaseBudget }
+                catch { & $addFinalizationWarning 'Exclusive workshop run lock release failed during finalization.' }
+            }
+        }
     }.GetNewClosure()
     $updateHealthFailures = {
         param([bool]$Healthy)
@@ -2170,7 +2215,7 @@ function Invoke-WorkshopExperiment {
             $operationState.Stage = 'ConcurrentRunRejected'
             throw [InvalidOperationException]::new('Another workshop experiment is already active.')
         }
-        $runLockHeld = $true
+        $finalizationState.RunLockHeld = $true
         $operationState.Stage = 'OpenConnection'
         [void](& $OperationSet.OpenConnection 'Preflight' ([math]::Min($CommandTimeoutSeconds, (& $getRemainingSeconds))))
         $operationState.Stage = 'CaptureEnvironment'
@@ -2617,12 +2662,7 @@ function Invoke-WorkshopExperiment {
         $originalError = $_
         $caughtStage = [string]$operationState.Stage
         $originalText = ConvertTo-SanitizedFailureMessage $originalError.Exception.Message
-        $killError = $null
-        $killBudget = if ((& $getRemainingSeconds) -gt 0) { [math]::Min(1, (& $getRemainingSeconds)) }
-            else { $emergencyFinalizationBudgetSeconds }
-        if ($caughtStage -ne 'ConcurrentRunRejected') {
-            try { [void](& $OperationSet.KillTagged $RunId $killBudget) } catch { $killError = $_ }
-        }
+        & $invokeFinalization $caughtStage
 
         if ($null -eq $result) {
             try {
@@ -2685,7 +2725,7 @@ function Invoke-WorkshopExperiment {
         }
 
         if ($null -ne $result) {
-            $persistenceError = $null
+            & $appendFinalizationWarnings $result
             $emergencyStarted = [datetimeoffset](& $OperationSet.Clock)
             $normalPersistenceRemaining = & $getRemainingSeconds
             if ($caughtStage -ne 'ConcurrentRunRejected' -and $normalPersistenceRemaining -gt 0) {
@@ -2695,7 +2735,6 @@ function Invoke-WorkshopExperiment {
                     [void](& $OperationSet.Persist $result $persistenceBudget)
                 }
                 catch {
-                    $persistenceError = $_
                     $persistenceFailure = ConvertTo-WorkshopFailureEvidence -Code 'PERSISTENCE_FAILED' `
                         -Stage 'Persistence' -Message $_.Exception.Message `
                         -StartupFailure ($samples.Count -eq 0)
@@ -2728,43 +2767,13 @@ function Invoke-WorkshopExperiment {
                     "Workshop operational failure: $originalText; local evidence export failure: $finalizationText.",
                     $originalError.Exception)
             }
-            if ($null -ne $killError -and $null -eq $persistenceError) { throw $killError }
             return $result
-        }
-
-        if ($null -ne $killError) {
-            $killText = [string]$killError.Exception.Message
-            if ([string]::IsNullOrWhiteSpace($killText) -or
-                $killText -match $script:SecretAssignmentPattern -or
-                $killText -match $script:SecretNamePattern) {
-                $killText = 'tagged-session cancellation failed'
-            }
-            throw [InvalidOperationException]::new(
-                "Workshop operational failure: $originalText; finalization failure: $killText.",
-                $originalError.Exception)
         }
         throw
     }
     finally {
-        foreach ($worker in @($workers)) {
-            try { & $OperationSet.StopWorker $worker 1 } catch { Write-Verbose 'Worker stop failed during cleanup.' }
-        }
-        if ($workers.Count -gt 0) {
-            $cleanupBudget = if ((& $getRemainingSeconds) -gt 0) { [math]::Min(1, (& $getRemainingSeconds)) }
-                else { $emergencyFinalizationBudgetSeconds }
-            [void] (& $OperationSet.KillTagged $RunId $cleanupBudget)
-        }
-        if ($runLockHeld) {
-            try {
-                $releaseBudget = if ((& $getRemainingSeconds) -gt 0) {
-                    [math]::Min(1, (& $getRemainingSeconds))
-                }
-                else { $emergencyFinalizationBudgetSeconds }
-                & $OperationSet.ReleaseRunLock $releaseBudget
-                $runLockHeld = $false
-            }
-            catch { Write-Verbose 'Exclusive workshop run lock release failed after connection cleanup.' }
-        }
+        & $invokeFinalization ''
+        & $appendFinalizationWarnings $result
     }
 }
 
