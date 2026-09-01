@@ -1098,6 +1098,20 @@ Describe 'Static safety and module contract' {
         }
     }
 
+    It 'recognizes the exact untyped absent-group record emitted by Get-AzResourceGroup' {
+        InModuleScope Workshop.Azure {
+            $exception = [System.Exception]::new('05:17:54 - Provided resource group does not exist.')
+            $record = [System.Management.Automation.ErrorRecord]::new(
+                $exception,
+                'Microsoft.Azure.Commands.ResourceManager.Cmdlets.Implementation.GetAzureResourceGroupCmdlet',
+                [System.Management.Automation.ErrorCategory]::NotSpecified,
+                'rg-test'
+            )
+
+            (Test-WorkshopAzureNotFound -ErrorRecord $record) | Should -BeTrue
+        }
+    }
+
     It 'exports only the intended functions and requires PowerShell 7.4' {
         $manifest = Test-ModuleManifest $script:ModulePath
         $manifest.PowerShellVersion | Should -Be ([version]'7.4')

@@ -638,6 +638,12 @@ function Test-WorkshopAzureNotFound {
             return $true
         }
     }
+    if ($ErrorRecord.FullyQualifiedErrorId -ceq
+            'Microsoft.Azure.Commands.ResourceManager.Cmdlets.Implementation.GetAzureResourceGroupCmdlet' -and
+        $null -ne $exception -and
+        $exception.Message -match '^\d{2}:\d{2}:\d{2} - Provided resource group does not exist\.$') {
+        return $true
+    }
     $response = if ($null -ne $exception -and $exception.PSObject.Properties.Name -contains 'Response') {
         $exception.Response
     }
