@@ -1440,6 +1440,22 @@ Describe 'Workshop network boundary verification' {
 }
 
 Describe 'Default workshop network operation shape' {
+    It 'normalizes native network resources that expose Tag instead of Tags' {
+        InModuleScope Workshop.Azure {
+            $native = [Microsoft.Azure.Commands.Network.Models.PSApplicationSecurityGroup]@{
+                Name = 'asg-test'
+                Id = '/subscriptions/test/resourceGroups/rg/providers/Microsoft.Network/applicationSecurityGroups/asg-test'
+                Location = 'indonesiacentral'
+                Tag = @{ environment = 'workshop'; workload = 'mcp-sql' }
+            }
+
+            { $script:normalizedAsg = ConvertFrom-WorkshopAzNetworkResource `
+                    -Kind 'ApplicationSecurityGroup' -Resource $native } | Should -Not -Throw
+            $script:normalizedAsg.Tags.environment | Should -BeExactly 'workshop'
+            $script:normalizedAsg.Tags.workload | Should -BeExactly 'mcp-sql'
+        }
+    }
+
     It 'derives private-subnet support from command parameter metadata' {
         InModuleScope Workshop.Azure {
             Mock Get-Command {

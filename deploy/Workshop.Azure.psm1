@@ -1513,7 +1513,18 @@ function ConvertFrom-WorkshopAzNetworkResource {
     }
     $name = if ($Kind -eq 'ResourceGroup') { [string] $Resource.ResourceGroupName } else { [string] $Resource.Name }
     $location = [string] $Resource.Location
-    $tags = if ($null -eq $Resource.Tags) { [ordered]@{} } else { $Resource.Tags }
+    $tags = if ($Resource.PSObject.Properties.Name -contains 'Tags' -and $null -ne $Resource.Tags) {
+        $Resource.Tags
+    }
+    elseif ($Resource.PSObject.Properties.Name -contains 'Tag' -and $null -ne $Resource.Tag) {
+        $Resource.Tag
+    }
+    elseif ($Resource.PSObject.Properties.Name -contains 'TagsTable' -and $null -ne $Resource.TagsTable) {
+        $Resource.TagsTable
+    }
+    else {
+        [ordered]@{}
+    }
     switch ($Kind) {
         'ResourceGroup' {
             return [pscustomobject][ordered]@{ Kind = $Kind; Name = $name; Location = $location; Id = [string] $Resource.ResourceId; Tags = $tags }
