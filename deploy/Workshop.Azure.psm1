@@ -638,7 +638,13 @@ function Test-WorkshopAzureNotFound {
             return $true
         }
     }
-    foreach ($candidate in @($exception, $exception.Response)) {
+    $response = if ($null -ne $exception -and $exception.PSObject.Properties.Name -contains 'Response') {
+        $exception.Response
+    }
+    else {
+        $null
+    }
+    foreach ($candidate in @($exception, $response)) {
         if ($null -ne $candidate -and $candidate.PSObject.Properties.Name -contains 'StatusCode' -and
             [int] $candidate.StatusCode -eq 404) {
             return $true

@@ -1083,6 +1083,21 @@ Describe 'Static safety and module contract' {
         }
     }
 
+    It 'handles an Azure error record whose exception has no Response property' {
+        InModuleScope Workshop.Azure {
+            $exception = [System.Exception]::new('unexpected read failure')
+            $record = [System.Management.Automation.ErrorRecord]::new(
+                $exception,
+                'UnexpectedAzureFailure',
+                [System.Management.Automation.ErrorCategory]::NotSpecified,
+                'rg-test'
+            )
+
+            { $script:notFound = Test-WorkshopAzureNotFound -ErrorRecord $record } | Should -Not -Throw
+            $script:notFound | Should -BeFalse
+        }
+    }
+
     It 'exports only the intended functions and requires PowerShell 7.4' {
         $manifest = Test-ModuleManifest $script:ModulePath
         $manifest.PowerShellVersion | Should -Be ([version]'7.4')
