@@ -445,6 +445,22 @@ Describe 'New-WorkshopRunRecord' {
                 -EndUtc ([datetimeoffset]'2026-09-01T09:59:59Z')
         } | Should -Throw
     }
+
+    It 'requires physical memory to be a positive integer within four petabytes' -ForEach @(
+        @{ Value = $true }
+        @{ Value = [decimal]'65536.5' }
+        @{ Value = 0 }
+        @{ Value = -1 }
+        @{ Value = [decimal]'4294967297' }
+    ) {
+        $environment = Get-TestEnvironment
+        $environment.physicalMemoryMB = $Value
+        {
+            New-WorkshopRunRecord -Phase Target -Status Planned `
+                -EvidenceClassification TARGET -FrozenSettings (Get-TestSetting) `
+                -EnvironmentFingerprint $environment -TargetBands (Get-TestTargetBand)
+        } | Should -Throw
+    }
 }
 
 Describe 'ConvertTo-WorkshopEvidence' {
@@ -767,6 +783,23 @@ Describe 'ConvertTo-WorkshopEvidence' {
                 -RequestSamples (Get-ValidRequestSample) -Validation (Get-ValidValidation) `
                 -Outcome TargetMet
         } | Should -Throw
+    }
+
+    It 'rejects fractional, Boolean, negative, and overflowing trial integers before conversion' -ForEach @(
+        @{ Value = [decimal]'9.999' }
+        @{ Value = $true }
+        @{ Value = -1 }
+        @{ Value = [decimal]'9223372036854775808' }
+    ) {
+        foreach ($metric in @('DurationMs','CpuMs','LogicalReads','GrantedKB','UsedKB','SpillKB','WaitMs',
+            'ResultRowCount','ExpectedRowCount','ActualRowCount','DifferenceCount')) {
+            $run = Get-MeasuredRun
+            $run.Trials[0].$metric = $Value
+            {
+                ConvertTo-WorkshopEvidence -RunRecord $run -Samples (Get-ValidSample) `
+                    -RequestSamples @() -Validation (Get-ValidValidation) -Outcome TargetMet
+            } | Should -Throw
+        }
     }
 }
 
@@ -1206,16 +1239,52 @@ Describe 'Task 12 workload orchestration' {
         $fixture.State.Exported | Should -BeTrue
     }
 
-    It 'kills tagged sessions when the initial worker start fails before evidence exists' {
+    It 'persists and atomically exports truthful failure evidence before the first sample' -ForEach @(
+        @{ FailurePoint = 'StartWorker' }
+        @{ FailurePoint = 'Sample' }
+    ) {
         $fixture = Get-TestOperationSet
-        $fixture.Operations.StartWorker = { throw 'injected initial worker failure' }
-        { Invoke-WorkshopExperiment -RunId ([guid]::NewGuid()) -OperationSet $fixture.Operations } |
-            Should -Throw '*initial worker failure*'
-        $fixture.State.KillCalls | Should -Be 1
-        $fixture.State.Persisted.Count | Should -Be 0
+        $runId = [guid]::NewGuid()
+        $canary = 'startup-secret-canary'
+        if ($FailurePoint -eq 'StartWorker') {
+            $fixture.Operations.StartWorker = { throw "Password=$canary" }.GetNewClosure()
+        }
+        else {
+            $fixture.Operations.Sample = { throw "Password=$canary" }.GetNewClosure()
+        }
+        $fixture.Operations.Export = {
+            param($Result)
+            Export-WorkshopEvidenceFile -RunId $Result.RunId.ToString('D') -Evidence $Result.Evidence `
+                -RepositoryRoot $TestDrive -SemanticValidator { $true }
+        }.GetNewClosure()
+
+        $result = Invoke-WorkshopExperiment -RunId $runId -OperationSet $fixture.Operations
+
+        $result.Outcome | Should -BeExactly 'Failed'
+        $result.Phase | Should -BeExactly 'Baseline'
+        $result.Samples.Count | Should -Be 0
+        $result.Trials.Count | Should -Be 0
+        $result.Evidence.correctness | Should -BeNullOrEmpty
+        $result.Evidence.measuredPeaks.baseline | Should -BeNullOrEmpty
+        $result.Evidence.measuredPeaks.optimized | Should -BeNullOrEmpty
+        $result.Evidence.terminationEvidence.failure.startupFailure | Should -BeTrue
+        $result.Evidence.terminationEvidence.failure.stage | Should -BeExactly $FailurePoint
+        $result.Evidence.terminationEvidence.failure.message | Should -Not -Match $canary
+        $fixture.State.KillCalls | Should -BeGreaterOrEqual 1
+        $fixture.State.Persisted.Count | Should -Be 1
+
+        $runDirectory = Join-Path $TestDrive "evidence/runs/$($runId.ToString('D'))"
+        $jsonPath = Join-Path $runDirectory 'evidence.json'
+        Test-Path -LiteralPath $jsonPath | Should -BeTrue
+        @(Get-ChildItem (Join-Path $TestDrive 'evidence/runs') -Filter '*.tmp' -Directory).Count | Should -Be 0
+        $python = Join-Path $PSScriptRoot '../../.venv/Scripts/python.exe'
+        $validator = Join-Path $PSScriptRoot '../../evidence/validate_evidence.py'
+        $schema = Join-Path $PSScriptRoot '../../evidence/evidence-schema.json'
+        $validationOutput = & $python $validator --schema $schema $jsonPath
+        $LASTEXITCODE | Should -Be 0 -Because ($validationOutput -join '; ')
     }
 
-    It 'throws a finalization failure with the original operational failure retained in the message' {
+    It 'exports sanitized local failure evidence when SQL failure persistence also fails' {
         $fixture = Get-TestOperationSet
         $inner = $fixture.Operations.Sample
         $script:memoryCalls = 0
@@ -1229,9 +1298,14 @@ Describe 'Task 12 workload orchestration' {
         }.GetNewClosure()
         $fixture.Operations.Persist = { throw 'injected persistence failure' }
 
-        { Invoke-WorkshopExperiment -RunId ([guid]::NewGuid()) -OperationSet $fixture.Operations `
-                -MaximumDurationSeconds 60 -WorkerRampSeconds 20 } |
-            Should -Throw '*original sample failure*persistence failure*'
+        $result = Invoke-WorkshopExperiment -RunId ([guid]::NewGuid()) -OperationSet $fixture.Operations `
+            -MaximumDurationSeconds 60 -WorkerRampSeconds 20
+
+        $result.Outcome | Should -BeExactly 'Failed'
+        $result.Evidence.terminationEvidence.failure.code | Should -BeExactly 'PERSISTENCE_FAILED'
+        $result.Evidence.terminationEvidence.failure.stage | Should -BeExactly 'Persistence'
+        $result.Evidence.terminationEvidence.failure.message | Should -Not -Match 'Password|secret|token'
+        $fixture.State.Exported | Should -BeTrue
         $fixture.State.KillCalls | Should -BeGreaterOrEqual 1
     }
 
@@ -1609,7 +1683,10 @@ Describe 'Task 12 remaining blocker contracts' {
             @([pscustomobject]@{ Names = $names[0..14]; Rows = @(,$values[0..14]) }),
             @([pscustomobject]@{ Names = @($names + 'Extra'); Rows = @(,@($values + 1)) }),
             @([pscustomobject]@{ Names = $names; Rows = @(,@([double]::NaN) + $values[1..15]) }),
+            @([pscustomobject]@{ Names = $names; Rows = @(,@([decimal]'9.999') + $values[1..15]) }),
+            @([pscustomobject]@{ Names = $names; Rows = @(,@($true) + $values[1..15]) }),
             @([pscustomobject]@{ Names = $names; Rows = @(,@(-1) + $values[1..15]) }),
+            @([pscustomobject]@{ Names = $names; Rows = @(,@([decimal]'9223372036854775808') + $values[1..15]) }),
             @([pscustomobject]@{ Names = $names; Rows = @(,@($null) + $values[1..15]) }),
             @([pscustomobject]@{ Names = $names; Rows = @($values,$values) })
         )
@@ -1642,6 +1719,20 @@ Describe 'Task 12 remaining blocker contracts' {
         $mismatch.CorrectnessPassed | Should -BeFalse
         @($mismatch.Trials | Where-Object ParameterSlot -eq 2).Correct | Should -Be @($false,$false)
         @($mismatch.Trials | Where-Object ParameterSlot -eq 2).DifferenceCount | Should -Be @(1,1)
+    }
+
+    It 'rejects invalid integer metrics before trial assessment conversion' -ForEach @(
+        @{ Value = [decimal]'9.999' }
+        @{ Value = $true }
+        @{ Value = -1 }
+        @{ Value = [decimal]'9223372036854775808' }
+    ) {
+        foreach ($metric in @('DurationMs','CpuMs','LogicalReads','GrantedKB','UsedKB','SpillKB','WaitMs',
+            'ResultRowCount','ExpectedRowCount','ActualRowCount','DifferenceCount')) {
+            $trials = @(Get-ValidTrial)
+            $trials[0].$metric = $Value
+            { Get-WorkshopTrialAssessment -Trials $trials } | Should -Throw
+        }
     }
 
     It 'uses the SQL comparison metric set and exact ten-percent material thresholds' {

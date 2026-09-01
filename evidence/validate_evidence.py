@@ -9,6 +9,7 @@ from fractions import Fraction
 import hashlib
 import json
 from pathlib import Path
+import re
 from typing import Any, Mapping, Sequence
 
 from jsonschema import Draft202012Validator, FormatChecker
@@ -16,6 +17,18 @@ from jsonschema.exceptions import SchemaError
 
 
 _DOTNET_DECIMAL_MAX_COEFFICIENT = 79228162514264337593543950335
+_INT64_MAX = 9223372036854775807
+_TRIAL_INTEGER_METRICS = (
+    "durationMs", "cpuMs", "logicalReads", "grantedKB", "usedKB", "spillKB",
+    "waitMs", "resultRowCount", "expectedRowCount", "actualRowCount",
+    "differenceCount",
+)
+_SECRET_ASSIGNMENT_RE = re.compile(
+    r"(?i)(?:password|passwd|pwd|token|access[_\s-]?token|refresh[_\s-]?token|"
+    r"client[_\s-]?secret|secret|account[_\s-]?key|shared[_\s-]?access[_\s-]?key|"
+    r"shared[_\s-]?access[_\s-]?signature|user\s+id|uid)\s*[:=]|"
+    r"-----BEGIN\s+.*PRIVATE\s+KEY-----"
+)
 _UTC_INSTANT_FORMAT = "%Y-%m-%dT%H:%M:%S"
 _UTC_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 
@@ -221,6 +234,21 @@ def _validate_semantics(document: Mapping[str, Any]) -> list[str]:
     if document["evidenceClassification"] != "LAB-MEASURED":
         return issues
 
+    failure = document["terminationEvidence"].get("failure")
+    if failure is not None:
+        message = failure["message"]
+        if _SECRET_ASSIGNMENT_RE.search(message):
+            issues.append("$.terminationEvidence.failure.message contains secret-shaped text.")
+
+    startup_failure = (
+        document["status"] == "Failed"
+        and not document["samples"]
+        and failure is not None
+        and failure["startupFailure"]
+    )
+    if startup_failure:
+        return issues
+
     phase_values: dict[str, list[Decimal]] = {"Baseline": [], "Optimized": []}
     for index, sample in enumerate(document["samples"]):
         reported = _decimal(
@@ -257,6 +285,12 @@ def _validate_semantics(document: Mapping[str, Any]) -> list[str]:
     if completed_comparison and len(trials) != 12:
         issues.append("$.trials must contain exactly twelve completed comparison trials.")
     for index, trial in enumerate(trials):
+        for metric in _TRIAL_INTEGER_METRICS:
+            value = trial[metric]
+            if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= _INT64_MAX:
+                issues.append(
+                    f"$.trials[{index}].{metric} must be a nonnegative 64-bit integer."
+                )
         started = _utc_ticks(trial["startedAtUtc"], f"$.trials[{index}].startedAtUtc")
         completed = _utc_ticks(
             trial["completedAtUtc"], f"$.trials[{index}].completedAtUtc"
@@ -395,6 +429,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         try:
             document = _load_json(path)
             validate_evidence(document, schema)
+        except EvidenceValidationError as error:
+            print(f"ERROR: {path}: {'; '.join(error.issues)}")
+            failed = True
         except (OSError, ValueError):
             print(f"ERROR: {path}: evidence validation failed.")
             failed = True

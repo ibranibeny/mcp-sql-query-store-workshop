@@ -87,6 +87,63 @@ function ConvertTo-FiniteDecimal {
     }
 }
 
+function ConvertTo-NonnegativeInt64 {
+    param(
+        [Parameter(Mandatory)][AllowNull()][object] $Value,
+        [Parameter(Mandatory)][string] $Name
+    )
+
+    $number = ConvertTo-FiniteDecimal $Value $Name
+    if ($number -lt 0 -or $number -ne [decimal]::Truncate($number) -or
+        $number -gt [decimal][long]::MaxValue) {
+        throw "$Name must be a nonnegative 64-bit integer."
+    }
+    return [int64]$number
+}
+
+function ConvertTo-SanitizedFailureMessage {
+    param([Parameter(Mandatory)][AllowNull()][object] $Value)
+
+    $text = if ($null -eq $Value) { '' } else { [string]$Value }
+    if ([string]::IsNullOrWhiteSpace($text) -or
+        $text -match $script:SecretAssignmentPattern -or
+        $text -match $script:SecretNamePattern) {
+        return 'Operational failure details were redacted.'
+    }
+    $text = [regex]::Replace($text, '\s+', ' ').Trim()
+    return $text.Substring(0, [math]::Min(512, $text.Length))
+}
+
+function ConvertTo-WorkshopFailureEvidence {
+    param(
+        [Parameter(Mandatory)][string] $Code,
+        [Parameter(Mandatory)][string] $Stage,
+        [Parameter(Mandatory)][AllowNull()][object] $Message,
+        [Parameter(Mandatory)][bool] $StartupFailure
+    )
+
+    return [ordered]@{
+        code = $Code
+        stage = $Stage
+        message = ConvertTo-SanitizedFailureMessage $Message
+        startupFailure = $StartupFailure
+    }
+}
+
+function Copy-WorkshopFailureEvidence {
+    param(
+        [Parameter(Mandatory)][object] $Target,
+        [Parameter(Mandatory)][object] $Failure
+    )
+
+    if ($Target -is [System.Collections.IDictionary]) {
+        $Target['failure'] = $Failure
+    }
+    else {
+        $Target | Add-Member NoteProperty failure $Failure -Force
+    }
+}
+
 function Get-ObjectEntry {
     param(
         [Parameter(Mandatory)]
@@ -231,7 +288,11 @@ function ConvertTo-CanonicalValue {
     }
 
     $ordered = [ordered]@{}
-    foreach ($entry in @(Get-ObjectEntry -InputObject $InputObject | Sort-Object Name)) {
+    $entries = @(Get-ObjectEntry -InputObject $InputObject)
+    $names = [string[]]@($entries | ForEach-Object Name)
+    [array]::Sort($names, [StringComparer]::Ordinal)
+    foreach ($name in $names) {
+        $entry = @($entries | Where-Object { $_.Name -ceq $name })[0]
         $ordered[$entry.Name] = ConvertTo-CanonicalValue -InputObject $entry.Value
     }
     return $ordered
@@ -393,9 +454,10 @@ function Assert-EnvironmentFingerprint {
             throw "Environment field '$name' must be a nonempty string."
         }
     }
-    if ((Get-ObjectValue $Environment physicalMemoryMB -Required) -isnot [ValueType] -or
-        [decimal](Get-ObjectValue $Environment physicalMemoryMB -Required) -le 0) {
-        throw "Environment field 'physicalMemoryMB' must be a positive measured number."
+    $memory = ConvertTo-FiniteDecimal `
+        (Get-ObjectValue $Environment physicalMemoryMB -Required) 'physicalMemoryMB'
+    if ($memory -lt 1 -or $memory -ne [decimal]::Truncate($memory) -or $memory -gt 4294967296) {
+        throw "Environment field 'physicalMemoryMB' must be a positive integer no greater than 4 PB."
     }
 }
 
@@ -833,9 +895,10 @@ function ConvertTo-TerminationEvidence {
         }
     }
 
-    Assert-ExactProperty -InputObject $TerminationEvidence -RequiredNames @(
-        'manualStopRequested', 'safetyStopTriggered', 'safetyReasons', 'timeout'
-    ) -Context 'Termination evidence'
+    $terminationNames = @('manualStopRequested', 'safetyStopTriggered', 'safetyReasons', 'timeout')
+    $failure = Get-ObjectValue $TerminationEvidence failure
+    if ($null -ne $failure) { $terminationNames += 'failure' }
+    Assert-ExactProperty -InputObject $TerminationEvidence -RequiredNames $terminationNames -Context 'Termination evidence'
     Assert-NoSecretField $TerminationEvidence
     foreach ($name in @('manualStopRequested', 'safetyStopTriggered', 'timeout')) {
         if ((Get-ObjectValue $TerminationEvidence $name -Required) -isnot [bool]) {
@@ -866,12 +929,32 @@ function ConvertTo-TerminationEvidence {
         throw 'Safety reasons require the safety stop flag.'
     }
 
-    return [ordered]@{
+    if ($null -ne $failure) {
+        Assert-ExactProperty $failure @('code','stage','message','startupFailure') 'Failure evidence'
+        Assert-NoSecretField $failure
+        if ((Get-ObjectValue $failure code -Required) -cnotmatch '^[A-Z][A-Z0-9_]{2,63}$') {
+            throw 'Failure code must be a bounded canonical identifier.'
+        }
+        if ((Get-ObjectValue $failure stage -Required) -cnotmatch '^[A-Za-z][A-Za-z0-9]{0,31}$') {
+            throw 'Failure stage must be a bounded canonical identifier.'
+        }
+        $message = Get-ObjectValue $failure message -Required
+        if ($message -isnot [string] -or [string]::IsNullOrWhiteSpace($message) -or $message.Length -gt 512) {
+            throw 'Failure message must be a bounded nonempty sanitized string.'
+        }
+        if ((Get-ObjectValue $failure startupFailure -Required) -isnot [bool]) {
+            throw 'Failure startupFailure must be Boolean.'
+        }
+    }
+
+    $result = [ordered]@{
         manualStopRequested = $manual
         safetyStopTriggered = $safety
         safetyReasons = $reasons
         timeout = Get-ObjectValue $TerminationEvidence timeout -Required
     }
+    if ($null -ne $failure) { $result.failure = ConvertTo-CanonicalValue $failure }
+    return $result
 }
 
 function ConvertTo-WorkshopTrialEvidence {
@@ -896,8 +979,7 @@ function ConvertTo-WorkshopTrialEvidence {
         $phase = Resolve-CanonicalEnum (Get-ObjectValue $trial Phase -Required) @('Baseline','Optimized') 'trial phase'
         foreach ($name in @('DurationMs','CpuMs','LogicalReads','GrantedKB','UsedKB','SpillKB','WaitMs',
             'ResultRowCount','ExpectedRowCount','ActualRowCount','DifferenceCount')) {
-            $value = ConvertTo-FiniteDecimal (Get-ObjectValue $trial $name -Required) $name
-            if ($value -lt 0) { throw "$name cannot be negative." }
+            [void](ConvertTo-NonnegativeInt64 (Get-ObjectValue $trial $name -Required) $name)
         }
         $correct = Get-ObjectValue $trial Correct -Required
         if ($correct -isnot [bool]) { throw 'Correct must be Boolean.' }
@@ -1054,10 +1136,21 @@ function ConvertTo-WorkshopEvidence {
         }
     }
     else {
-        if ($Samples.Count -eq 0 -or $null -eq $Validation -or $null -eq $end -or
+        $failure = Get-ObjectValue $termination failure
+        $startupFailure = $Samples.Count -eq 0 -and $status -ceq 'Failed' -and
+            $null -ne $failure -and (Get-ObjectValue $failure startupFailure -Required)
+        if ($startupFailure) {
+            if ($RequestSamples.Count -ne 0 -or $trialEvidence.Count -ne 0 -or $null -ne $Validation -or
+                $null -eq $end -or $Outcome -cne 'Failed') {
+                throw 'A startup failure requires empty measurements, null correctness, EndUtc, and Failed outcome.'
+            }
+            $Outcome = Resolve-CanonicalEnum $Outcome $script:OutcomeValues 'outcome'
+        }
+        elseif ($Samples.Count -eq 0 -or $null -eq $Validation -or $null -eq $end -or
             [string]::IsNullOrEmpty($Outcome)) {
             throw 'LAB-MEASURED evidence requires samples, validation, EndUtc, and outcome.'
         }
+        if (-not $startupFailure) {
         if ($phase -eq 'Comparison' -and $status -eq 'Completed' -and $trialEvidence.Count -ne 12) {
             throw 'A completed comparison requires exactly twelve trials.'
         }
@@ -1232,7 +1325,8 @@ function ConvertTo-WorkshopEvidence {
         if ($status -cne $expectedStatus) {
             throw "Status '$status' does not match outcome '$Outcome'."
         }
-        $correctness = ConvertTo-CanonicalValue $derivedValidation
+            $correctness = ConvertTo-CanonicalValue $derivedValidation
+        }
     }
 
     return [pscustomobject][ordered]@{
@@ -1352,8 +1446,7 @@ function ConvertFrom-WorkshopTrialReader {
         'DurationMs', 'CpuMs', 'LogicalReads', 'GrantedKB', 'UsedKB', 'SpillKB', 'WaitMs',
         'ResultRowCount', 'ExpectedRowCount', 'ActualRowCount', 'DifferenceCount'
     )) {
-        $value = ConvertTo-FiniteDecimal (Get-ObjectValue $metricRow $name -Required) $name
-        if ($value -lt 0) { throw "$name cannot be negative." }
+        [void](ConvertTo-NonnegativeInt64 (Get-ObjectValue $metricRow $name -Required) $name)
     }
     $hash = Get-ObjectValue $metricRow ResultHash -Required
     if ($hash -isnot [byte[]] -and $hash -is [System.Collections.IEnumerable] -and $hash -isnot [string]) {
@@ -1520,6 +1613,14 @@ function Get-WorkshopTrialAssessment {
     param([Parameter(Mandatory)][object[]] $Trials)
 
     if ($Trials.Count -ne 12) { throw 'Exactly twelve trials are required.' }
+    foreach ($trial in $Trials) {
+        foreach ($name in @(
+            'DurationMs', 'CpuMs', 'LogicalReads', 'GrantedKB', 'UsedKB', 'SpillKB', 'WaitMs',
+            'ResultRowCount', 'ExpectedRowCount', 'ActualRowCount', 'DifferenceCount'
+        )) {
+            [void](ConvertTo-NonnegativeInt64 (Get-ObjectValue $trial $name -Required) $name)
+        }
+    }
     $evaluated = @($Trials | ForEach-Object { $_.psobject.Copy() })
     foreach ($slot in 1..6) {
         $pair = @($evaluated | Where-Object ParameterSlot -eq $slot)
@@ -1587,13 +1688,14 @@ function Build-WorkshopExperimentResult {
         [bool]$ManualStopRequested, [bool]$SafetyStopTriggered,
         [string[]]$SafetyReasons, [bool]$Timeout, [int]$Workers,
         [string[]]$Schedule, [int]$MaximumDurationSeconds,
-        [int]$SampleIntervalSeconds, [int]$WorkerRampSeconds
+        [int]$SampleIntervalSeconds, [int]$WorkerRampSeconds,
+        [AllowNull()][object]$Failure
     )
 
     if ($null -eq $FrozenSettings) {
         $scheduleJson = ConvertTo-Json $Schedule -Compress
         $FrozenSettings = [ordered]@{
-            workers = [math]::Max(1, $Workers)
+            workers = [int][math]::Max(1, $Workers)
             maximumDurationSeconds = $MaximumDurationSeconds
             sampleIntervalSeconds = $SampleIntervalSeconds
             workerRampSeconds = $WorkerRampSeconds
@@ -1670,8 +1772,11 @@ function Build-WorkshopExperimentResult {
         safetyReasons = @($SafetyReasons | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
         timeout = $Timeout
     }
+    if ($null -ne $Failure) { $termination.failure = $Failure }
+    $evidenceValidation = if ($Samples.Count -eq 0 -and $null -ne $Failure -and
+        (Get-ObjectValue $Failure startupFailure -Required)) { $null } else { $validation }
     $evidence = ConvertTo-WorkshopEvidence -RunRecord $runRecord -Samples $Samples `
-        -RequestSamples $RequestSamples -Trials $Trials -Validation $validation `
+        -RequestSamples $RequestSamples -Trials $Trials -Validation $evidenceValidation `
         -Outcome $Outcome -TerminationEvidence $termination
     $settingsJson = ConvertTo-Json (ConvertTo-CanonicalValue $FrozenSettings) -Depth 20 -Compress
     return [pscustomobject]@{
@@ -1689,7 +1794,7 @@ function Build-WorkshopExperimentResult {
         Samples = $Samples
         RequestSamples = $RequestSamples
         Trials = $Trials
-        Validation = [pscustomobject]$validation
+        Validation = if ($null -eq $evidenceValidation) { $null } else { [pscustomobject]$validation }
         TerminationEvidence = [pscustomobject]$termination
         Evidence = $evidence
     }
@@ -1744,6 +1849,7 @@ function Invoke-WorkshopExperiment {
     $safetyReasons = @()
     $timeout = $false
     $result = $null
+    $operationState = [pscustomobject]@{ Stage = 'StartWorker' }
     $sampleClockState = [pscustomobject]@{ Last = $start.AddTicks(-1) }
     $workerCountStarted = 0
     $healthState = [pscustomobject]@{ ConsecutiveFailures = 0 }
@@ -1768,6 +1874,7 @@ function Invoke-WorkshopExperiment {
         param([string]$Phase, [string]$Kind, [AllowNull()][string]$TrialPhase, [AllowNull()][string]$ScheduleEntry)
         $remaining = & $getRemainingSeconds
         if ($remaining -le 0) { return $null }
+        $operationState.Stage = if ($Kind -in @('Memory','Drain')) { 'Sample' } else { $Kind }
         return & $OperationSet.Sample $RunId $Phase $Kind $TrialPhase $ScheduleEntry $remaining
     }.GetNewClosure()
     $assertFrozenFingerprint = {
@@ -1812,6 +1919,7 @@ function Invoke-WorkshopExperiment {
         return $sample
     }.GetNewClosure()
     try {
+        $operationState.Stage = 'StartWorker'
         $applicationName = Get-WorkshopApplicationName -RunId $RunId -Phase Baseline -Worker 1
         $workerHandle = & $OperationSet.StartWorker $RunId 'Baseline' 1 $applicationName $schedule $deadline
         $workers.Add($workerHandle)
@@ -1868,6 +1976,7 @@ function Invoke-WorkshopExperiment {
                 ($now - $lastRamp).TotalSeconds -ge $WorkerRampSeconds) {
                 $workerNumber = $workers.Count + 1
                 $applicationName = Get-WorkshopApplicationName -RunId $RunId -Phase Baseline -Worker $workerNumber
+                $operationState.Stage = 'StartWorker'
                 $workerHandle = & $OperationSet.StartWorker $RunId 'Baseline' $workerNumber $applicationName $schedule $deadline
                 $workers.Add($workerHandle)
                 $workerCountStarted = [math]::Max($workerCountStarted, $workerNumber)
@@ -1949,6 +2058,7 @@ function Invoke-WorkshopExperiment {
                 break
             }
             $applicationName = Get-WorkshopApplicationName -RunId $RunId -Phase Optimized -Worker $index
+            $operationState.Stage = 'StartWorker'
             $workers.Add((& $OperationSet.StartWorker $RunId 'Optimized' $index $applicationName $schedule $deadline))
         }
         while ($null -eq $outcome) {
@@ -2098,23 +2208,18 @@ function Invoke-WorkshopExperiment {
     }
     catch {
         $originalError = $_
-        $originalText = [string]$originalError.Exception.Message
-        if ([string]::IsNullOrWhiteSpace($originalText) -or
-            $originalText -match $script:SecretAssignmentPattern -or
-            $originalText -match $script:SecretNamePattern) {
-            $originalText = 'operational failure details were redacted'
-        }
-        else {
-            $originalText = [regex]::Replace($originalText, '\s+', ' ').Trim()
-            $originalText = $originalText.Substring(0, [math]::Min(512, $originalText.Length))
-        }
+        $originalText = ConvertTo-SanitizedFailureMessage $originalError.Exception.Message
         $killError = $null
         try { [void](& $OperationSet.KillTagged $RunId) } catch { $killError = $_ }
 
-        if ($null -eq $result -and $samples.Count -gt 0) {
+        if ($null -eq $result) {
             try {
                 $completedAt = [datetimeoffset] (& $OperationSet.Clock)
+                if ($completedAt -lt $start) { $completedAt = $start }
                 if ($completedAt -lt $sampleClockState.Last) { $completedAt = $sampleClockState.Last }
+                $failure = ConvertTo-WorkshopFailureEvidence -Code 'WORKSHOP_OPERATION_FAILED' `
+                    -Stage $operationState.Stage -Message $originalText `
+                    -StartupFailure ($samples.Count -eq 0)
                 $result = Build-WorkshopExperimentResult -RunId $RunId -Outcome Failed `
                     -TerminalPhase $terminalPhase -FrozenSettings $frozen -Preflight $preflight `
                     -Samples $samples.ToArray() -RequestSamples $requestSamples.ToArray() -Trials $trials.ToArray() `
@@ -2122,7 +2227,7 @@ function Invoke-WorkshopExperiment {
                     -ManualStopRequested $false -SafetyStopTriggered $false -SafetyReasons @() `
                     -Timeout $false -Workers $workerCountStarted -Schedule $schedule `
                     -MaximumDurationSeconds $MaximumDurationSeconds -SampleIntervalSeconds $SampleIntervalSeconds `
-                    -WorkerRampSeconds $WorkerRampSeconds
+                    -WorkerRampSeconds $WorkerRampSeconds -Failure $failure
             }
             catch {
                 $finalizationText = [string]$_.Exception.Message
@@ -2138,23 +2243,31 @@ function Invoke-WorkshopExperiment {
         }
 
         if ($null -ne $result) {
+            $persistenceError = $null
             try {
-                & $OperationSet.Persist $result
-                & $OperationSet.Export $result
-                if ($null -ne $killError) { throw $killError }
-                return $result
+                $operationState.Stage = 'Persistence'
+                [void](& $OperationSet.Persist $result)
             }
             catch {
-                $finalizationText = [string]$_.Exception.Message
-                if ([string]::IsNullOrWhiteSpace($finalizationText) -or
-                    $finalizationText -match $script:SecretAssignmentPattern -or
-                    $finalizationText -match $script:SecretNamePattern) {
-                    $finalizationText = 'persistence or export finalization failed'
-                }
+                $persistenceError = $_
+                $persistenceFailure = ConvertTo-WorkshopFailureEvidence -Code 'PERSISTENCE_FAILED' `
+                    -Stage 'Persistence' -Message $_.Exception.Message `
+                    -StartupFailure ($samples.Count -eq 0)
+                Copy-WorkshopFailureEvidence $result.TerminationEvidence $persistenceFailure
+                Copy-WorkshopFailureEvidence $result.Evidence.terminationEvidence $persistenceFailure
+            }
+            try {
+                $operationState.Stage = 'Export'
+                [void](& $OperationSet.Export $result)
+            }
+            catch {
+                $finalizationText = ConvertTo-SanitizedFailureMessage $_.Exception.Message
                 throw [InvalidOperationException]::new(
-                    "Workshop operational failure: $originalText; finalization failure: $finalizationText.",
+                    "Workshop operational failure: $originalText; local evidence export failure: $finalizationText.",
                     $originalError.Exception)
             }
+            if ($null -ne $killError -and $null -eq $persistenceError) { throw $killError }
+            return $result
         }
 
         if ($null -ne $killError) {

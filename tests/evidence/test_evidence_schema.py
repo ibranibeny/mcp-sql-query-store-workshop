@@ -147,6 +147,36 @@ def set_validation_hash(document: dict) -> None:
     ).hexdigest()
 
 
+def startup_failure_evidence(target: dict) -> dict:
+    failed = copy.deepcopy(target)
+    failed.update(
+        evidenceClassification="LAB-MEASURED",
+        disclaimer="LAB-MEASURED evidence captured from the identified workshop environment.",
+        phase="Baseline",
+        status="Failed",
+        endUtc="2026-09-01T10:00:01.0000000Z",
+        samples=[],
+        requestSamples=[],
+        trials=[],
+        measuredPeaks={"baseline": None, "optimized": None},
+        correctness=None,
+        terminationEvidence={
+            "manualStopRequested": False,
+            "safetyStopTriggered": False,
+            "safetyReasons": [],
+            "timeout": False,
+            "failure": {
+                "code": "WORKSHOP_OPERATION_FAILED",
+                "stage": "StartWorker",
+                "message": "Operational failure details were redacted.",
+                "startupFailure": True,
+            },
+        },
+        outcome="Failed",
+    )
+    return failed
+
+
 def test_measured_evidence_requires_exact_complete_paired_twelve_trials(
     schema: dict, target: dict
 ) -> None:
@@ -570,6 +600,72 @@ def test_metric_ranges_and_outcome_enum_are_enforced(
     measured["samples"][0]["grantUtilizationPercent"] = 80
     measured["outcome"] = "UnknownOutcome"
     assert_invalid(schema, measured)
+
+
+@pytest.mark.parametrize(
+    "metric",
+    (
+        "durationMs", "cpuMs", "logicalReads", "grantedKB", "usedKB",
+        "spillKB", "waitMs", "resultRowCount", "expectedRowCount",
+        "actualRowCount", "differenceCount",
+    ),
+)
+@pytest.mark.parametrize("invalid", (Decimal("9.999"), True, -1, 9223372036854775808))
+def test_trial_metrics_require_nonnegative_int64_values(
+    schema: dict, target: dict, metric: str, invalid: object
+) -> None:
+    measured = measured_evidence(target)
+    measured["trials"][0][metric] = invalid
+
+    assert_invalid(schema, measured)
+
+
+@pytest.mark.parametrize(
+    "invalid", (True, Decimal("65536.5"), 0, -1, 4294967297)
+)
+def test_environment_physical_memory_requires_sensible_positive_integer(
+    schema: dict, target: dict, invalid: object
+) -> None:
+    target["environment"]["physicalMemoryMB"] = invalid
+    assert_invalid(schema, target)
+
+
+def test_pre_sample_failure_is_truthful_and_requires_failure_metadata(
+    schema: dict, target: dict
+) -> None:
+    failed = startup_failure_evidence(target)
+    validate_evidence(failed, schema)
+
+    for mutation in ("failure", "startup", "samples", "correctness", "trials"):
+        invalid = copy.deepcopy(failed)
+        if mutation == "failure":
+            invalid["terminationEvidence"].pop("failure")
+        elif mutation == "startup":
+            invalid["terminationEvidence"]["failure"]["startupFailure"] = False
+        elif mutation == "samples":
+            invalid["samples"] = [measured_sample(1, "Baseline", 80)]
+        elif mutation == "correctness":
+            invalid["correctness"] = {
+                "passed": False,
+                "materialRegression": False,
+                "additionalMetricImproved": False,
+                "validationHash": hashlib.sha256(b"[]").hexdigest(),
+            }
+        else:
+            invalid["trials"] = [measured_trial(1, 1, "Baseline")]
+        assert_invalid(schema, invalid)
+
+
+def test_failure_metadata_rejects_secret_shaped_and_unbounded_messages(
+    schema: dict, target: dict
+) -> None:
+    failed = startup_failure_evidence(target)
+    failed["terminationEvidence"]["failure"]["message"] = "Password=canary"
+    assert_invalid(schema, failed)
+
+    failed = startup_failure_evidence(target)
+    failed["terminationEvidence"]["failure"]["message"] = "x" * 513
+    assert_invalid(schema, failed)
 
 
 def test_classification_phase_disclaimer_and_status_outcome_must_agree(
