@@ -357,9 +357,22 @@
       "type": "object",
       "additionalProperties": false,
       "required": ["sqlVersion", "sqlEdition", "physicalMemoryMB"],
+      "dependentRequired": {
+        "sqlClientProvider": ["warnings"],
+        "warnings": ["sqlClientProvider"]
+      },
       "properties": {
         "sqlVersion": { "type": "string", "minLength": 1 },
         "sqlEdition": { "type": "string", "minLength": 1 },
+        "sqlClientProvider": {
+          "type": "string",
+          "enum": ["Microsoft.Data.SqlClient", "System.Data.SqlClient"]
+        },
+        "warnings": {
+          "type": "array",
+          "maxItems": 4,
+          "items": { "type": "string", "minLength": 1, "maxLength": 256 }
+        },
         "physicalMemoryMB": {
           "type": "integer",
           "minimum": 1,

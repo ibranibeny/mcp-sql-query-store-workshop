@@ -39,6 +39,22 @@ def assert_invalid(schema: dict, instance: dict) -> None:
         validate_evidence(instance, schema)
 
 
+@pytest.mark.parametrize("field", ["sqlClientProvider", "warnings"])
+def test_environment_provider_readiness_fields_are_copresent(
+    schema: dict, target: dict, field: str
+) -> None:
+    document = copy.deepcopy(target)
+    document["environment"].update(
+        sqlClientProvider="System.Data.SqlClient",
+        warnings=[
+            "System.Data.SqlClient fallback active; install Microsoft.Data.SqlClient before production use."
+        ],
+    )
+    document["environment"].pop(field)
+
+    assert_invalid(schema, document)
+
+
 def measured_sample(sequence: int, phase: str, utilization: int) -> dict:
     return {
         "sequence": sequence,

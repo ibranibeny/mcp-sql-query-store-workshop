@@ -284,7 +284,9 @@ function ConvertTo-CanonicalValue {
 
     if ($InputObject -is [System.Collections.IEnumerable] -and
         $InputObject -isnot [System.Collections.IDictionary]) {
-        return @($InputObject | ForEach-Object { ConvertTo-CanonicalValue -InputObject $_ })
+        $items = [object[]]@($InputObject | ForEach-Object { ConvertTo-CanonicalValue -InputObject $_ })
+        Write-Output -InputObject $items -NoEnumerate
+        return
     }
 
     $ordered = [ordered]@{}
@@ -316,7 +318,8 @@ function ConvertTo-ReadOnlyValue {
         $items = [object[]] @($InputObject | ForEach-Object {
             ConvertTo-ReadOnlyValue -InputObject $_
         })
-        return [System.Array]::AsReadOnly($items)
+        Write-Output -InputObject ([System.Array]::AsReadOnly($items)) -NoEnumerate
+        return
     }
 
     $dictionary = [System.Collections.Generic.Dictionary[string, object]]::new(
@@ -450,6 +453,10 @@ function Assert-EnvironmentFingerprint {
     )
 
     $names = @('sqlVersion', 'sqlEdition', 'physicalMemoryMB')
+    $actualNames = @(Get-ObjectEntry -InputObject $Environment | ForEach-Object Name)
+    if ('sqlClientProvider' -in $actualNames -or 'warnings' -in $actualNames) {
+        $names += @('sqlClientProvider', 'warnings')
+    }
     Assert-ExactProperty -InputObject $Environment -RequiredNames $names -Context 'Environment fingerprint'
     Assert-NoSecretField -InputObject $Environment
     foreach ($name in @('sqlVersion', 'sqlEdition')) {
@@ -462,6 +469,23 @@ function Assert-EnvironmentFingerprint {
         (Get-ObjectValue $Environment physicalMemoryMB -Required) 'physicalMemoryMB'
     if ($memory -lt 1 -or $memory -ne [decimal]::Truncate($memory) -or $memory -gt 4294967296) {
         throw "Environment field 'physicalMemoryMB' must be a positive integer no greater than 4 PB."
+    }
+    if ('sqlClientProvider' -in $names) {
+        [void](Resolve-CanonicalEnum (Get-ObjectValue $Environment sqlClientProvider -Required) `
+            @('Microsoft.Data.SqlClient', 'System.Data.SqlClient') 'SQL client provider')
+        $warningValue = @(
+            Get-ObjectEntry -InputObject $Environment | Where-Object Name -ceq 'warnings'
+        )[0].Value
+        if ($warningValue -is [string] -or $warningValue -isnot [System.Collections.IEnumerable]) {
+            throw 'Environment warnings must be an array of strings.'
+        }
+        $warnings = @($warningValue)
+        if ($warnings.Count -gt 4) { throw 'Environment warnings cannot contain more than four entries.' }
+        foreach ($warning in $warnings) {
+            if ($warning -isnot [string] -or [string]::IsNullOrWhiteSpace($warning) -or $warning.Length -gt 256) {
+                throw 'Environment warnings must be nonempty strings no longer than 256 characters.'
+            }
+        }
     }
 }
 
@@ -1718,13 +1742,23 @@ function Build-WorkshopExperimentResult {
         }
     }
     $status = if ($Outcome -in @('TargetMet','ImprovedOutsideTarget','NoMaterialImprovement')) { 'Completed' } else { $Outcome }
+    $environment = [ordered]@{
+        sqlVersion = [string]$Preflight.SqlProductVersion
+        sqlEdition = [string]$Preflight.SqlEdition
+        physicalMemoryMB = [int64]$Preflight.PhysicalMemoryMB
+    }
+    if ($Preflight.psobject.Properties['SqlClientProvider'] -or
+        $Preflight.psobject.Properties['EnvironmentWarnings']) {
+        if (-not $Preflight.psobject.Properties['SqlClientProvider'] -or
+            -not $Preflight.psobject.Properties['EnvironmentWarnings']) {
+            throw 'SQL client provider readiness metadata must include both provider and warnings.'
+        }
+        $environment.sqlClientProvider = [string]$Preflight.SqlClientProvider
+        $environment.warnings = [System.Array]::AsReadOnly([string[]]@($Preflight.EnvironmentWarnings))
+    }
     $runRecord = New-WorkshopRunRecord -RunId $RunId -Phase $TerminalPhase -Status $status `
         -EvidenceClassification LAB-MEASURED -FrozenSettings $FrozenSettings `
-        -EnvironmentFingerprint ([ordered]@{
-            sqlVersion = [string]$Preflight.SqlProductVersion
-            sqlEdition = [string]$Preflight.SqlEdition
-            physicalMemoryMB = [int64]$Preflight.PhysicalMemoryMB
-        }) -TargetBands ([ordered]@{
+        -EnvironmentFingerprint $environment -TargetBands ([ordered]@{
             baseline = [ordered]@{ minimum = 75; maximum = 85 }
             optimized = [ordered]@{ minimum = 35; maximum = 45 }
         }) -StartUtc $StartedAtUtc -EndUtc $CompletedAtUtc
@@ -2500,46 +2534,170 @@ function Export-WorkshopEvidenceFile {
     return [pscustomobject]@{ Directory = $directory; JsonPath = $jsonPath; CsvPath = $csvPath }
 }
 
+function Get-WorkshopSqlProviderCapability {
+    param([Parameter(Mandatory)][string] $ProviderName)
+
+    $resolveType = {
+        param([string] $TypeName)
+        $qualifiedName = "$TypeName, $ProviderName"
+        $type = [Type]::GetType($qualifiedName, $false)
+        if ($null -eq $type) {
+            try { Add-Type -AssemblyName $ProviderName -ErrorAction Stop }
+            catch { return $null }
+            $type = [Type]::GetType($qualifiedName, $false)
+        }
+        return $type
+    }.GetNewClosure()
+
+    $connectionType = & $resolveType "$ProviderName.SqlConnection"
+    $builderType = & $resolveType "$ProviderName.SqlConnectionStringBuilder"
+    $commandType = & $resolveType "$ProviderName.SqlCommand"
+    if ($null -eq $connectionType -or $null -eq $builderType -or $null -eq $commandType) {
+        return $null
+    }
+    $cancellationTokenType = [Threading.CancellationToken]
+    return [pscustomobject]@{
+        ProviderName = $ProviderName
+        ConnectionType = $connectionType
+        ConnectionStringBuilderType = $builderType
+        CommandType = $commandType
+        SupportsEncrypt = $null -ne $builderType.GetProperty('Encrypt')
+        SupportsTrustServerCertificate = $null -ne $builderType.GetProperty('TrustServerCertificate')
+        SupportsHostNameInCertificate = $null -ne $builderType.GetProperty('HostNameInCertificate')
+        SupportsConnectionConstruction = $null -ne $connectionType.GetConstructor([type[]]@([string]))
+        SupportsCommands = $null -ne $connectionType.GetMethod('CreateCommand', [type[]]@())
+        SupportsAsync = $null -ne $connectionType.GetMethod('OpenAsync', [type[]]@($cancellationTokenType)) -and
+            $null -ne $commandType.GetMethod('ExecuteReaderAsync', [type[]]@($cancellationTokenType)) -and
+            $null -ne $commandType.GetMethod('ExecuteNonQueryAsync', [type[]]@($cancellationTokenType))
+    }
+}
+
+function Resolve-WorkshopSqlClientProvider {
+    [CmdletBinding()]
+    param(
+        [Parameter()]
+        [scriptblock] $ProviderProbe = ${function:Get-WorkshopSqlProviderCapability}
+    )
+
+    foreach ($providerName in @('Microsoft.Data.SqlClient', 'System.Data.SqlClient')) {
+        $capability = & $ProviderProbe $providerName
+        if ($null -eq $capability) { continue }
+        if ([string]$capability.ProviderName -cne $providerName) {
+            throw "SQL client provider probe returned noncanonical metadata for '$providerName'."
+        }
+        $expectedTypeNames = @{
+            ConnectionType = "$providerName.SqlConnection"
+            ConnectionStringBuilderType = "$providerName.SqlConnectionStringBuilder"
+            CommandType = "$providerName.SqlCommand"
+        }
+        $canonicalTypes = $true
+        foreach ($typeProperty in @($expectedTypeNames.Keys)) {
+            $resolvedType = $capability.$typeProperty
+            if ($null -eq $resolvedType -or $resolvedType.FullName -cne $expectedTypeNames[$typeProperty] -or
+                $resolvedType.Assembly.GetName().Name -cne $providerName) {
+                $canonicalTypes = $false
+            }
+        }
+        if (-not $canonicalTypes -or
+            -not $capability.SupportsEncrypt -or -not $capability.SupportsTrustServerCertificate -or
+            -not $capability.SupportsConnectionConstruction -or -not $capability.SupportsCommands -or
+            -not $capability.SupportsAsync) {
+            continue
+        }
+        $warnings = [System.Collections.Generic.List[string]]::new()
+        if ($providerName -eq 'System.Data.SqlClient') {
+            $warnings.Add('System.Data.SqlClient fallback active; install Microsoft.Data.SqlClient before production use.')
+            $warnings.Add('System.Data.SqlClient does not support HostNameInCertificate; the server connection name must match the certificate DNS name.')
+        }
+        return [pscustomobject][ordered]@{
+            Name = $providerName
+            ConnectionType = [type]$capability.ConnectionType
+            ConnectionStringBuilderType = [type]$capability.ConnectionStringBuilderType
+            CommandType = if ($null -eq $capability.CommandType) { $null } else { [type]$capability.CommandType }
+            SupportsHostNameInCertificate = $providerName -eq 'Microsoft.Data.SqlClient' -and
+                [bool]$capability.SupportsHostNameInCertificate
+            Warnings = [string[]]$warnings.ToArray()
+        }
+    }
+    throw 'No supported SQL client provider is available. Install Microsoft.Data.SqlClient before running the workshop.'
+}
+
+function Get-WorkshopSqlConnectionBuilder {
+    param(
+        [Parameter(Mandatory)][object] $Provider,
+        [Parameter(Mandatory)][string] $Server,
+        [Parameter(Mandatory)][string] $Database,
+        [Parameter(Mandatory)][string] $ApplicationName,
+        [Parameter(Mandatory)][string] $UserName,
+        [Parameter(Mandatory)][string] $HostNameInCertificate
+    )
+
+    $builder = [Activator]::CreateInstance([type]$Provider.ConnectionStringBuilderType)
+    $builder.DataSource = $Server
+    $builder.InitialCatalog = $Database
+    $builder.Encrypt = $true
+    $builder.TrustServerCertificate = $false
+    if ($Provider.SupportsHostNameInCertificate) {
+        $builder.HostNameInCertificate = $HostNameInCertificate
+    }
+    elseif ($HostNameInCertificate -cne $Server) {
+        throw 'System.Data.SqlClient cannot apply a HostNameInCertificate override; the server connection name must match the certificate DNS name.'
+    }
+    if (-not [bool]$builder.Encrypt -or [bool]$builder.TrustServerCertificate) {
+        throw 'SQL client encryption settings could not be proven safe.'
+    }
+    $builder.ApplicationName = $ApplicationName
+    $builder.UserID = $UserName
+    return $builder
+}
+
+function Get-WorkshopSqlConnection {
+    param(
+        [Parameter(Mandatory)][type] $ConnectionType,
+        [Parameter(Mandatory)][string] $ConnectionString
+    )
+
+    return [Activator]::CreateInstance($ConnectionType, [object[]]@($ConnectionString))
+}
+
 function Get-WorkshopSqlOperationSet {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string] $Server,
         [Parameter(Mandatory)][string] $Database,
         [Parameter(Mandatory)][pscredential] $Credential,
-        [Parameter(Mandatory)][string] $HostNameInCertificate
+        [Parameter(Mandatory)][string] $HostNameInCertificate,
+        [Parameter()][scriptblock] $ProviderProbe = ${function:Get-WorkshopSqlProviderCapability}
     )
 
-    try { Add-Type -AssemblyName Microsoft.Data.SqlClient -ErrorAction Stop } catch {
-        throw 'Microsoft.Data.SqlClient is required. Install it from NuGet (Microsoft.Data.SqlClient) before running the workshop; no insecure fallback is available.'
-    }
+    $provider = Resolve-WorkshopSqlClientProvider -ProviderProbe $ProviderProbe
     if ($Server -match '^\s*(?:localhost|\.|\d{1,3}(?:\.\d{1,3}){3})(?:,\d+)?\s*$' -or $Server -notmatch '\.') {
         throw 'Server must be the SQL VM private DNS name.'
     }
-    if ($HostNameInCertificate -cne $Server) {
-        throw 'HostNameInCertificate must exactly match the private DNS server name.'
+    if (-not $provider.SupportsHostNameInCertificate -and $HostNameInCertificate -cne $Server) {
+        throw 'System.Data.SqlClient cannot apply a HostNameInCertificate override; the server connection name must match the certificate DNS name.'
     }
     $preflightSnapshot = [pscustomobject]@{ Value = $null }
     Write-Verbose "Preparing SQL operations for database '$Database' and credential user '$($Credential.UserName)'."
 
     $invokeTable = {
         param([string] $ApplicationName, [string] $CommandText, [hashtable] $Parameters, [scriptblock] $ReaderParser, [int] $CommandTimeoutSeconds = 60)
-        $builder = [Microsoft.Data.SqlClient.SqlConnectionStringBuilder]::new()
-        $builder.DataSource = $Server
-        $builder.InitialCatalog = $Database
-        $builder.Encrypt = $true
-        $builder.TrustServerCertificate = $false
-        $builder.HostNameInCertificate = $HostNameInCertificate
-        $builder.ApplicationName = $ApplicationName
-        $builder.UserID = $Credential.UserName
+        $builder = Get-WorkshopSqlConnectionBuilder -Provider $provider -Server $Server -Database $Database `
+            -ApplicationName $ApplicationName -UserName $Credential.UserName `
+            -HostNameInCertificate $HostNameInCertificate
         $bstr = [IntPtr]::Zero
         $connection = $null
         $command = $null
         $reader = $null
+        $cancellation = $null
         try {
             $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($Credential.Password)
             $builder.Password = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
-            $connection = [Microsoft.Data.SqlClient.SqlConnection]::new($builder.ConnectionString)
-            $connection.Open()
+            $connection = Get-WorkshopSqlConnection -ConnectionType $provider.ConnectionType `
+                -ConnectionString $builder.ConnectionString
+            $cancellation = [Threading.CancellationTokenSource]::new(
+                [TimeSpan]::FromSeconds([math]::Max(1, $CommandTimeoutSeconds)))
+            $connection.OpenAsync($cancellation.Token).GetAwaiter().GetResult()
             $command = $connection.CreateCommand()
             $command.CommandText = $CommandText
             $command.CommandTimeout = [math]::Max(1, $CommandTimeoutSeconds)
@@ -2549,12 +2707,12 @@ function Get-WorkshopSqlOperationSet {
                 if ($specification.ContainsKey('Size')) { $parameter.Size = $specification.Size }
                 $parameter.Value = if ($null -eq $specification.Value) { [DBNull]::Value } else { $specification.Value }
             }
-            $reader = $command.ExecuteReader()
+            $reader = $command.ExecuteReaderAsync($cancellation.Token).GetAwaiter().GetResult()
             if ($null -ne $ReaderParser) {
                 return & $ReaderParser $reader
             }
             $rows = [System.Collections.Generic.List[object]]::new()
-            while ($reader.Read()) {
+            while ($reader.ReadAsync($cancellation.Token).GetAwaiter().GetResult()) {
                 $row = [ordered]@{}
                 for ($index = 0; $index -lt $reader.FieldCount; $index++) {
                     $row[$reader.GetName($index)] = if ($reader.IsDBNull($index)) { $null } else { $reader.GetValue($index) }
@@ -2569,6 +2727,7 @@ function Get-WorkshopSqlOperationSet {
             if ($null -ne $reader) { $reader.Dispose() }
             if ($null -ne $command) { $command.Dispose() }
             if ($null -ne $connection) { $connection.Dispose() }
+            if ($null -ne $cancellation) { $cancellation.Dispose() }
         }
     }.GetNewClosure()
 
@@ -2725,6 +2884,8 @@ OUTER APPLY
         param([int] $CommandTimeoutSeconds = 60)
         $rows = @(& $invokeTable 'MCP-SQL-Workshop-Controller-Preflight' $preflightSql @{} $null $CommandTimeoutSeconds)
         if ($rows.Count -ne 1) { throw 'Workshop SQL preflight did not return exactly one row.' }
+        $rows[0] | Add-Member NoteProperty SqlClientProvider $provider.Name -Force
+        $rows[0] | Add-Member NoteProperty EnvironmentWarnings ([string[]]$provider.Warnings) -Force
         if ($null -eq $preflightSnapshot.Value) { $preflightSnapshot.Value = $rows[0] }
         return $rows[0]
     }.GetNewClosure()
@@ -2744,23 +2905,39 @@ OUTER APPLY
             [void] $powerShell.AddScript({
                 param($WorkerServer, $WorkerDatabase, [pscredential] $WorkerCredential, $WorkerCertificateName,
                     $WorkerRunId, $WorkerPhase, $WorkerApplicationName, $WorkerSchedule,
-                    [datetimeoffset]$WorkerDeadline, $readySignal)
-            Add-Type -AssemblyName Microsoft.Data.SqlClient -ErrorAction Stop
-            $builder = [Microsoft.Data.SqlClient.SqlConnectionStringBuilder]::new()
+                    [datetimeoffset]$WorkerDeadline, $readySignal, $WorkerConnectionTypeName,
+                    $WorkerBuilderTypeName, [bool]$WorkerSupportsHostNameInCertificate)
+            $connectionType = [Type]::GetType($WorkerConnectionTypeName, $true)
+            $builderType = [Type]::GetType($WorkerBuilderTypeName, $true)
+            $builder = [Activator]::CreateInstance($builderType)
             $builder.DataSource = $WorkerServer
             $builder.InitialCatalog = $WorkerDatabase
             $builder.Encrypt = $true
             $builder.TrustServerCertificate = $false
-            $builder.HostNameInCertificate = $WorkerCertificateName
+            if ($WorkerSupportsHostNameInCertificate) {
+                $builder.HostNameInCertificate = $WorkerCertificateName
+            }
+            elseif ($WorkerCertificateName -cne $WorkerServer) {
+                throw 'The server connection name must match the certificate DNS name.'
+            }
+            if (-not [bool]$builder.Encrypt -or [bool]$builder.TrustServerCertificate) {
+                throw 'SQL client encryption settings could not be proven safe.'
+            }
             $builder.ApplicationName = $WorkerApplicationName
             $builder.UserID = $WorkerCredential.UserName
             $bstr = [IntPtr]::Zero
             $connection = $null
+            $setupCancellation = $null
+            $workerCancellation = $null
             try {
                 $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($WorkerCredential.Password)
                 $builder.Password = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
-                $connection = [Microsoft.Data.SqlClient.SqlConnection]::new($builder.ConnectionString)
-                $connection.Open()
+                $connection = [Activator]::CreateInstance($connectionType, [object[]]@($builder.ConnectionString))
+                if ($WorkerDeadline -le [datetimeoffset]::UtcNow) {
+                    throw 'The experiment deadline elapsed before the worker connection opened.'
+                }
+                $setupCancellation = [Threading.CancellationTokenSource]::new([TimeSpan]::FromSeconds(15))
+                $connection.OpenAsync($setupCancellation.Token).GetAwaiter().GetResult()
                 $tag = $connection.CreateCommand()
                 try {
                     $tag.CommandText = "SET CONTEXT_INFO @RunBytes; EXEC sys.sp_set_session_context @key=N'WorkshopRunId', @value=@RunId; EXEC sys.sp_set_session_context @key=N'WorkshopPhase', @value=@Phase;"
@@ -2773,7 +2950,12 @@ OUTER APPLY
                     $tag.Parameters['@RunId'].Value = [guid] $WorkerRunId
                     [void] $tag.Parameters.Add('@Phase', [Data.SqlDbType]::NVarChar, 16)
                     $tag.Parameters['@Phase'].Value = $WorkerPhase
-                    [void] $tag.ExecuteNonQuery()
+                    [void] $tag.ExecuteNonQueryAsync($setupCancellation.Token).GetAwaiter().GetResult()
+                    $workerRemaining = $WorkerDeadline - [datetimeoffset]::UtcNow
+                    if ($workerRemaining -le [TimeSpan]::Zero) {
+                        throw 'The experiment deadline elapsed before worker readiness completed.'
+                    }
+                    $workerCancellation = [Threading.CancellationTokenSource]::new($workerRemaining)
                     $readySignal.Set()
                 }
                 finally { $tag.Dispose() }
@@ -2796,7 +2978,7 @@ OUTER APPLY
                         $command.Parameters['@TerritoryID'].Value = if ($null -eq $entry.TerritoryID) { [DBNull]::Value } else { [int] $entry.TerritoryID }
                         [void] $command.Parameters.Add('@TopCount', [Data.SqlDbType]::Int)
                         $command.Parameters['@TopCount'].Value = [int] $entry.TopCount
-                        [void] $command.ExecuteNonQuery()
+                        [void] $command.ExecuteNonQueryAsync($workerCancellation.Token).GetAwaiter().GetResult()
                     }
                     finally { $command.Dispose() }
                 }
@@ -2805,8 +2987,10 @@ OUTER APPLY
                 $builder.Password = [string]::Empty
                 if ($bstr -ne [IntPtr]::Zero) { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr) }
                 if ($null -ne $connection) { $connection.Dispose() }
+                if ($null -ne $setupCancellation) { $setupCancellation.Dispose() }
+                if ($null -ne $workerCancellation) { $workerCancellation.Dispose() }
             }
-            }).AddArgument($Server).AddArgument($Database).AddArgument($Credential).AddArgument($HostNameInCertificate).AddArgument($RunId).AddArgument($Phase).AddArgument($ApplicationName).AddArgument($Schedule).AddArgument($Deadline).AddArgument($readySignal)
+            }).AddArgument($Server).AddArgument($Database).AddArgument($Credential).AddArgument($HostNameInCertificate).AddArgument($RunId).AddArgument($Phase).AddArgument($ApplicationName).AddArgument($Schedule).AddArgument($Deadline).AddArgument($readySignal).AddArgument($provider.ConnectionType.AssemblyQualifiedName).AddArgument($provider.ConnectionStringBuilderType.AssemblyQualifiedName).AddArgument($provider.SupportsHostNameInCertificate)
             $asyncResult = $powerShell.BeginInvoke()
             if (-not $readySignal.Wait([TimeSpan]::FromSeconds(15))) {
                 $details = @($powerShell.Streams.Error | ForEach-Object { $_.Exception.Message }) -join ' '
@@ -3301,6 +3485,10 @@ END CATCH;
     }.GetNewClosure()
 
     return @{
+        Readiness = [pscustomobject][ordered]@{
+            SqlClientProvider = $provider.Name
+            Warnings = [string[]]$provider.Warnings
+        }
         OpenConnection = { param($Purpose) Write-Verbose "Opening $Purpose controller connection."; & $getPreflight }.GetNewClosure()
         StartWorker = $startWorker
         TestWorkerHealth = $testWorkerHealth
@@ -3331,5 +3519,6 @@ Export-ModuleMember -Function @(
     'Invoke-WorkshopExperiment',
     'Get-WorkshopKillPlan',
     'Export-WorkshopEvidenceFile',
+    'Resolve-WorkshopSqlClientProvider',
     'Get-WorkshopSqlOperationSet'
 )

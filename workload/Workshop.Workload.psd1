@@ -24,6 +24,7 @@
         'Invoke-WorkshopExperiment'
         'Get-WorkshopKillPlan'
         'Export-WorkshopEvidenceFile'
+        'Resolve-WorkshopSqlClientProvider'
         'Get-WorkshopSqlOperationSet'
     )
     CmdletsToExport = @()

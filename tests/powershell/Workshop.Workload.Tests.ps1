@@ -141,6 +141,7 @@ Describe 'Workshop workload module contract' {
             'Get-WorkshopTrialSequence'
             'Invoke-WorkshopExperiment'
             'New-WorkshopRunRecord'
+            'Resolve-WorkshopSqlClientProvider'
             'Test-TargetBand'
             'Test-WorkshopFingerprintMatch'
             'Test-WorkshopPreflight'
@@ -148,6 +149,132 @@ Describe 'Workshop workload module contract' {
         )
         $manifest.PowerShellVersion | Should -Be ([version]'7.4')
     }
+}
+
+Describe 'Task 12 SQL client provider resolution' {
+    BeforeAll {
+        $script:TestMicrosoftProviderModule = $null
+
+        function Get-TestMicrosoftProviderType {
+            param([Parameter(Mandatory)][string] $TypeName)
+
+            $fullName = "Microsoft.Data.SqlClient.$TypeName"
+            $existing = @(
+                [AppDomain]::CurrentDomain.GetAssemblies() |
+                    Where-Object { $_.GetName().Name -ceq 'Microsoft.Data.SqlClient' } |
+                    ForEach-Object { $_.GetType($fullName, $false) } |
+                    Where-Object { $null -ne $_ }
+            ) | Select-Object -First 1
+            if ($null -ne $existing) { return $existing }
+            if ($null -eq $script:TestMicrosoftProviderModule) {
+                $assemblyName = [Reflection.AssemblyName]::new('Microsoft.Data.SqlClient')
+                $assembly = [Reflection.Emit.AssemblyBuilder]::DefineDynamicAssembly(
+                    $assemblyName, [Reflection.Emit.AssemblyBuilderAccess]::Run)
+                $script:TestMicrosoftProviderModule = $assembly.DefineDynamicModule('Microsoft.Data.SqlClient')
+                foreach ($name in @('SqlConnection','SqlConnectionStringBuilder','SqlCommand')) {
+                    [void]$script:TestMicrosoftProviderModule.DefineType(
+                        "Microsoft.Data.SqlClient.$name", [Reflection.TypeAttributes]::Public).CreateType()
+                }
+            }
+            return $script:TestMicrosoftProviderModule.GetType($fullName, $true)
+        }
+
+        function Get-TestProviderCapability {
+            param(
+                [Parameter(Mandatory)][string] $ProviderName,
+                [bool] $SupportsHostNameInCertificate = $true
+            )
+
+            $connectionType = if ($ProviderName -eq 'Microsoft.Data.SqlClient') {
+                Get-TestMicrosoftProviderType 'SqlConnection'
+            }
+            else { [System.Data.SqlClient.SqlConnection] }
+            $builderType = if ($ProviderName -eq 'Microsoft.Data.SqlClient') {
+                Get-TestMicrosoftProviderType 'SqlConnectionStringBuilder'
+            }
+            else { [System.Data.SqlClient.SqlConnectionStringBuilder] }
+            $commandType = if ($ProviderName -eq 'Microsoft.Data.SqlClient') {
+                Get-TestMicrosoftProviderType 'SqlCommand'
+            }
+            else { [System.Data.SqlClient.SqlCommand] }
+            [pscustomobject]@{
+                ProviderName = $ProviderName
+                ConnectionType = $connectionType
+                ConnectionStringBuilderType = $builderType
+                CommandType = $commandType
+                SupportsEncrypt = $true
+                SupportsTrustServerCertificate = $true
+                SupportsHostNameInCertificate = $SupportsHostNameInCertificate
+                SupportsConnectionConstruction = $true
+                SupportsCommands = $true
+                SupportsAsync = $true
+            }
+        }
+    }
+
+    It 'prefers Microsoft.Data.SqlClient and returns canonical provider metadata' {
+        $probe = {
+            param($ProviderName)
+            if ($ProviderName -eq 'Microsoft.Data.SqlClient') {
+                return Get-TestProviderCapability -ProviderName $ProviderName
+            }
+            throw 'The fallback provider must not be probed after the preferred provider succeeds.'
+        }
+
+        $provider = Resolve-WorkshopSqlClientProvider -ProviderProbe $probe
+
+        $provider.Name | Should -BeExactly 'Microsoft.Data.SqlClient'
+        $provider.ConnectionType.FullName | Should -BeExactly 'Microsoft.Data.SqlClient.SqlConnection'
+        $provider.ConnectionStringBuilderType.FullName | Should -BeExactly `
+            'Microsoft.Data.SqlClient.SqlConnectionStringBuilder'
+        $provider.Warnings.Count | Should -Be 0
+    }
+
+    It 'falls back to System.Data.SqlClient with a bounded production-readiness warning containing no secret' {
+        $probe = {
+            param($ProviderName)
+            if ($ProviderName -eq 'System.Data.SqlClient') {
+                return Get-TestProviderCapability -ProviderName $ProviderName -SupportsHostNameInCertificate $false
+            }
+            $unsupported = Get-TestProviderCapability -ProviderName $ProviderName
+            $unsupported.SupportsAsync = $false
+            return $unsupported
+        }
+
+        $provider = Resolve-WorkshopSqlClientProvider -ProviderProbe $probe
+        $warning = $provider.Warnings -join ' '
+
+        $provider.Name | Should -BeExactly 'System.Data.SqlClient'
+        $provider.SupportsHostNameInCertificate | Should -BeFalse
+        $provider.Warnings | Should -Contain 'System.Data.SqlClient fallback active; install Microsoft.Data.SqlClient before production use.'
+        $provider.Warnings | Should -Contain 'System.Data.SqlClient does not support HostNameInCertificate; the server connection name must match the certificate DNS name.'
+        $warning.Length | Should -BeLessOrEqual 512
+        $warning | Should -Not -Match 'canary-value|private-canary'
+    }
+
+    It 'fails closed when neither provider is available' {
+        { Resolve-WorkshopSqlClientProvider -ProviderProbe { param($ProviderName) Write-Verbose $ProviderName; $null } } |
+            Should -Throw '*supported SQL client provider*'
+    }
+
+    It 'rejects a hostname override when the fallback provider cannot enforce it' {
+        $probe = {
+            param($ProviderName)
+            if ($ProviderName -eq 'System.Data.SqlClient') {
+                return Get-TestProviderCapability -ProviderName $ProviderName -SupportsHostNameInCertificate $false
+            }
+            return $null
+        }
+        $secureValue = [securestring]::new()
+        foreach ($character in [char[]]'canary-value') { $secureValue.AppendChar($character) }
+        $secureValue.MakeReadOnly()
+        $credential = [pscredential]::new('workshop-user', $secureValue)
+
+        { Get-WorkshopSqlOperationSet -Server 'sqlvm.private.contoso.com' -Database 'AdventureWorks2022' `
+                -Credential $credential -HostNameInCertificate 'certificate.private.contoso.com' `
+                -ProviderProbe $probe } | Should -Throw '*must match the certificate DNS name*'
+    }
+
 }
 
 Describe 'Get-GrantUtilization' {
@@ -1078,10 +1205,17 @@ Describe 'Task 12 workload orchestration' {
 
     It 'builds evidence environment only from SQL-observed preflight values' {
         $fixture = Get-TestOperationSet
+        $fixture.State.Preflight | Add-Member NoteProperty SqlClientProvider 'System.Data.SqlClient'
+        $fixture.State.Preflight | Add-Member NoteProperty EnvironmentWarnings @(
+            'System.Data.SqlClient fallback active; install Microsoft.Data.SqlClient before production use.'
+        )
         $result = Invoke-WorkshopExperiment -RunId ([guid]::NewGuid()) -OperationSet $fixture.Operations -WorkerRampSeconds 20
 
         $result.Evidence.environment.sqlVersion | Should -BeExactly '16.0.1135.2'
         $result.Evidence.environment.physicalMemoryMB | Should -BeExactly 65536
+        $result.Evidence.environment.sqlClientProvider | Should -BeExactly 'System.Data.SqlClient'
+        $result.Evidence.environment.warnings | Should -Contain `
+            'System.Data.SqlClient fallback active; install Microsoft.Data.SqlClient before production use.'
     }
 
     It 'sets the first ramp clock when worker one starts and never starts worker two before the exact ramp' {
@@ -1587,7 +1721,7 @@ Describe 'Task 12 stop and export safety' {
         $rows[1].ResultHash | Should -BeExactly ('ab'*32)
     }
 
-    It 'declares strict entry bounds, ShouldProcess, and no insecure SQL fallback or Start-Sleep' {
+    It 'declares strict entry bounds, ShouldProcess, and an explicit encrypted SQL fallback without Start-Sleep' {
         $start = Get-Content (Join-Path $PSScriptRoot '../../workload/Start-MemoryGrantLab.ps1') -Raw
         $stop = Get-Content (Join-Path $PSScriptRoot '../../workload/Stop-MemoryGrantLab.ps1') -Raw
         $export = Get-Content (Join-Path $PSScriptRoot '../../workload/Export-WorkshopEvidence.ps1') -Raw
@@ -1598,7 +1732,7 @@ Describe 'Task 12 stop and export safety' {
         $start | Should -Match 'ValidateRange\(20,\s*60\)'
         $stop | Should -Match 'SupportsShouldProcess'
         $export | Should -Match 'SupportsShouldProcess'
-        "$start`n$stop`n$export`n$module" | Should -Not -Match 'System\.Data\.SqlClient'
+        $module | Should -Match 'System\.Data\.SqlClient fallback active'
         $module | Should -Not -Match 'Start-Sleep'
         $module | Should -Match 'Microsoft\.Data\.SqlClient'
         $module | Should -Match 'ZeroFreeBSTR'
@@ -1617,6 +1751,10 @@ Describe 'Task 12 stop and export safety' {
         $module | Should -Match 'RunspaceFactory'
         $module | Should -Match 'BeginInvoke'
         $module | Should -Match 'EndInvoke'
+        $module | Should -Match 'CancellationTokenSource'
+        $module | Should -Match 'OpenAsync\([^)]*\.Token\)'
+        $module | Should -Match 'ExecuteReaderAsync\([^)]*\.Token\)'
+        $module | Should -Match 'ExecuteNonQueryAsync\([^)]*\.Token\)'
         $module | Should -Match '\.Dispose\(\)'
         $module | Should -Not -Match 'AddWithValue'
         $module | Should -Not -Match 'CommandTimeout\s*=\s*600'
@@ -1630,10 +1768,12 @@ Describe 'Task 12 stop and export safety' {
         $module | Should -Match 'ManualResetEventSlim'
         $module | Should -Match '\.Wait\('
         $module | Should -Not -Match 'Start-Sleep'
-        $tagIndex = $module.IndexOf('[void] $tag.ExecuteNonQuery()')
+        $tagIndex = $module.IndexOf('[void] $tag.ExecuteNonQueryAsync($setupCancellation.Token).GetAwaiter().GetResult()')
+        $handoffIndex = $module.IndexOf('$workerCancellation = [Threading.CancellationTokenSource]::new($workerRemaining)', $tagIndex)
         $readyIndex = $module.IndexOf('$readySignal.Set()', $tagIndex)
         $tagIndex | Should -BeGreaterOrEqual 0
-        $readyIndex | Should -BeGreaterThan $tagIndex
+        $handoffIndex | Should -BeGreaterThan $tagIndex
+        $readyIndex | Should -BeGreaterThan $handoffIndex
         $startIndex = $module.IndexOf('$OperationSet.StartWorker $RunId ''Baseline'' 1')
         $rampIndex = $module.IndexOf('$lastRamp = [datetimeoffset] (& $OperationSet.Clock)', $startIndex)
         $startIndex | Should -BeGreaterOrEqual 0
