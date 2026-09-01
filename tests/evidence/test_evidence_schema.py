@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import copy
+from decimal import Decimal
 import hashlib
 import json
 from pathlib import Path
+import subprocess
+import sys
 
 import pytest
 from jsonschema import Draft202012Validator, FormatChecker
-from jsonschema.exceptions import ValidationError
+
+from evidence.validate_evidence import EvidenceValidationError, validate_evidence
 
 ROOT = Path(__file__).resolve().parents[2]
 SCHEMA_PATH = ROOT / "evidence" / "evidence-schema.json"
@@ -19,10 +23,10 @@ def load_json(path: Path) -> dict:
 
 
 @pytest.fixture(scope="module")
-def validator() -> Draft202012Validator:
+def schema() -> dict:
     schema = load_json(SCHEMA_PATH)
     Draft202012Validator.check_schema(schema)
-    return Draft202012Validator(schema, format_checker=FormatChecker())
+    return schema
 
 
 @pytest.fixture
@@ -30,9 +34,9 @@ def target() -> dict:
     return load_json(TARGET_PATH)
 
 
-def assert_invalid(validator: Draft202012Validator, instance: dict) -> None:
-    with pytest.raises(ValidationError):
-        validator.validate(instance)
+def assert_invalid(schema: dict, instance: dict) -> None:
+    with pytest.raises(EvidenceValidationError):
+        validate_evidence(instance, schema)
 
 
 def measured_sample(sequence: int, phase: str, utilization: int) -> dict:
@@ -51,6 +55,11 @@ def measured_sample(sequence: int, phase: str, utilization: int) -> dict:
 
 
 def measured_evidence(target: dict, *, outcome: str = "TargetMet") -> dict:
+    optimized_utilization = {
+        "TargetMet": 40,
+        "ImprovedOutsideTarget": 51,
+        "NoMaterialImprovement": 56,
+    }[outcome]
     measured = copy.deepcopy(target)
     measured.update(
         evidenceClassification="LAB-MEASURED",
@@ -60,9 +69,9 @@ def measured_evidence(target: dict, *, outcome: str = "TargetMet") -> dict:
         endUtc="2026-09-01T10:01:00.0000000Z",
         samples=[
             measured_sample(1, "Baseline", 80),
-            measured_sample(2, "Optimized", 40),
+            measured_sample(2, "Optimized", optimized_utilization),
         ],
-        measuredPeaks={"baseline": 80, "optimized": 40},
+        measuredPeaks={"baseline": 80, "optimized": optimized_utilization},
         correctness={
             "passed": True,
             "materialRegression": False,
@@ -75,9 +84,9 @@ def measured_evidence(target: dict, *, outcome: str = "TargetMet") -> dict:
 
 
 def test_target_example_is_valid_and_truthfully_unmeasured(
-    validator: Draft202012Validator, target: dict
+    schema: dict, target: dict
 ) -> None:
-    validator.validate(target)
+    validate_evidence(target, schema)
     assert target["evidenceClassification"] == "TARGET"
     assert target["status"] == "Planned"
     assert target["endUtc"] is None
@@ -112,11 +121,11 @@ def test_target_example_frozen_hashes_are_reproducible(target: dict) -> None:
 
 
 def test_target_rejects_measured_fields(
-    validator: Draft202012Validator, target: dict
+    schema: dict, target: dict
 ) -> None:
     mutated = copy.deepcopy(target)
     mutated["measuredPeaks"]["baseline"] = 80
-    assert_invalid(validator, mutated)
+    assert_invalid(schema, mutated)
 
     mutated = copy.deepcopy(target)
     mutated["samples"] = [
@@ -133,15 +142,15 @@ def test_target_rejects_measured_fields(
             "processVirtualLow": False,
         }
     ]
-    assert_invalid(validator, mutated)
+    assert_invalid(schema, mutated)
 
     mutated = copy.deepcopy(target)
     mutated["outcome"] = "TargetMet"
-    assert_invalid(validator, mutated)
+    assert_invalid(schema, mutated)
 
 
 def test_exact_target_bands_are_enforced(
-    validator: Draft202012Validator, target: dict
+    schema: dict, target: dict
 ) -> None:
     for phase, edge, value in (
         ("baseline", "minimum", 74),
@@ -151,11 +160,11 @@ def test_exact_target_bands_are_enforced(
     ):
         mutated = copy.deepcopy(target)
         mutated["targetBands"][phase][edge] = value
-        assert_invalid(validator, mutated)
+        assert_invalid(schema, mutated)
 
 
 def test_unknown_properties_are_rejected_at_nested_boundaries(
-    validator: Draft202012Validator, target: dict
+    schema: dict, target: dict
 ) -> None:
     for path in (
         (),
@@ -169,11 +178,11 @@ def test_unknown_properties_are_rejected_at_nested_boundaries(
         for segment in path:
             cursor = cursor[segment]
         cursor["unexpected"] = True
-        assert_invalid(validator, mutated)
+        assert_invalid(schema, mutated)
 
 
 def test_bad_utc_and_outcome_values_are_rejected(
-    validator: Draft202012Validator, target: dict
+    schema: dict, target: dict
 ) -> None:
     for bad_timestamp in (
         "2026-09-01T10:00:00+02:00",
@@ -182,15 +191,15 @@ def test_bad_utc_and_outcome_values_are_rejected(
     ):
         mutated = copy.deepcopy(target)
         mutated["startUtc"] = bad_timestamp
-        assert_invalid(validator, mutated)
+        assert_invalid(schema, mutated)
 
     mutated = copy.deepcopy(target)
     mutated["outcome"] = "Success"
-    assert_invalid(validator, mutated)
+    assert_invalid(schema, mutated)
 
 
 def test_lab_measured_requires_samples_end_outcome_and_correctness(
-    validator: Draft202012Validator, target: dict
+    schema: dict, target: dict
 ) -> None:
     measured = copy.deepcopy(target)
     measured.update(
@@ -210,7 +219,7 @@ def test_lab_measured_requires_samples_end_outcome_and_correctness(
             "outcome": "TargetMet",
         }
     )
-    assert_invalid(validator, measured)
+    assert_invalid(schema, measured)
 
     measured["samples"] = [
         {
@@ -226,23 +235,23 @@ def test_lab_measured_requires_samples_end_outcome_and_correctness(
             "processVirtualLow": False,
         }
     ]
-    assert_invalid(validator, measured)
+    assert_invalid(schema, measured)
 
     measured["samples"].append(measured_sample(2, "Optimized", 40))
-    validator.validate(measured)
+    validate_evidence(measured, schema)
 
     measured["status"] = "SafetyStop"
-    assert_invalid(validator, measured)
+    assert_invalid(schema, measured)
 
 
 @pytest.mark.parametrize(
     "outcome", ["TargetMet", "ImprovedOutsideTarget", "NoMaterialImprovement"]
 )
 def test_completed_outcomes_require_both_sample_phases_and_nonnull_peaks(
-    validator: Draft202012Validator, target: dict, outcome: str
+    schema: dict, target: dict, outcome: str
 ) -> None:
     measured = measured_evidence(target, outcome=outcome)
-    validator.validate(measured)
+    validate_evidence(measured, schema)
 
     for missing_phase, peak_name in (
         ("Baseline", "baseline"),
@@ -252,15 +261,15 @@ def test_completed_outcomes_require_both_sample_phases_and_nonnull_peaks(
         mutation["samples"] = [
             sample for sample in mutation["samples"] if sample["phase"] != missing_phase
         ]
-        assert_invalid(validator, mutation)
+        assert_invalid(schema, mutation)
 
         mutation = copy.deepcopy(measured)
         mutation["measuredPeaks"][peak_name] = None
-        assert_invalid(validator, mutation)
+        assert_invalid(schema, mutation)
 
 
 def test_baseline_target_not_reached_forbids_optimized_claims(
-    validator: Draft202012Validator, target: dict
+    schema: dict, target: dict
 ) -> None:
     measured = measured_evidence(target)
     measured.update(
@@ -270,25 +279,25 @@ def test_baseline_target_not_reached_forbids_optimized_claims(
         measuredPeaks={"baseline": 70, "optimized": None},
         outcome="BaselineTargetNotReached",
     )
-    validator.validate(measured)
+    validate_evidence(measured, schema)
 
     mutation = copy.deepcopy(measured)
     mutation["samples"].append(measured_sample(2, "Optimized", 40))
-    assert_invalid(validator, mutation)
+    assert_invalid(schema, mutation)
 
     mutation = copy.deepcopy(measured)
     mutation["measuredPeaks"]["optimized"] = 40
-    assert_invalid(validator, mutation)
+    assert_invalid(schema, mutation)
 
     mutation = copy.deepcopy(measured)
     mutation["samples"] = []
-    assert_invalid(validator, mutation)
+    assert_invalid(schema, mutation)
 
 
 @pytest.mark.parametrize("outcome", ["SafetyStop", "ManualStop"])
 @pytest.mark.parametrize("sample_phase", ["Baseline", "Optimized"])
 def test_stop_outcomes_allow_either_phase_but_peaks_must_match_samples(
-    validator: Draft202012Validator,
+    schema: dict,
     target: dict,
     outcome: str,
     sample_phase: str,
@@ -312,19 +321,19 @@ def test_stop_outcomes_allow_either_phase_but_peaks_must_match_samples(
         },
         outcome=outcome,
     )
-    validator.validate(measured)
+    validate_evidence(measured, schema)
 
     mutation = copy.deepcopy(measured)
     mutation["measuredPeaks"][peak_name] = None
-    assert_invalid(validator, mutation)
+    assert_invalid(schema, mutation)
 
     mutation = copy.deepcopy(measured)
     mutation["measuredPeaks"][other_peak] = 50
-    assert_invalid(validator, mutation)
+    assert_invalid(schema, mutation)
 
 
 def test_schema_requires_independent_consistent_termination_evidence(
-    validator: Draft202012Validator, target: dict
+    schema: dict, target: dict
 ) -> None:
     assert "terminationEvidence" in target
 
@@ -334,11 +343,11 @@ def test_schema_requires_independent_consistent_termination_evidence(
         safetyStopTriggered=True,
         safetyReasons=["pressure"],
     )
-    assert_invalid(validator, contradictory)
+    assert_invalid(schema, contradictory)
 
     false_target_stop = copy.deepcopy(target)
     false_target_stop["terminationEvidence"]["manualStopRequested"] = True
-    assert_invalid(validator, false_target_stop)
+    assert_invalid(schema, false_target_stop)
 
     safety = copy.deepcopy(target)
     safety.update(
@@ -376,10 +385,10 @@ def test_schema_requires_independent_consistent_termination_evidence(
         },
         outcome="SafetyStop",
     )
-    validator.validate(safety)
+    validate_evidence(safety, schema)
 
     safety["terminationEvidence"]["safetyStopTriggered"] = False
-    assert_invalid(validator, safety)
+    assert_invalid(schema, safety)
 
     healthy_timeout = copy.deepcopy(safety)
     healthy_timeout["status"] = "Completed"
@@ -390,11 +399,11 @@ def test_schema_requires_independent_consistent_termination_evidence(
         "safetyReasons": [],
         "timeout": True,
     }
-    assert_invalid(validator, healthy_timeout)
+    assert_invalid(schema, healthy_timeout)
 
 
 def test_metric_ranges_and_outcome_enum_are_enforced(
-    validator: Draft202012Validator, target: dict
+    schema: dict, target: dict
 ) -> None:
     measured = copy.deepcopy(target)
     measured.update(
@@ -428,20 +437,166 @@ def test_metric_ranges_and_outcome_enum_are_enforced(
             "outcome": "TargetMet",
         }
     )
-    assert_invalid(validator, measured)
+    assert_invalid(schema, measured)
 
     measured["samples"][0]["grantUtilizationPercent"] = 80
     measured["outcome"] = "UnknownOutcome"
-    assert_invalid(validator, measured)
+    assert_invalid(schema, measured)
 
 
 def test_classification_phase_disclaimer_and_status_outcome_must_agree(
-    validator: Draft202012Validator, target: dict
+    schema: dict, target: dict
 ) -> None:
     mutated = copy.deepcopy(target)
     mutated["disclaimer"] = "LAB-MEASURED evidence captured from a workshop."
-    assert_invalid(validator, mutated)
+    assert_invalid(schema, mutated)
 
     mutated = copy.deepcopy(target)
     mutated["phase"] = "Optimized"
-    assert_invalid(validator, mutated)
+    assert_invalid(schema, mutated)
+
+
+def test_semantic_validation_rejects_structurally_valid_mismatched_peaks(
+    schema: dict, target: dict
+) -> None:
+    measured = measured_evidence(target)
+    measured["measuredPeaks"] = {"baseline": 1, "optimized": 99}
+
+    Draft202012Validator(schema, format_checker=FormatChecker()).validate(measured)
+    assert_invalid(schema, measured)
+
+
+def test_semantic_validation_rejects_outcome_inconsistent_with_samples(
+    schema: dict, target: dict
+) -> None:
+    measured = measured_evidence(target)
+    measured["samples"][1] = measured_sample(2, "Optimized", 56)
+    measured["measuredPeaks"]["optimized"] = 56
+
+    assert_invalid(schema, measured)
+
+
+def test_outcome_delta_comparison_does_not_round_up_to_twenty_five(
+    schema: dict, target: dict
+) -> None:
+    measured = measured_evidence(target, outcome="ImprovedOutsideTarget")
+    measured["samples"][1]["grantUtilizationPercent"] = Decimal(
+        "55.000000000000000000000000001"
+    )
+    measured["samples"][1]["grantedKb"] = Decimal(
+        "550.00000000000000000000000001"
+    )
+    measured["measuredPeaks"]["optimized"] = Decimal(
+        "55.000000000000000000000000001"
+    )
+
+    assert_invalid(schema, measured)
+
+
+def test_semantic_validation_rejects_values_not_exactly_representable_by_dotnet_decimal(
+    schema: dict, target: dict
+) -> None:
+    measured = measured_evidence(target)
+    overprecise = Decimal("80.000000000000000000000000001")
+    measured["samples"][0]["grantUtilizationPercent"] = overprecise
+    measured["measuredPeaks"]["baseline"] = overprecise
+
+    assert_invalid(schema, measured)
+
+
+def test_semantic_validation_rejects_utilization_inconsistent_with_raw_grant(
+    schema: dict, target: dict
+) -> None:
+    measured = measured_evidence(target)
+    measured["samples"][0]["grantedKb"] = 700
+
+    assert_invalid(schema, measured)
+
+
+@pytest.mark.parametrize("constant", ["NaN", "Infinity", "-Infinity"])
+def test_cli_rejects_nonstandard_nonfinite_json_numbers_without_echoing_them(
+    target: dict, tmp_path: Path, constant: str
+) -> None:
+    evidence_path = tmp_path / "nonfinite.json"
+    text = json.dumps(target).replace('"hostAvailableMB": 12000', f'"hostAvailableMB": {constant}')
+    if text == json.dumps(target):
+        measured = measured_evidence(target)
+        measured["requestSamples"] = [
+            {
+                "sequence": 1,
+                "timestampUtc": "2026-09-01T10:00:06.0000000Z",
+                "phase": "Baseline",
+                "durationMs": 1,
+                "cpuMs": 1,
+                "logicalReads": 1,
+                "spillsMb": 1,
+                "waitMs": 1,
+            }
+        ]
+        text = json.dumps(measured).replace('"waitMs": 1', f'"waitMs": {constant}')
+    evidence_path.write_text(text, encoding="utf-8")
+
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "evidence" / "validate_evidence.py"), str(evidence_path)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    assert constant not in result.stdout + result.stderr
+
+
+def test_cli_sanitizes_invalid_schema_errors(tmp_path: Path) -> None:
+    canary = "private-schema-canary"
+    schema_path = tmp_path / "invalid-schema.json"
+    schema_path.write_text(
+        json.dumps({"type": canary}),
+        encoding="utf-8",
+    )
+    evidence_path = tmp_path / "evidence.json"
+    evidence_path.write_text("{}", encoding="utf-8")
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "evidence" / "validate_evidence.py"),
+            "--schema",
+            str(schema_path),
+            str(evidence_path),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    assert canary not in result.stdout + result.stderr
+    assert "Traceback" not in result.stdout + result.stderr
+
+
+def test_cli_failure_is_nonzero_and_does_not_echo_document_values(
+    schema: dict, target: dict, tmp_path: Path
+) -> None:
+    measured = measured_evidence(target)
+    canary = "private-canary-value"
+    measured["environment"]["sqlVersion"] = canary
+    measured["measuredPeaks"]["baseline"] = 1
+    evidence_path = tmp_path / "invalid-evidence.json"
+    evidence_path.write_text(json.dumps(measured), encoding="utf-8")
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "evidence" / "validate_evidence.py"),
+            "--schema",
+            str(SCHEMA_PATH),
+            str(evidence_path),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    assert canary not in result.stdout + result.stderr

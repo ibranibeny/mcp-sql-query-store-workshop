@@ -1049,6 +1049,14 @@ git commit -m "feat: expose least-privileged workshop diagnostics"
 
 ## Task 11: Implement the bounded workload state machine and evidence schema
 
+### 2026-09-01 semantic-validation addendum
+
+- Research confirmed that draft 2020-12 validates the structural relationship between sample phases and non-null peaks, but cannot assert that each peak equals the maximum `grantUtilizationPercent` for its phase.
+- `ConvertTo-WorkshopEvidence` already derives each peak from validated samples and derives the outcome through `Get-WorkshopOutcome`; externally authored evidence needs the same checks at the repository boundary.
+- Add a canonical Python validator that runs draft 2020-12 validation first, compares phase maxima and measured peaks with exact decimal semantics, and applies the PowerShell outcome precedence and thresholds.
+- Route evidence tests and the repository validation entry point through the canonical validator. Validate tracked and unignored `evidence/*.json` files except the schema itself, and keep CLI failures free of document values.
+- This is one atomic contract fix spanning the validator, schema comment, focused tests, repository gate, and an exact PowerShell peak regression test; no scenario Execution-stage or Breakdown-Hints files were supplied for this task.
+
 **Files:**
 - Create: `workload/Workshop.Workload.psd1`
 - Create: `workload/Workshop.Workload.psm1`

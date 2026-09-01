@@ -132,6 +132,28 @@ function Test-JsonFile {
     }
 }
 
+function Test-Evidence {
+    $relativePaths = @(Get-RepositoryEvidenceJsonFile -RepositoryRoot $script:RepositoryRoot)
+    if ($relativePaths.Count -eq 0) {
+        return
+    }
+
+    $virtualEnvironmentPython = Join-Path $script:RepositoryRoot '.venv/Scripts/python.exe'
+    $python = if (Test-Path -LiteralPath $virtualEnvironmentPython -PathType Leaf) {
+        $virtualEnvironmentPython
+    }
+    else {
+        (Get-Command python -ErrorAction Stop).Source
+    }
+    $validator = Join-Path $script:RepositoryRoot 'evidence/validate_evidence.py'
+    $schema = Join-Path $script:RepositoryRoot 'evidence/evidence-schema.json'
+    $evidencePaths = @($relativePaths | ForEach-Object {
+        Join-Path $script:RepositoryRoot $_
+    })
+    $arguments = @($validator, '--schema', $schema) + $evidencePaths
+    Invoke-NativeCommand -FilePath $python -ArgumentList $arguments
+}
+
 function Test-TrackedFileForSecret {
     $trackedFiles = Get-RepositoryFile -RepositoryRoot $script:RepositoryRoot
     $findings = [System.Collections.Generic.List[string]]::new()
@@ -225,6 +247,7 @@ try {
     Invoke-ValidationGate -Name 'PowerShell syntax' -Validation { Test-PowerShellSyntax }
     Invoke-PowerShellAnalyzerGate
     Invoke-ValidationGate -Name 'JSON parsing' -Validation { Test-JsonFile }
+    Invoke-ValidationGate -Name 'Evidence semantics' -Validation { Test-Evidence }
     Invoke-ValidationGate -Name 'Tracked-file secret scan' -Validation { Test-TrackedFileForSecret }
     Invoke-ValidationGate -Name 'Static site build' -Validation { Test-SiteBuild }
     Invoke-ValidationGate -Name 'Git whitespace check' -Validation { Test-GitDiff }

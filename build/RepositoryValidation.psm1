@@ -66,6 +66,19 @@ function Get-RepositoryJsonFile {
     return @(Get-RepositoryFile -RepositoryRoot $RepositoryRoot -PathSpec '*.json') | Sort-Object
 }
 
+function Get-RepositoryEvidenceJsonFile {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string] $RepositoryRoot
+    )
+
+    return @(
+        Get-RepositoryFile -RepositoryRoot $RepositoryRoot -PathSpec 'evidence/*.json' |
+            Where-Object { $_ -ne 'evidence/evidence-schema.json' }
+    ) | Sort-Object
+}
+
 function Test-ApprovedPasswordValue {
     [CmdletBinding()]
     param(
@@ -477,6 +490,7 @@ function Get-PSScriptAnalyzerGateResult {
 Export-ModuleMember -Function @(
     'Find-RepositorySecret',
     'Get-PSScriptAnalyzerGateResult',
+    'Get-RepositoryEvidenceJsonFile',
     'Get-RepositoryFile',
     'Get-RepositoryJsonFile',
     'Resolve-RepositoryDiffBase',

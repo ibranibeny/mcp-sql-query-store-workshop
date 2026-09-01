@@ -620,6 +620,15 @@ Describe 'ConvertTo-WorkshopEvidence' {
         $result.measuredPeaks.optimized | Should -BeExactly ([decimal]45)
     }
 
+    It 'rejects an exact utilization mismatch instead of deriving a false peak' {
+        $samples = Get-ValidSample
+        $samples[0].grantUtilizationPercent = [decimal]'79.999999'
+
+        { ConvertTo-WorkshopEvidence -RunRecord (Get-MeasuredRun) -Samples $samples `
+                -RequestSamples @() -Validation (Get-ValidValidation) -Outcome TargetMet } |
+            Should -Throw '*does not match grantedKb and totalKb*'
+    }
+
     It 'allows BaselineTargetNotReached only with baseline samples and a null optimized peak' {
         $run = Get-MeasuredRun
         $run.Phase = 'Baseline'

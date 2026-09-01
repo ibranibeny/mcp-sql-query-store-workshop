@@ -31,6 +31,36 @@ Describe 'Get-RepositoryJsonFile' {
     }
 }
 
+Describe 'Get-RepositoryEvidenceJsonFile' {
+    It 'returns tracked and unignored evidence JSON except the schema and ignored runs' {
+        $repository = Join-Path $TestDrive 'evidence-repository'
+        New-Item -ItemType Directory -Path (Join-Path $repository 'evidence/runs') -Force |
+            Out-Null
+        New-Item -ItemType Directory -Path (Join-Path $repository 'evidence/future') -Force |
+            Out-Null
+        git -C $repository init --quiet
+        Set-Content -LiteralPath (Join-Path $repository '.gitignore') -Value "evidence/runs/"
+        Set-Content -LiteralPath (Join-Path $repository 'evidence/evidence-schema.json') -Value '{}'
+        Set-Content -LiteralPath (Join-Path $repository 'evidence/tracked.json') -Value '{}'
+        Set-Content -LiteralPath (Join-Path $repository 'evidence/future/tracked.json') -Value '{}'
+        git -C $repository add .gitignore evidence/evidence-schema.json evidence/tracked.json
+        git -C $repository add evidence/future/tracked.json
+        git -C $repository -c user.name=Test -c user.email=test@example.invalid commit --quiet -m initial
+        Set-Content -LiteralPath (Join-Path $repository 'evidence/future.json') -Value '{}'
+        Set-Content -LiteralPath (Join-Path $repository 'evidence/future/untracked.json') -Value '{}'
+        Set-Content -LiteralPath (Join-Path $repository 'evidence/runs/ignored.json') -Value '{}'
+
+        $files = @(Get-RepositoryEvidenceJsonFile -RepositoryRoot $repository)
+
+        $files | Should -Be @(
+            'evidence/future.json'
+            'evidence/future/tracked.json'
+            'evidence/future/untracked.json'
+            'evidence/tracked.json'
+        )
+    }
+}
+
 Describe 'Find-RepositorySecret' {
     It 'detects each supported private-key header' -ForEach @(
         '',

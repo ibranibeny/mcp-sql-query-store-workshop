@@ -1,6 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/ibranibeny/mcp-sql-query-store-workshop/evidence/evidence-schema.json",
+  "$comment": "Draft 2020-12 validates this document's structure, but cannot assert that measuredPeaks equal maxima across samples. Peak equality and outcome consistency require evidence/validate_evidence.py semantic validation.",
   "title": "MCP SQL Query Store Workshop Evidence",
   "type": "object",
   "additionalProperties": false,
