@@ -135,6 +135,25 @@ function initializeNavigation() {
   });
 }
 
+function initializeSiteSearch() {
+  const form = document.querySelector("[data-site-search]");
+  const input = form?.querySelector("[data-site-search-input]");
+  const status = form?.querySelector("[data-site-search-status]");
+  if (!(form instanceof HTMLFormElement) || !(input instanceof HTMLInputElement) || !status) return;
+
+  form.addEventListener("submit", (event) => event.preventDefault());
+  input.addEventListener("input", () => {
+    const query = input.value.trim().toLocaleLowerCase();
+    let visible = 0;
+    document.querySelectorAll(".module-navigation .module-node").forEach((node) => {
+      const matches = !query || (node.textContent ?? "").toLocaleLowerCase().includes(query);
+      node.hidden = !matches;
+      if (matches) visible += 1;
+    });
+    status.textContent = query ? `${visible} pages shown.` : "All pages shown.";
+  });
+}
+
 function formNumber(form, selector) {
   const control = form.querySelector(selector);
   return control instanceof HTMLInputElement ? control.valueAsNumber : Number.NaN;
@@ -159,7 +178,7 @@ function initializeGrantCalculator() {
         formNumber(form, "#optimized-total-kb"),
       );
       const status = targetStatus(baseline, optimized);
-      output.textContent = `Entered utilization — baseline ${baseline.toFixed(1)}%; optimized ${optimized.toFixed(1)}%. Status: ${status}. TARGET bands: 75–85% and 35–45%.`;
+      output.textContent = `Entered utilization — baseline ${baseline.toFixed(1)}%; optimized ${optimized.toFixed(1)}%. Target-band check: ${status}. This is not a run outcome; correctness and secondary evidence are not evaluated. TARGET bands: 75–85% and 35–45%.`;
       const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
       output.scrollIntoView({ behavior: reducedMotion ? "auto" : "smooth", block: "nearest" });
     } catch (error) {
@@ -172,7 +191,8 @@ async function initializeMermaid() {
   if (!document.querySelector(".mermaid")) return;
   try {
     const { default: mermaid } = await import(MERMAID_MODULE_URL);
-    mermaid.initialize({ startOnLoad: false, securityLevel: "strict", theme: "dark" });
+    const theme = document.documentElement.dataset.theme === "dark" ? "dark" : "default";
+    mermaid.initialize({ startOnLoad: false, securityLevel: "strict", theme });
     await mermaid.run({ querySelector: ".mermaid" });
   } catch {
     document.documentElement.dataset.diagramStatus = "unavailable";
@@ -182,6 +202,7 @@ async function initializeMermaid() {
 function initializeWorkbench() {
   document.documentElement.classList.add("js");
   initializeNavigation();
+  initializeSiteSearch();
   initializeProgress();
   initializeCopyControls();
   initializeGrantCalculator();

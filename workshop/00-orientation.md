@@ -1,5 +1,7 @@
 # Orientation and safety contract
 
+**Instruction: 15 minutes · Workshop elapsed: 15 minutes**
+
 ## Primary workshop goal
 
 Use **GitHub Copilot**, grounded by **Microsoft SQL MCP** and verified SQL Server evidence, to help a DBA optimize a complex stored procedure while preserving its result contract. Copilot proposes and explains; the DBA validates, measures, and decides.
@@ -33,9 +35,19 @@ This is a **target**, not a measured result. It is not a claim about Task Manage
 - Stop when a timeout, safety threshold, unexpected object, or unapproved cost boundary is encountered.
 - Azure deployment is a separate billable action. Repository build and test commands create no Azure resources.
 
+### Licensing and cost attestations
+
+Before Azure creation, the facilitator must separately attest eligibility to run the Windows 11 Enterprise client image, acknowledge SQL Server 2022 Enterprise PAYG cost, and acknowledge every billable resource category. Azure Hybrid Benefit is not assumed. Marketplace visibility does not prove license eligibility.
+
+The deployment plan card lists the Windows and SQL VMs, managed disks, NAT Gateway, and public IP resources. Stop and ask the subscription owner if any category is unexpected. A failed or incomplete preflight means **no deployment**.
+
+### Operational stop conditions
+
+Stop only the tagged workshop workload when host used memory exceeds 87.5%, host available memory falls below 8 GiB, a SQL low-memory signal appears, SQL health fails twice, the lab marker disappears, a worker times out, the manual stop is requested, or the global ten-minute deadline is reached. Do not respond by increasing pressure or weakening safeguards.
+
 [!DOC-VERIFIED] The SQL MCP and SQL Server authorization claims above link to their official Microsoft Learn sources.
 
-[!SUBSCRIPTION-VALIDATED] Subscription-specific availability must be revalidated by the deployment preflight at the time of use.
+[!ASSUMPTION] Subscription-specific availability must be revalidated by the deployment preflight at the time of use.
 
 ## Evidence language
 
@@ -46,3 +58,12 @@ This is a **target**, not a measured result. It is not a claim about Task Manage
 | `LAB-MEASURED` | Captured from an actual workshop run. |
 | `ASSUMPTION` | Requires facilitator validation before use. |
 | `TARGET` | Desired outcome; never presented as an observed result. |
+
+## Before continuing
+
+- State the primary goal in one sentence without saying that Copilot makes the decision.
+- Identify the exact 80% → 40% denominator: the workshop pool's regular query-workspace semaphore.
+- Confirm production use is prohibited and name the manual stop script.
+- Confirm that `SUBSCRIPTION-VALIDATED` expires as capacity, policy, quota, and image availability change.
+
+![Workshop home after local validation](docs/images/local-home.png)

@@ -1,0 +1,216 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="An evidence-driven L400 workshop for optimizing a SQL Server stored procedure with GitHub Copilot and Microsoft SQL MCP.">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'sha256-n2HSwPq71BFLjgICami4p3JNMXLLnlGn5P5K8dJEyHk=' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https://cdn.jsdelivr.net; object-src 'none'; base-uri 'none'; form-action 'self'; upgrade-insecure-requests">
+  <title>Optimize and prove | MCP SQL Query Store Workshop</title>
+  <link rel="stylesheet" href="assets/styles.css">
+  <script>(() => { const param = new URLSearchParams(window.location.search).get("scoutTheme"); const theme = param || (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"); document.documentElement.setAttribute("data-theme", theme); })();</script>
+  <script type="module" src="assets/app.js"></script>
+</head>
+<body data-page-route="06-optimize-and-prove.html">
+  <a class="skip-link" href="#main-content">Skip to main content</a>
+  <header class="site-header">
+    <div>
+      <p class="site-kicker">SQL PERFORMANCE LAB // EVIDENCE FIRST</p>
+      <p class="site-title"><a href="index.html">MCP SQL Query Store Workshop</a></p>
+      <p class="site-description">An evidence-driven L400 workshop for optimizing a SQL Server stored procedure with GitHub Copilot and Microsoft SQL MCP.</p>
+    </div>
+    <button class="nav-toggle" type="button" data-nav-toggle aria-controls="module-navigation" aria-expanded="false">
+      <span aria-hidden="true">☰</span>
+      Modules
+    </button>
+  </header>
+  <nav id="module-navigation" class="module-navigation" aria-label="Workshop modules" data-open="false">
+    <form class="site-search" role="search" data-site-search>
+      <label for="site-search-input">Filter workshop pages</label>
+      <input id="site-search-input" type="search" autocomplete="off" placeholder="Search titles and phases" data-site-search-input>
+      <span role="status" aria-live="polite" data-site-search-status></span>
+    </form>
+    <ol><!---->
+      <li class="module-node">
+        <a class="module-node-link" href="index.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop 00</span>
+          <span class="module-title">Orientation and safety contract</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="01-mcp-and-copilot.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop 01</span>
+          <span class="module-title">MCP, SQL MCP Server, and GitHub Copilot</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="02-scenario-and-architecture.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop 02</span>
+          <span class="module-title">Scenario and two-tier architecture</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="03-deploy-with-powershell.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop 03</span>
+          <span class="module-title">Deploy with native Az PowerShell</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="04-create-memory-pressure.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop 04</span>
+          <span class="module-title">Create bounded query-memory pressure</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="05-investigate-with-vscode.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop 05</span>
+          <span class="module-title">Investigate from VS Code</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="06-optimize-and-prove.html" aria-current="page">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop 06</span>
+          <span class="module-title">Optimize and prove</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="07-teardown.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop 07</span>
+          <span class="module-title">Teardown and review</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="facilitator-guide.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Facilitator resource</span>
+          <span class="module-title">Facilitator guide</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="attendee-guide.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop resource</span>
+          <span class="module-title">Attendee guide</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="troubleshooting.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop resource</span>
+          <span class="module-title">Troubleshooting</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="evidence-and-sources.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop resource</span>
+          <span class="module-title">Evidence and official sources</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="investigation-prompts.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop resource</span>
+          <span class="module-title">Investigation prompt book</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="prompt-evaluation-rubric.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop resource</span>
+          <span class="module-title">Prompt evaluation rubric</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="offline-dependencies.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop resource</span>
+          <span class="module-title">Offline development dependencies</span>
+        </a>
+      </li>
+      <!---->
+    </ol>
+  </nav>
+  <main id="main-content" tabindex="-1">
+
+<article>
+  <header class="module-header">
+    <p class="module-meta">Workshop 06 · 55 minutes</p>
+    <h1>Optimize and prove</h1>
+    <div class="progress-control">
+      <button type="button" data-progress-toggle data-module-id="06-optimize-and-prove.html" aria-pressed="false">
+        Mark module complete
+      </button>
+      <span role="status" data-progress-status aria-live="polite">Progress is stored only in this browser.</span>
+    </div>
+  </header>
+  <aside class="evidence-workbench" aria-labelledby="evidence-path-title">
+    <p class="workbench-label">DBA DECISION PATH</p>
+    <h2 id="evidence-path-title">Move claims through evidence</h2>
+    <ol class="evidence-path">
+      <li data-evidence-stage="hypothesis">TARGET / HYPOTHESIS</li>
+      <li data-evidence-stage="measured">MEASURED</li>
+      <li data-evidence-stage="decision">DECISION</li>
+    </ol>
+  </aside>
+  <div class="workshop-content">
+    <h1 id="optimize-and-prove">Optimize and prove<a class="headerlink" href="#optimize-and-prove" title="Permanent link">&para;</a></h1>
+<p><strong>Instruction: 55 minutes · Workshop elapsed: 340 minutes</strong></p>
+<h2 id="use-an-evidence-first-copilot-workflow">Use an evidence-first Copilot workflow<a class="headerlink" href="#use-an-evidence-first-copilot-workflow" title="Permanent link">&para;</a></h2>
+<p>Require every analysis to separate <strong>Observations</strong>, <strong>Missing evidence</strong>, <strong>Hypotheses ranked by confidence</strong>, <strong>Proposed experiments</strong>, <strong>Candidate changes</strong>, <strong>Risks and rollback</strong>, and <strong>Validation criteria</strong>. Copilot assists the workflow; the DBA owns approvals and the final decision.</p>
+<p>Start with the actual baseline source in <code>sql/04-CreateBaselineProcedure.sql</code>. Correlate its non-SARGable date conversion, wide intermediate payload, repeated fact access, late aggregation, hash/sort operators, estimates, actual rows, grants, spills, waits, and Query Store windows. Do not infer causality from one plan or execution.</p>
+<h2 id="create-a-side-by-side-candidate">Create a side-by-side candidate<a class="headerlink" href="#create-a-side-by-side-candidate" title="Permanent link">&para;</a></h2>
+<p>Review the reference candidate in <code>sql/06-CreateOptimizedProcedure.sql</code>: half-open SARGable dates, early filtering/projection, one fact access path, pre-aggregation at output grain, and ranking after the narrow aggregate. Keep the baseline intact. The candidate must preserve parameter names, types, defaults, validation behavior, result columns/types/null semantics, values, row identity, and contractual ordering.</p>
+<h2 id="correctness-is-the-first-gate">Correctness is the first gate<a class="headerlink" href="#correctness-is-the-first-gate" title="Permanent link">&para;</a></h2>
+<p>Run <code>sql/07-ValidateEquivalence.sql</code>. It covers at least eight parameter cases and compares first-result metadata, row counts, deterministic hashes, baseline <code>EXCEPT</code> candidate, and candidate <code>EXCEPT</code> baseline. Any mismatch rejects the candidate and blocks performance acceptance. Do not edit a correctness test merely to approve the candidate.</p>
+<h2 id="freeze-and-measure">Freeze and measure<a class="headerlink" href="#freeze-and-measure" title="Permanent link">&para;</a></h2>
+<p>Use the worker count, parameter schedule, dataset, indexes, statistics, Resource Governor pool/group, server memory, database-scoped settings, and Query Store state serialized during baseline calibration. The workload controller then performs exactly twelve interleaved trials in <code>ABBA BAAB ABBA</code> order.</p>
+<p>Compare peak and median pool grant utilization, duration, CPU, logical reads, spills, wait time, and completed requests. Link each number to run ID, UTC window, Query ID/Plan ID, units, and evidence classification. The <span class="evidence-label" data-evidence-label="TARGET">TARGET</span> baseline is 75–85% and optimized is 35–45%, but the report must preserve the actual outcome. Useful movement outside the bands is <code>ImprovedOutsideTarget</code>; inability to calibrate is <code>BaselineTargetNotReached</code>.</p>
+<h2 id="export-reviewed-evidence">Export reviewed evidence<a class="headerlink" href="#export-reviewed-evidence" title="Permanent link">&para;</a></h2>
+<p>Pass the completed workload object to the implemented export entry point:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="p">./</span><span class="n">workload</span><span class="p">/</span><span class="nb">Export-WorkshopEvidence</span><span class="p">.</span><span class="n">ps1</span> <span class="n">-RunId</span> <span class="nv">$runId</span> <span class="n">-Evidence</span> <span class="nv">$evidence</span>
+</code></pre></div>
+<p>The export validates semantic consistency and writes under <code>evidence/runs/&lt;run-id&gt;/</code>. Generated runs remain ignored until a human reviews provenance and redaction.</p>
+<h2 id="optional-query-store-hint-separate-and-reversible">Optional Query Store hint: separate and reversible<a class="headerlink" href="#optional-query-store-hint-separate-and-reversible" title="Permanent link">&para;</a></h2>
+<p>Only after foundational query/index/statistics analysis, use <code>sql/08-OptionalQueryStoreHint.sql</code> as a separate mitigation experiment. Capture pre-state, apply only the bounded supported hint when evidence justifies it, inspect status/failure details, repeat measurement, clear the hint, and verify removal. Never combine hint evidence with the foundational candidate result or leave the hint silently active. <span class="evidence-label" data-evidence-label="DOC-VERIFIED">DOC-VERIFIED</span> See <a href="https://learn.microsoft.com/en-us/sql/relational-databases/performance/query-store-hints?view=sql-server-ver17">Query Store hints</a>.</p>
+<h2 id="decision-record">Decision record<a class="headerlink" href="#decision-record" title="Permanent link">&para;</a></h2>
+<p>Retain a candidate only when correctness passes, grant utilization materially improves, at least one secondary metric improves, and no primary metric materially regresses. Otherwise reject or continue experimentation. Record limitations, rollback, and unresolved parameter sensitivity.</p>
+  </div>
+
+</article>
+<nav class="page-navigation" aria-label="Previous and next pages">
+
+  <a rel="prev" href="05-investigate-with-vscode.html">Previous: Investigate from VS Code</a>
+
+
+  <a rel="next" href="07-teardown.html">Next: Teardown and review</a>
+
+</nav>
+
+  </main>
+  <footer class="site-footer">
+    <p>Evidence-driven SQL tuning with human review. Do not run the workshop workload against production.</p>
+  </footer>
+</body>
+</html>

@@ -1,0 +1,240 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="An evidence-driven L400 workshop for optimizing a SQL Server stored procedure with GitHub Copilot and Microsoft SQL MCP.">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'sha256-n2HSwPq71BFLjgICami4p3JNMXLLnlGn5P5K8dJEyHk=' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https://cdn.jsdelivr.net; object-src 'none'; base-uri 'none'; form-action 'self'; upgrade-insecure-requests">
+  <title>Scenario and two-tier architecture | MCP SQL Query Store Workshop</title>
+  <link rel="stylesheet" href="assets/styles.css">
+  <script>(() => { const param = new URLSearchParams(window.location.search).get("scoutTheme"); const theme = param || (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"); document.documentElement.setAttribute("data-theme", theme); })();</script>
+  <script type="module" src="assets/app.js"></script>
+</head>
+<body data-page-route="02-scenario-and-architecture.html">
+  <a class="skip-link" href="#main-content">Skip to main content</a>
+  <header class="site-header">
+    <div>
+      <p class="site-kicker">SQL PERFORMANCE LAB // EVIDENCE FIRST</p>
+      <p class="site-title"><a href="index.html">MCP SQL Query Store Workshop</a></p>
+      <p class="site-description">An evidence-driven L400 workshop for optimizing a SQL Server stored procedure with GitHub Copilot and Microsoft SQL MCP.</p>
+    </div>
+    <button class="nav-toggle" type="button" data-nav-toggle aria-controls="module-navigation" aria-expanded="false">
+      <span aria-hidden="true">☰</span>
+      Modules
+    </button>
+  </header>
+  <nav id="module-navigation" class="module-navigation" aria-label="Workshop modules" data-open="false">
+    <form class="site-search" role="search" data-site-search>
+      <label for="site-search-input">Filter workshop pages</label>
+      <input id="site-search-input" type="search" autocomplete="off" placeholder="Search titles and phases" data-site-search-input>
+      <span role="status" aria-live="polite" data-site-search-status></span>
+    </form>
+    <ol><!---->
+      <li class="module-node">
+        <a class="module-node-link" href="index.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop 00</span>
+          <span class="module-title">Orientation and safety contract</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="01-mcp-and-copilot.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop 01</span>
+          <span class="module-title">MCP, SQL MCP Server, and GitHub Copilot</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="02-scenario-and-architecture.html" aria-current="page">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop 02</span>
+          <span class="module-title">Scenario and two-tier architecture</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="03-deploy-with-powershell.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop 03</span>
+          <span class="module-title">Deploy with native Az PowerShell</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="04-create-memory-pressure.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop 04</span>
+          <span class="module-title">Create bounded query-memory pressure</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="05-investigate-with-vscode.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop 05</span>
+          <span class="module-title">Investigate from VS Code</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="06-optimize-and-prove.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop 06</span>
+          <span class="module-title">Optimize and prove</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="07-teardown.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop 07</span>
+          <span class="module-title">Teardown and review</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="facilitator-guide.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Facilitator resource</span>
+          <span class="module-title">Facilitator guide</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="attendee-guide.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop resource</span>
+          <span class="module-title">Attendee guide</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="troubleshooting.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop resource</span>
+          <span class="module-title">Troubleshooting</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="evidence-and-sources.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop resource</span>
+          <span class="module-title">Evidence and official sources</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="investigation-prompts.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop resource</span>
+          <span class="module-title">Investigation prompt book</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="prompt-evaluation-rubric.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop resource</span>
+          <span class="module-title">Prompt evaluation rubric</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="offline-dependencies.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop resource</span>
+          <span class="module-title">Offline development dependencies</span>
+        </a>
+      </li>
+      <!---->
+    </ol>
+  </nav>
+  <main id="main-content" tabindex="-1">
+
+<article>
+  <header class="module-header">
+    <p class="module-meta">Workshop 02 · 25 minutes</p>
+    <h1>Scenario and two-tier architecture</h1>
+    <div class="progress-control">
+      <button type="button" data-progress-toggle data-module-id="02-scenario-and-architecture.html" aria-pressed="false">
+        Mark module complete
+      </button>
+      <span role="status" data-progress-status aria-live="polite">Progress is stored only in this browser.</span>
+    </div>
+  </header>
+  <aside class="evidence-workbench" aria-labelledby="evidence-path-title">
+    <p class="workbench-label">DBA DECISION PATH</p>
+    <h2 id="evidence-path-title">Move claims through evidence</h2>
+    <ol class="evidence-path">
+      <li data-evidence-stage="hypothesis">TARGET / HYPOTHESIS</li>
+      <li data-evidence-stage="measured">MEASURED</li>
+      <li data-evidence-stage="decision">DECISION</li>
+    </ol>
+  </aside>
+  <div class="workshop-content">
+    <h1 id="scenario-and-two-tier-architecture">Scenario and two-tier architecture<a class="headerlink" href="#scenario-and-two-tier-architecture" title="Permanent link">&para;</a></h1>
+<p><strong>Instruction: 25 minutes · Workshop elapsed: 75 minutes</strong></p>
+<p>Adventure Works has a month-end sales procedure whose wide, late, repeated processing can consume a large share of an isolated query-workspace pool. The team needs a contract-equivalent candidate and evidence that survives skeptical review.</p>
+<h2 id="two-vm-trust-boundary">Two-VM trust boundary<a class="headerlink" href="#two-vm-trust-boundary" title="Permanent link">&para;</a></h2>
+<pre class="mermaid">flowchart LR
+  U["Facilitator workstation"] --&gt;|"TCP 3389, source IPv4 /32"| P["Admin public IP"]
+  P --&gt; AN["Admin NSG + ASG"] --&gt; A["Windows 11 Enterprise admin VM"]
+  A --&gt;|"Private DNS + validated TLS, TCP 1433"| SN["SQL NSG + ASG"] --&gt; S["SQL Server 2022 Enterprise VM&lt;br/&gt;10.20.2.10, no public IP"]
+  A --&gt; NAT["NAT Gateway"] --&gt; I["Outbound package and source endpoints"]
+  S --&gt; NAT</pre>
+<p>The VNet is <code>10.20.0.0/16</code>; admin and SQL subnets are <code>10.20.1.0/24</code> and <code>10.20.2.0/24</code>. <strong>The SQL VM has no public IP.</strong> The admin VM is the only public ingress point, restricted to TCP 3389 from one facilitator IPv4 <code>/32</code>. The SQL NSG permits private TCP 1433 and private RDP only from the admin ASG, then denies other VNet-initiated SQL-tier traffic. No UDP 1434 rule exists. Both subnets disable default outbound access and use NAT Gateway for outbound-only connectivity. <span class="evidence-label" data-evidence-label="DOC-VERIFIED">DOC-VERIFIED</span> See <a href="https://learn.microsoft.com/en-us/azure/virtual-network/ip-services/default-outbound-access">default outbound access</a>, <a href="https://learn.microsoft.com/en-us/azure/nat-gateway/nat-gateway-design">NAT Gateway design</a>, and <a href="https://learn.microsoft.com/en-us/azure/virtual-network/application-security-groups">application security groups</a>.</p>
+<h2 id="full-evidence-sequence">Full evidence sequence<a class="headerlink" href="#full-evidence-sequence" title="Permanent link">&para;</a></h2>
+<pre class="mermaid">sequenceDiagram
+  autonumber
+  actor DBA
+  participant PS as Az PowerShell
+  participant AZ as Azure
+  participant VS as VS Code + Copilot
+  participant MSSQL as MSSQL extension
+  participant MCP as DAB SQL MCP
+  participant SQL as Private SQL Server
+  participant QS as Query Store
+  DBA-&gt;&gt;PS: Run read-only preflight
+  PS-&gt;&gt;AZ: Read context, providers, quota, SKUs, images, policy
+  AZ--&gt;&gt;PS: Current subscription evidence
+  DBA-&gt;&gt;PS: Review plan, attest three boundaries, approve deployment
+  PS-&gt;&gt;AZ: Create network, VMs, bootstrap, and positive readbacks
+  DBA-&gt;&gt;VS: Connect from admin VM
+  VS-&gt;&gt;MSSQL: Inspect schema, procedure, actual plans
+  MSSQL-&gt;&gt;SQL: Encrypted private TDS
+  VS-&gt;&gt;MCP: tools/list then approved tools/call
+  MCP-&gt;&gt;SQL: Execute allowlisted bounded diagnostics
+  SQL-&gt;&gt;QS: Persist plans, runtime, and waits
+  SQL--&gt;&gt;MCP: Typed evidence
+  MCP--&gt;&gt;VS: Structured result
+  VS--&gt;&gt;DBA: Observations, gaps, hypotheses, experiments
+  DBA-&gt;&gt;SQL: Approve candidate beside baseline
+  DBA-&gt;&gt;SQL: Prove equivalence then run frozen A/B trials
+  SQL--&gt;&gt;DBA: Actual outcome and evidence bundle
+  DBA-&gt;&gt;PS: Delete and prove absence</pre>
+<h2 id="verification-exercise">Verification exercise<a class="headerlink" href="#verification-exercise" title="Permanent link">&para;</a></h2>
+<p>After deployment, inspect the plan-card and boundary-readback output. Record pass/fail for: admin NIC has one public IP; SQL NIC has none; public RDP source ends <code>/32</code>; no public 1433/1434 allow exists; SQL private IP is <code>10.20.2.10</code>; both subnets reference NAT; private DNS resolves <code>sql01.mcpworkshop.internal</code>; and remote SQL reports encrypted transport. If any check fails, do not run the workload.</p>
+<aside class="screenshot-pending" role="note" data-screenshot-file="local-architecture.png"><strong>Screenshot pending verified milestone</strong><span>Architecture route after local validation · local-architecture.png</span></aside>
+<aside class="screenshot-pending" role="note" data-screenshot-file="azure-02-network.png"><strong>Screenshot pending verified milestone</strong><span>Azure network verification · azure-02-network.png</span></aside>
+<aside class="screenshot-pending" role="note" data-screenshot-file="azure-03-vms.png"><strong>Screenshot pending verified milestone</strong><span>Azure VM boundary verification · azure-03-vms.png</span></aside>
+  </div>
+
+</article>
+<nav class="page-navigation" aria-label="Previous and next pages">
+
+  <a rel="prev" href="01-mcp-and-copilot.html">Previous: MCP, SQL MCP Server, and GitHub Copilot</a>
+
+
+  <a rel="next" href="03-deploy-with-powershell.html">Next: Deploy with native Az PowerShell</a>
+
+</nav>
+
+  </main>
+  <footer class="site-footer">
+    <p>Evidence-driven SQL tuning with human review. Do not run the workshop workload against production.</p>
+  </footer>
+</body>
+</html>

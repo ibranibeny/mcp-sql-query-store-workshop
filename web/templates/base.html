@@ -4,9 +4,10 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="description" content="{{ site.description }}">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https://cdn.jsdelivr.net; object-src 'none'; base-uri 'none'; form-action 'self'; upgrade-insecure-requests">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'sha256-n2HSwPq71BFLjgICami4p3JNMXLLnlGn5P5K8dJEyHk=' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https://cdn.jsdelivr.net; object-src 'none'; base-uri 'none'; form-action 'self'; upgrade-insecure-requests">
   <title>{{ page.title }} | {{ site.title }}</title>
   <link rel="stylesheet" href="{{ asset_prefix }}/styles.css">
+  <script>(() => { const param = new URLSearchParams(window.location.search).get("scoutTheme"); const theme = param || (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"); document.documentElement.setAttribute("data-theme", theme); })();</script>
   <script type="module" src="{{ asset_prefix }}/app.js"></script>
 </head>
 <body data-page-route="{{ page.route }}">
@@ -23,6 +24,11 @@
     </button>
   </header>
   <nav id="module-navigation" class="module-navigation" aria-label="Workshop modules" data-open="false">
+    <form class="site-search" role="search" data-site-search>
+      <label for="site-search-input">Filter workshop pages</label>
+      <input id="site-search-input" type="search" autocomplete="off" placeholder="Search titles and phases" data-site-search-input>
+      <span role="status" aria-live="polite" data-site-search-status></span>
+    </form>
     <ol><!--{% for item in pages %}-->
       <li class="module-node">
         <a class="module-node-link" href="{{ item.href }}"{% if item.route == page.route %} aria-current="page"{% endif %}>

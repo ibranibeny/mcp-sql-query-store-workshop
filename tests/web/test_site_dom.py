@@ -131,25 +131,35 @@ def test_page_has_evidence_path_and_progressive_grant_calculator(tmp_path: Path)
     assert "LAB-MEASURED" not in form.get_text(" ", strip=True)
 
 
-def test_assets_define_exact_palette_typography_and_accessibility_rules(tmp_path: Path) -> None:
+def test_assets_define_exact_clawpilot_theme_typography_and_accessibility_rules(tmp_path: Path) -> None:
     destination, _ = build_pages(tmp_path)
     css = (destination / "assets/styles.css").read_text(encoding="utf-8")
 
     expected_tokens = {
-        "--canvas": "#07131f",
-        "--panel": "#0d2233",
-        "--text": "#e7f2f8",
-        "--muted": "#9ab0bf",
-        "--evidence-measured": "#35d0e8",
-        "--evidence-hypothesis": "#f1b84b",
-        "--safety-stop": "#ff5a65",
-        "--decision": "#59d98e",
+        "--cp-bg": ("#f7f4ef", "#3d3b3a"),
+        "--cp-bg-elevated": ("#fcfbf8", "#343231"),
+        "--cp-surface": ("#ffffff", "#292929"),
+        "--cp-surface-soft": ("#f5f5f5", "#2e2e2e"),
+        "--cp-border": ("#dedede", "#474747"),
+        "--cp-border-strong": ("#919191", "#5f5f5f"),
+        "--cp-text": ("#242424", "#dedede"),
+        "--cp-text-muted": ("#5c5c5c", "#919191"),
+        "--cp-text-soft": ("#6f6f6f", "#b0b0b0"),
+        "--cp-accent": ("#b11f4b", "#fd8ea1"),
+        "--cp-accent-hover": ("#9a1a41", "#fb7b91"),
+        "--cp-accent-soft": ("rgba(177, 31, 75, 0.08)", "rgba(253, 142, 161, 0.14)"),
+        "--cp-accent-fg": ("#ffffff", "#1a1a1a"),
+        "--cp-success": ("#16a34a", "#4ade80"),
+        "--cp-danger": ("#dc2626", "#f87171"),
+        "--cp-warning": ("#f59e0b", "#fbbf24"),
+        "--cp-link": ("#0078d4", "#4da6ff"),
     }
-    for token, value in expected_tokens.items():
-        assert re.search(rf"{re.escape(token)}\s*:\s*{re.escape(value)}\s*;", css, re.IGNORECASE)
+    for token, values in expected_tokens.items():
+        for value in values:
+            assert re.search(rf"{re.escape(token)}\s*:\s*{re.escape(value)}\s*;", css, re.IGNORECASE)
 
-    assert "IBM Plex Sans" in css
-    assert "Cascadia Code" in css
+    assert '"Segoe UI", Aptos, Calibri' in css
+    assert 'Consolas, "Courier New", Courier, monospace' in css
     assert "min-height: 44px" in css
     assert ":focus-visible" in css
     assert "@media (max-width: 960px)" in css
@@ -161,6 +171,9 @@ def test_assets_define_exact_palette_typography_and_accessibility_rules(tmp_path
     assert "linear-gradient" not in css
     assert "backdrop-filter" not in css
 
+    declarations = re.sub(r"--cp-[\w-]+\s*:\s*[^;]+;", "", css)
+    assert not re.search(r"#[0-9a-f]{3,8}|rgba?\(|hsla?\(", declarations, re.IGNORECASE)
+
 
 def test_scripts_are_csp_friendly_pinned_modules(tmp_path: Path) -> None:
     _, pages = build_pages(tmp_path)
@@ -168,13 +181,17 @@ def test_scripts_are_csp_friendly_pinned_modules(tmp_path: Path) -> None:
 
     local_module = soup.select_one('script[type="module"][src$="assets/app.js"]')
     assert local_module is not None
+    scripts = soup.select("script")
+    assert scripts[0].get("src") is None
+    assert scripts[0].string.strip() == '(() => { const param = new URLSearchParams(window.location.search).get("scoutTheme"); const theme = param || (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"); document.documentElement.setAttribute("data-theme", theme); })();'
     app = (ROOT / "web/assets/app.js").read_text(encoding="utf-8")
     assert "https://cdn.jsdelivr.net/npm/mermaid@11.12.0/dist/mermaid.esm.min.mjs" in app
-    assert not soup.select("script:not([src])")
+    assert len(soup.select("script:not([src])")) == 1
     csp = soup.select_one('meta[http-equiv="Content-Security-Policy"]')["content"]
-    assert "script-src 'self' https://cdn.jsdelivr.net" in csp
+    assert "script-src 'self'" in csp and "https://cdn.jsdelivr.net" in csp
+    assert "'sha256-n2HSwPq71BFLjgICami4p3JNMXLLnlGn5P5K8dJEyHk='" in csp
     assert "style-src 'self' 'unsafe-inline'" in csp
-    assert "script-src 'self' 'unsafe-inline'" not in csp
+    assert "'unsafe-inline' https://cdn.jsdelivr.net" not in csp
     assert "'unsafe-eval'" not in csp
 
 
@@ -189,6 +206,7 @@ def test_script_contracts_cover_helpers_and_safe_dom_adapters(tmp_path: Path) ->
     assert "mcp-sql-workshop:v1:module-progress" in script
     assert "data-nav-toggle" in script
     assert "data-grant-calculator" in script
+    assert "data-site-search" in script
     assert 'querySelectorAll("pre:not(.mermaid)")' in script
     assert "event.target instanceof Element" in script
     assert "textContent" in script

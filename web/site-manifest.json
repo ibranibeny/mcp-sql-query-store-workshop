@@ -10,13 +10,120 @@
       "route": "index.html",
       "title": "Orientation and safety contract",
       "phase": "Workshop 00",
-      "durationMinutes": 15
+      "durationMinutes": 15,
+      "instructionMinutes": 15,
+      "breakAfterMinutes": 0
+    },
+    {
+      "source": "workshop/01-mcp-and-copilot.md",
+      "route": "01-mcp-and-copilot.html",
+      "title": "MCP, SQL MCP Server, and GitHub Copilot",
+      "phase": "Workshop 01",
+      "durationMinutes": 35,
+      "instructionMinutes": 35,
+      "breakAfterMinutes": 0
+    },
+    {
+      "source": "workshop/02-scenario-and-architecture.md",
+      "route": "02-scenario-and-architecture.html",
+      "title": "Scenario and two-tier architecture",
+      "phase": "Workshop 02",
+      "durationMinutes": 25,
+      "instructionMinutes": 25,
+      "breakAfterMinutes": 0
+    },
+    {
+      "source": "workshop/03-deploy-with-powershell.md",
+      "route": "03-deploy-with-powershell.html",
+      "title": "Deploy with native Az PowerShell",
+      "phase": "Workshop 03",
+      "durationMinutes": 70,
+      "instructionMinutes": 60,
+      "breakAfterMinutes": 10
+    },
+    {
+      "source": "workshop/04-create-memory-pressure.md",
+      "route": "04-create-memory-pressure.html",
+      "title": "Create bounded query-memory pressure",
+      "phase": "Workshop 04",
+      "durationMinutes": 65,
+      "instructionMinutes": 65,
+      "breakAfterMinutes": 0
+    },
+    {
+      "source": "workshop/05-investigate-with-vscode.md",
+      "route": "05-investigate-with-vscode.html",
+      "title": "Investigate from VS Code",
+      "phase": "Workshop 05",
+      "durationMinutes": 75,
+      "instructionMinutes": 65,
+      "breakAfterMinutes": 10
+    },
+    {
+      "source": "workshop/06-optimize-and-prove.md",
+      "route": "06-optimize-and-prove.html",
+      "title": "Optimize and prove",
+      "phase": "Workshop 06",
+      "durationMinutes": 55,
+      "instructionMinutes": 55,
+      "breakAfterMinutes": 0
+    },
+    {
+      "source": "workshop/07-teardown.md",
+      "route": "07-teardown.html",
+      "title": "Teardown and review",
+      "phase": "Workshop 07",
+      "durationMinutes": 20,
+      "instructionMinutes": 20,
+      "breakAfterMinutes": 0
     },
     {
       "source": "docs/facilitator-guide.md",
       "route": "facilitator-guide.html",
       "title": "Facilitator guide",
       "phase": "Facilitator resource",
+      "durationMinutes": 0
+    },
+    {
+      "source": "docs/attendee-guide.md",
+      "route": "attendee-guide.html",
+      "title": "Attendee guide",
+      "phase": "Workshop resource",
+      "durationMinutes": 0
+    },
+    {
+      "source": "docs/troubleshooting.md",
+      "route": "troubleshooting.html",
+      "title": "Troubleshooting",
+      "phase": "Workshop resource",
+      "durationMinutes": 0
+    },
+    {
+      "source": "docs/evidence-and-sources.md",
+      "route": "evidence-and-sources.html",
+      "title": "Evidence and official sources",
+      "phase": "Workshop resource",
+      "durationMinutes": 0
+    },
+    {
+      "source": "prompts/investigation-prompts.md",
+      "route": "investigation-prompts.html",
+      "title": "Investigation prompt book",
+      "phase": "Workshop resource",
+      "durationMinutes": 0
+    },
+    {
+      "source": "prompts/prompt-evaluation-rubric.md",
+      "route": "prompt-evaluation-rubric.html",
+      "title": "Prompt evaluation rubric",
+      "phase": "Workshop resource",
+      "durationMinutes": 0
+    },
+    {
+      "source": "docs/offline-dependencies.md",
+      "route": "offline-dependencies.html",
+      "title": "Offline development dependencies",
+      "phase": "Workshop resource",
       "durationMinutes": 0
     }
   ]

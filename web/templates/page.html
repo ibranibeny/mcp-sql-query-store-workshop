@@ -3,7 +3,7 @@
 {% block content %}
 <article>
   <header class="module-header">
-    <p class="module-meta">{{ page.phase }} · {{ page.durationMinutes }} minutes</p>
+    <p class="module-meta">{{ page.phase }} · {{ page.get('instructionMinutes', page.durationMinutes) }} minutes{% if page.get('breakAfterMinutes', 0) %} + {{ page.breakAfterMinutes }}-minute break{% endif %}</p>
     <h1>{{ page.title }}</h1>
     <div class="progress-control">
       <button type="button" data-progress-toggle data-module-id="{{ page.route }}" aria-pressed="false">

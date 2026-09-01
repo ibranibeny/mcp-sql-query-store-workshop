@@ -1,0 +1,332 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="An evidence-driven L400 workshop for optimizing a SQL Server stored procedure with GitHub Copilot and Microsoft SQL MCP.">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'sha256-n2HSwPq71BFLjgICami4p3JNMXLLnlGn5P5K8dJEyHk=' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https://cdn.jsdelivr.net; object-src 'none'; base-uri 'none'; form-action 'self'; upgrade-insecure-requests">
+  <title>Evidence and official sources | MCP SQL Query Store Workshop</title>
+  <link rel="stylesheet" href="assets/styles.css">
+  <script>(() => { const param = new URLSearchParams(window.location.search).get("scoutTheme"); const theme = param || (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"); document.documentElement.setAttribute("data-theme", theme); })();</script>
+  <script type="module" src="assets/app.js"></script>
+</head>
+<body data-page-route="evidence-and-sources.html">
+  <a class="skip-link" href="#main-content">Skip to main content</a>
+  <header class="site-header">
+    <div>
+      <p class="site-kicker">SQL PERFORMANCE LAB // EVIDENCE FIRST</p>
+      <p class="site-title"><a href="index.html">MCP SQL Query Store Workshop</a></p>
+      <p class="site-description">An evidence-driven L400 workshop for optimizing a SQL Server stored procedure with GitHub Copilot and Microsoft SQL MCP.</p>
+    </div>
+    <button class="nav-toggle" type="button" data-nav-toggle aria-controls="module-navigation" aria-expanded="false">
+      <span aria-hidden="true">☰</span>
+      Modules
+    </button>
+  </header>
+  <nav id="module-navigation" class="module-navigation" aria-label="Workshop modules" data-open="false">
+    <form class="site-search" role="search" data-site-search>
+      <label for="site-search-input">Filter workshop pages</label>
+      <input id="site-search-input" type="search" autocomplete="off" placeholder="Search titles and phases" data-site-search-input>
+      <span role="status" aria-live="polite" data-site-search-status></span>
+    </form>
+    <ol><!---->
+      <li class="module-node">
+        <a class="module-node-link" href="index.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop 00</span>
+          <span class="module-title">Orientation and safety contract</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="01-mcp-and-copilot.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop 01</span>
+          <span class="module-title">MCP, SQL MCP Server, and GitHub Copilot</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="02-scenario-and-architecture.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop 02</span>
+          <span class="module-title">Scenario and two-tier architecture</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="03-deploy-with-powershell.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop 03</span>
+          <span class="module-title">Deploy with native Az PowerShell</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="04-create-memory-pressure.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop 04</span>
+          <span class="module-title">Create bounded query-memory pressure</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="05-investigate-with-vscode.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop 05</span>
+          <span class="module-title">Investigate from VS Code</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="06-optimize-and-prove.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop 06</span>
+          <span class="module-title">Optimize and prove</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="07-teardown.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop 07</span>
+          <span class="module-title">Teardown and review</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="facilitator-guide.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Facilitator resource</span>
+          <span class="module-title">Facilitator guide</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="attendee-guide.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop resource</span>
+          <span class="module-title">Attendee guide</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="troubleshooting.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop resource</span>
+          <span class="module-title">Troubleshooting</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="evidence-and-sources.html" aria-current="page">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop resource</span>
+          <span class="module-title">Evidence and official sources</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="investigation-prompts.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop resource</span>
+          <span class="module-title">Investigation prompt book</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="prompt-evaluation-rubric.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop resource</span>
+          <span class="module-title">Prompt evaluation rubric</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="offline-dependencies.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop resource</span>
+          <span class="module-title">Offline development dependencies</span>
+        </a>
+      </li>
+      <!---->
+    </ol>
+  </nav>
+  <main id="main-content" tabindex="-1">
+
+<article>
+  <header class="module-header">
+    <p class="module-meta">Workshop resource · 0 minutes</p>
+    <h1>Evidence and official sources</h1>
+    <div class="progress-control">
+      <button type="button" data-progress-toggle data-module-id="evidence-and-sources.html" aria-pressed="false">
+        Mark module complete
+      </button>
+      <span role="status" data-progress-status aria-live="polite">Progress is stored only in this browser.</span>
+    </div>
+  </header>
+  <aside class="evidence-workbench" aria-labelledby="evidence-path-title">
+    <p class="workbench-label">DBA DECISION PATH</p>
+    <h2 id="evidence-path-title">Move claims through evidence</h2>
+    <ol class="evidence-path">
+      <li data-evidence-stage="hypothesis">TARGET / HYPOTHESIS</li>
+      <li data-evidence-stage="measured">MEASURED</li>
+      <li data-evidence-stage="decision">DECISION</li>
+    </ol>
+  </aside>
+  <div class="workshop-content">
+    <h1 id="evidence-labels-and-official-sources">Evidence labels and official sources<a class="headerlink" href="#evidence-labels-and-official-sources" title="Permanent link">&para;</a></h1>
+<p><strong>Verification date: 2026-09-01.</strong> Product behavior, image availability, quotas, policy, and documentation can change; revalidate before delivery.</p>
+<h2 id="classification-rules">Classification rules<a class="headerlink" href="#classification-rules" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Label</th>
+<th>Meaning</th>
+<th>Publication rule</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>DOC-VERIFIED</code></td>
+<td>Claim supported by the adjacent official source</td>
+<td>Include URL and verification date</td>
+</tr>
+<tr>
+<td><code>SUBSCRIPTION-VALIDATED</code></td>
+<td>Read-only observation in a named subscription context</td>
+<td>Include date/context; repeat preflight before deployment</td>
+</tr>
+<tr>
+<td><code>LAB-MEASURED</code></td>
+<td>Value captured from a real, valid run</td>
+<td>Include run ID, UTC window, units, conditions, and artifact hash</td>
+</tr>
+<tr>
+<td><code>TARGET</code></td>
+<td>Desired band or outcome</td>
+<td>Never rewrite as observation</td>
+</tr>
+<tr>
+<td><code>ASSUMPTION</code></td>
+<td>Unverified operational premise</td>
+<td>Name owner and validation checkpoint</td>
+</tr>
+</tbody>
+</table>
+<h2 id="doc-verified-claim-map">DOC-VERIFIED claim map<a class="headerlink" href="#doc-verified-claim-map" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Claim</th>
+<th>Official source</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>SQL MCP exposes configured database capabilities through DAB</td>
+<td><a href="https://learn.microsoft.com/en-us/azure/data-api-builder/mcp/overview">SQL MCP overview</a></td>
+</tr>
+<tr>
+<td>Local VS Code can launch SQL MCP over stdio</td>
+<td><a href="https://learn.microsoft.com/en-us/azure/data-api-builder/mcp/quickstart-visual-studio-code">SQL MCP VS Code quickstart</a></td>
+</tr>
+<tr>
+<td>Generic DML tool availability is configured and permission constrained</td>
+<td><a href="https://learn.microsoft.com/en-us/azure/data-api-builder/mcp/data-manipulation-language-tools">SQL MCP DML tools</a></td>
+</tr>
+<tr>
+<td>DAB roles and permissions authorize entity actions</td>
+<td><a href="https://learn.microsoft.com/en-us/azure/data-api-builder/concept/authorization">DAB authorization</a></td>
+</tr>
+<tr>
+<td>SQL Server permissions remain authoritative</td>
+<td><a href="https://learn.microsoft.com/en-us/sql/relational-databases/security/authentication-access/getting-started-with-database-engine-permissions">Database Engine permissions</a></td>
+</tr>
+<tr>
+<td>MSSQL Copilot provides connected database assistance</td>
+<td><a href="https://learn.microsoft.com/en-us/sql/tools/visual-studio-code-extensions/github-copilot/overview?view=sql-server-ver17">GitHub Copilot for MSSQL</a></td>
+</tr>
+<tr>
+<td>MSSQL supports query optimization assistance</td>
+<td><a href="https://learn.microsoft.com/en-us/sql/tools/visual-studio-code-extensions/github-copilot/query-optimizer-assistant?view=sql-server-ver17">Query optimizer assistant</a></td>
+</tr>
+<tr>
+<td>MSSQL can explain database business logic</td>
+<td><a href="https://learn.microsoft.com/en-us/sql/tools/visual-studio-code-extensions/github-copilot/business-logic-explainer?view=sql-server-ver17">Business logic explainer</a></td>
+</tr>
+<tr>
+<td>SSMS MCP use requires Agent mode and explicit tool control</td>
+<td><a href="https://learn.microsoft.com/en-us/ssms/github-copilot/mcp-servers">MCP servers with Copilot in SSMS</a></td>
+</tr>
+<tr>
+<td>Query Store persists plan/runtime/wait evidence</td>
+<td><a href="https://learn.microsoft.com/en-us/sql/relational-databases/performance/monitoring-performance-by-using-the-query-store?view=sql-server-ver17">Monitor with Query Store</a></td>
+</tr>
+<tr>
+<td>Query Store hints are inspectable and reversible</td>
+<td><a href="https://learn.microsoft.com/en-us/sql/relational-databases/performance/query-store-hints?view=sql-server-ver17">Query Store hints</a></td>
+</tr>
+<tr>
+<td>Memory grant evidence requires request/semaphore context</td>
+<td><a href="https://learn.microsoft.com/en-us/troubleshoot/sql/database-engine/performance/troubleshoot-memory-grant-issues">Troubleshoot memory grants</a></td>
+</tr>
+<tr>
+<td>Server memory settings do not describe only query grants</td>
+<td><a href="https://learn.microsoft.com/en-us/sql/database-engine/configure-windows/server-memory-server-configuration-options?view=sql-server-ver17">Server memory configuration</a></td>
+</tr>
+<tr>
+<td>Resource Governor classifies and constrains workloads</td>
+<td><a href="https://learn.microsoft.com/en-us/sql/relational-databases/resource-governor/resource-governor?view=sql-server-ver17">Resource Governor</a></td>
+</tr>
+<tr>
+<td>Resource-pool percentages govern bounded pool resources</td>
+<td><a href="https://learn.microsoft.com/en-us/sql/relational-databases/resource-governor/resource-governor-resource-pool?view=sql-server-ver17">Resource Governor pool</a></td>
+</tr>
+<tr>
+<td>Windows client images require qualifying eligibility</td>
+<td><a href="https://learn.microsoft.com/en-us/azure/virtual-machines/windows/client-images">Windows client in Azure</a></td>
+</tr>
+<tr>
+<td>Default outbound access should be replaced with explicit egress</td>
+<td><a href="https://learn.microsoft.com/en-us/azure/virtual-network/ip-services/default-outbound-access">Default outbound access</a></td>
+</tr>
+<tr>
+<td>NAT Gateway provides explicit outbound connectivity</td>
+<td><a href="https://learn.microsoft.com/en-us/azure/nat-gateway/nat-gateway-design">NAT Gateway design</a></td>
+</tr>
+<tr>
+<td>ASGs group NICs for network policy</td>
+<td><a href="https://learn.microsoft.com/en-us/azure/virtual-network/application-security-groups">Application security groups</a></td>
+</tr>
+<tr>
+<td>AdventureWorks2022 is an official SQL sample</td>
+<td><a href="https://learn.microsoft.com/en-us/sql/samples/adventureworks-install-configure?view=sql-server-ver17">AdventureWorks sample databases</a></td>
+</tr>
+</tbody>
+</table>
+<h2 id="context-specific-claims">Context-specific claims<a class="headerlink" href="#context-specific-claims" title="Permanent link">&para;</a></h2>
+<ul>
+<li><code>SUBSCRIPTION-VALIDATED</code>: SKU, image, quota, policy, provider, and name availability belong in the current preflight output, not this static guide.</li>
+<li><code>LAB-MEASURED</code>: no target document in this repository contains that label. Apply it only after schema and semantic validation of a real run.</li>
+<li><code>TARGET</code>: baseline 75–85% and optimized 35–45% of the regular workshop-pool query-workspace semaphore.</li>
+<li><code>ASSUMPTION</code>: facilitator source IPv4 stability, licensing eligibility, access, capacity, and schedule remain owned by the facilitator until validated.</li>
+</ul>
+  </div>
+
+</article>
+<nav class="page-navigation" aria-label="Previous and next pages">
+
+  <a rel="prev" href="troubleshooting.html">Previous: Troubleshooting</a>
+
+
+  <a rel="next" href="investigation-prompts.html">Next: Investigation prompt book</a>
+
+</nav>
+
+  </main>
+  <footer class="site-footer">
+    <p>Evidence-driven SQL tuning with human review. Do not run the workshop workload against production.</p>
+  </footer>
+</body>
+</html>

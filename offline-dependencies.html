@@ -1,0 +1,237 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="An evidence-driven L400 workshop for optimizing a SQL Server stored procedure with GitHub Copilot and Microsoft SQL MCP.">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'sha256-n2HSwPq71BFLjgICami4p3JNMXLLnlGn5P5K8dJEyHk=' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https://cdn.jsdelivr.net; object-src 'none'; base-uri 'none'; form-action 'self'; upgrade-insecure-requests">
+  <title>Offline development dependencies | MCP SQL Query Store Workshop</title>
+  <link rel="stylesheet" href="assets/styles.css">
+  <script>(() => { const param = new URLSearchParams(window.location.search).get("scoutTheme"); const theme = param || (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"); document.documentElement.setAttribute("data-theme", theme); })();</script>
+  <script type="module" src="assets/app.js"></script>
+</head>
+<body data-page-route="offline-dependencies.html">
+  <a class="skip-link" href="#main-content">Skip to main content</a>
+  <header class="site-header">
+    <div>
+      <p class="site-kicker">SQL PERFORMANCE LAB // EVIDENCE FIRST</p>
+      <p class="site-title"><a href="index.html">MCP SQL Query Store Workshop</a></p>
+      <p class="site-description">An evidence-driven L400 workshop for optimizing a SQL Server stored procedure with GitHub Copilot and Microsoft SQL MCP.</p>
+    </div>
+    <button class="nav-toggle" type="button" data-nav-toggle aria-controls="module-navigation" aria-expanded="false">
+      <span aria-hidden="true">☰</span>
+      Modules
+    </button>
+  </header>
+  <nav id="module-navigation" class="module-navigation" aria-label="Workshop modules" data-open="false">
+    <form class="site-search" role="search" data-site-search>
+      <label for="site-search-input">Filter workshop pages</label>
+      <input id="site-search-input" type="search" autocomplete="off" placeholder="Search titles and phases" data-site-search-input>
+      <span role="status" aria-live="polite" data-site-search-status></span>
+    </form>
+    <ol><!---->
+      <li class="module-node">
+        <a class="module-node-link" href="index.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop 00</span>
+          <span class="module-title">Orientation and safety contract</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="01-mcp-and-copilot.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop 01</span>
+          <span class="module-title">MCP, SQL MCP Server, and GitHub Copilot</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="02-scenario-and-architecture.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop 02</span>
+          <span class="module-title">Scenario and two-tier architecture</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="03-deploy-with-powershell.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop 03</span>
+          <span class="module-title">Deploy with native Az PowerShell</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="04-create-memory-pressure.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop 04</span>
+          <span class="module-title">Create bounded query-memory pressure</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="05-investigate-with-vscode.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop 05</span>
+          <span class="module-title">Investigate from VS Code</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="06-optimize-and-prove.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop 06</span>
+          <span class="module-title">Optimize and prove</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="07-teardown.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop 07</span>
+          <span class="module-title">Teardown and review</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="facilitator-guide.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Facilitator resource</span>
+          <span class="module-title">Facilitator guide</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="attendee-guide.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop resource</span>
+          <span class="module-title">Attendee guide</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="troubleshooting.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop resource</span>
+          <span class="module-title">Troubleshooting</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="evidence-and-sources.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop resource</span>
+          <span class="module-title">Evidence and official sources</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="investigation-prompts.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop resource</span>
+          <span class="module-title">Investigation prompt book</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="prompt-evaluation-rubric.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop resource</span>
+          <span class="module-title">Prompt evaluation rubric</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="offline-dependencies.html" aria-current="page">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop resource</span>
+          <span class="module-title">Offline development dependencies</span>
+        </a>
+      </li>
+      <!---->
+    </ol>
+  </nav>
+  <main id="main-content" tabindex="-1">
+
+<article>
+  <header class="module-header">
+    <p class="module-meta">Workshop resource · 0 minutes</p>
+    <h1>Offline development dependencies</h1>
+    <div class="progress-control">
+      <button type="button" data-progress-toggle data-module-id="offline-dependencies.html" aria-pressed="false">
+        Mark module complete
+      </button>
+      <span role="status" data-progress-status aria-live="polite">Progress is stored only in this browser.</span>
+    </div>
+  </header>
+  <aside class="evidence-workbench" aria-labelledby="evidence-path-title">
+    <p class="workbench-label">DBA DECISION PATH</p>
+    <h2 id="evidence-path-title">Move claims through evidence</h2>
+    <ol class="evidence-path">
+      <li data-evidence-stage="hypothesis">TARGET / HYPOTHESIS</li>
+      <li data-evidence-stage="measured">MEASURED</li>
+      <li data-evidence-stage="decision">DECISION</li>
+    </ol>
+  </aside>
+  <div class="workshop-content">
+    <h1 id="offline-development-dependencies">Offline development dependencies<a class="headerlink" href="#offline-development-dependencies" title="Permanent link">&para;</a></h1>
+<p>The repository installer is offline-first. Its default behavior never contacts PyPI or
+PowerShell Gallery, never upgrades <code>pip</code>, and does not install anything when the existing
+tools satisfy the bounded versions in <code>requirements-dev.txt</code>.</p>
+<p>Python supports repository site generation and tests only. The Azure VM workshop runtime
+does not require Python or PyPI. GitHub Pages publishes the generated static HTML, CSS, and
+JavaScript output; it does not install Python packages at runtime.</p>
+<h2 id="supported-corporate-routes">Supported corporate routes<a class="headerlink" href="#supported-corporate-routes" title="Permanent link">&para;</a></h2>
+<h3 id="1-preprovisioned-environment">1. Preprovisioned environment<a class="headerlink" href="#1-preprovisioned-environment" title="Permanent link">&para;</a></h3>
+<p>Preinstall the bounded Python packages, Pester, and PSScriptAnalyzer through the corporate
+software-distribution process. Then run:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="p">./</span><span class="n">build</span><span class="p">/</span><span class="nb">Install-DevDependencies</span><span class="p">.</span><span class="n">ps1</span>
+</code></pre></div>
+<p>The script verifies package metadata in <code>.venv</code> and exits without invoking <code>pip</code> or
+<code>Install-Module</code> when all versions are acceptable. If <code>.venv</code> is absent, it creates one
+using an available local Python installation without downloading anything.</p>
+<h3 id="2-local-or-internal-wheelhouse">2. Local or internal wheelhouse<a class="headerlink" href="#2-local-or-internal-wheelhouse" title="Permanent link">&para;</a></h3>
+<p>Provide an existing local directory populated by an approved internal process:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="p">./</span><span class="n">build</span><span class="p">/</span><span class="nb">Install-DevDependencies</span><span class="p">.</span><span class="n">ps1</span> <span class="n">-WheelhousePath</span> <span class="n">C</span><span class="p">:\</span><span class="n">Approved</span><span class="p">\</span><span class="n">workshop-wheels</span>
+</code></pre></div>
+<p>The directory and every traversed path component must not be a symbolic link or reparse
+point. Installation uses <code>--no-index</code> and <code>--find-links</code>; public indexes remain disabled.</p>
+<h3 id="3-internal-configured-package-index">3. Internal configured package index<a class="headerlink" href="#3-internal-configured-package-index" title="Permanent link">&para;</a></h3>
+<p>Set the approved internal index in the environment, then opt in explicitly:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="nv">$env:PIP_INDEX_URL</span> <span class="p">=</span> <span class="s1">'https://packages.corporate.example/simple'</span>
+<a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a><span class="p">./</span><span class="n">build</span><span class="p">/</span><span class="nb">Install-DevDependencies</span><span class="p">.</span><span class="n">ps1</span> <span class="n">-AllowConfiguredPackageIndex</span>
+</code></pre></div>
+<p>The installer does not print the configured URL. Do not place credentials in commands,
+documentation, or repository files; use the corporate credential provider.</p>
+<p>If PowerShell modules are not preprovisioned, select an approved registered internal
+repository separately:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="p">./</span><span class="n">build</span><span class="p">/</span><span class="nb">Install-DevDependencies</span><span class="p">.</span><span class="n">ps1</span> <span class="n">-PowerShellRepositoryName</span> <span class="n">CorporatePS</span>
+</code></pre></div>
+<p><code>-AllowPublicPackageIndex</code> and <code>-AllowPowerShellGallery</code> are explicit noncorporate/CI
+escape hatches. They are never enabled by default and should not be used on the corporate
+network.</p>
+<h2 id="validation-without-installation">Validation without installation<a class="headerlink" href="#validation-without-installation" title="Permanent link">&para;</a></h2>
+<p>Repository validation checks the current virtual environment when it exists, but does not
+install packages:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="p">./.</span><span class="n">venv</span><span class="p">/</span><span class="n">Scripts</span><span class="p">/</span><span class="n">python</span><span class="p">.</span><span class="n">exe</span> <span class="p">./</span><span class="n">build</span><span class="p">/</span><span class="nb">Test-PythonDependencies</span><span class="p">.</span><span class="n">py</span> <span class="p">-</span><span class="n">-requirements</span> <span class="p">./</span><span class="n">requirements-dev</span><span class="p">.</span><span class="n">txt</span>
+<a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a><span class="p">./</span><span class="n">build</span><span class="p">/</span><span class="nb">Test-Repository</span><span class="p">.</span><span class="n">ps1</span>
+</code></pre></div>
+<p>Verifier output is limited to the package name, required bounds, detected version, and
+status. It does not print environment variables, index URLs, proxy settings, or credentials.</p>
+  </div>
+
+</article>
+<nav class="page-navigation" aria-label="Previous and next pages">
+
+  <a rel="prev" href="prompt-evaluation-rubric.html">Previous: Prompt evaluation rubric</a>
+
+
+</nav>
+
+  </main>
+  <footer class="site-footer">
+    <p>Evidence-driven SQL tuning with human review. Do not run the workshop workload against production.</p>
+  </footer>
+</body>
+</html>

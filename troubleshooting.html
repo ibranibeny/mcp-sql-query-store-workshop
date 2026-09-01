@@ -1,0 +1,289 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="An evidence-driven L400 workshop for optimizing a SQL Server stored procedure with GitHub Copilot and Microsoft SQL MCP.">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'sha256-n2HSwPq71BFLjgICami4p3JNMXLLnlGn5P5K8dJEyHk=' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https://cdn.jsdelivr.net; object-src 'none'; base-uri 'none'; form-action 'self'; upgrade-insecure-requests">
+  <title>Troubleshooting | MCP SQL Query Store Workshop</title>
+  <link rel="stylesheet" href="assets/styles.css">
+  <script>(() => { const param = new URLSearchParams(window.location.search).get("scoutTheme"); const theme = param || (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"); document.documentElement.setAttribute("data-theme", theme); })();</script>
+  <script type="module" src="assets/app.js"></script>
+</head>
+<body data-page-route="troubleshooting.html">
+  <a class="skip-link" href="#main-content">Skip to main content</a>
+  <header class="site-header">
+    <div>
+      <p class="site-kicker">SQL PERFORMANCE LAB // EVIDENCE FIRST</p>
+      <p class="site-title"><a href="index.html">MCP SQL Query Store Workshop</a></p>
+      <p class="site-description">An evidence-driven L400 workshop for optimizing a SQL Server stored procedure with GitHub Copilot and Microsoft SQL MCP.</p>
+    </div>
+    <button class="nav-toggle" type="button" data-nav-toggle aria-controls="module-navigation" aria-expanded="false">
+      <span aria-hidden="true">☰</span>
+      Modules
+    </button>
+  </header>
+  <nav id="module-navigation" class="module-navigation" aria-label="Workshop modules" data-open="false">
+    <form class="site-search" role="search" data-site-search>
+      <label for="site-search-input">Filter workshop pages</label>
+      <input id="site-search-input" type="search" autocomplete="off" placeholder="Search titles and phases" data-site-search-input>
+      <span role="status" aria-live="polite" data-site-search-status></span>
+    </form>
+    <ol><!---->
+      <li class="module-node">
+        <a class="module-node-link" href="index.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop 00</span>
+          <span class="module-title">Orientation and safety contract</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="01-mcp-and-copilot.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop 01</span>
+          <span class="module-title">MCP, SQL MCP Server, and GitHub Copilot</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="02-scenario-and-architecture.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop 02</span>
+          <span class="module-title">Scenario and two-tier architecture</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="03-deploy-with-powershell.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop 03</span>
+          <span class="module-title">Deploy with native Az PowerShell</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="04-create-memory-pressure.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop 04</span>
+          <span class="module-title">Create bounded query-memory pressure</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="05-investigate-with-vscode.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop 05</span>
+          <span class="module-title">Investigate from VS Code</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="06-optimize-and-prove.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop 06</span>
+          <span class="module-title">Optimize and prove</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="07-teardown.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop 07</span>
+          <span class="module-title">Teardown and review</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="facilitator-guide.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Facilitator resource</span>
+          <span class="module-title">Facilitator guide</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="attendee-guide.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop resource</span>
+          <span class="module-title">Attendee guide</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="troubleshooting.html" aria-current="page">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop resource</span>
+          <span class="module-title">Troubleshooting</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="evidence-and-sources.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop resource</span>
+          <span class="module-title">Evidence and official sources</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="investigation-prompts.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop resource</span>
+          <span class="module-title">Investigation prompt book</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="prompt-evaluation-rubric.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop resource</span>
+          <span class="module-title">Prompt evaluation rubric</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="offline-dependencies.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop resource</span>
+          <span class="module-title">Offline development dependencies</span>
+        </a>
+      </li>
+      <!---->
+    </ol>
+  </nav>
+  <main id="main-content" tabindex="-1">
+
+<article>
+  <header class="module-header">
+    <p class="module-meta">Workshop resource · 0 minutes</p>
+    <h1>Troubleshooting</h1>
+    <div class="progress-control">
+      <button type="button" data-progress-toggle data-module-id="troubleshooting.html" aria-pressed="false">
+        Mark module complete
+      </button>
+      <span role="status" data-progress-status aria-live="polite">Progress is stored only in this browser.</span>
+    </div>
+  </header>
+  <aside class="evidence-workbench" aria-labelledby="evidence-path-title">
+    <p class="workbench-label">DBA DECISION PATH</p>
+    <h2 id="evidence-path-title">Move claims through evidence</h2>
+    <ol class="evidence-path">
+      <li data-evidence-stage="hypothesis">TARGET / HYPOTHESIS</li>
+      <li data-evidence-stage="measured">MEASURED</li>
+      <li data-evidence-stage="decision">DECISION</li>
+    </ol>
+  </aside>
+  <div class="workshop-content">
+    <h1 id="troubleshooting">Troubleshooting<a class="headerlink" href="#troubleshooting" title="Permanent link">&para;</a></h1>
+<p>Preserve the failed checkpoint and exact safe error text. Do not invent an error code, weaken a security boundary, or call a target value measured.</p>
+<table>
+<thead>
+<tr>
+<th>Symptom</th>
+<th>Diagnose</th>
+<th>Safe resolution</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Required Python/Pester/PSScriptAnalyzer version unavailable</td>
+<td>Run local dependency validators; compare bounded versions</td>
+<td>Use preprovisioned tools, approved wheelhouse, or configured internal repositories from the offline guide; do not use public PyPI on the corporate route</td>
+</tr>
+<tr>
+<td>Az module missing or below required version</td>
+<td>Review preflight module check</td>
+<td>Install through the approved PowerShell repository; rerun preflight</td>
+</tr>
+<tr>
+<td>Provider, quota, SKU, restriction, or image check fails</td>
+<td>Record region, family usage/limit, image coordinates, and policy result</td>
+<td>Request quota/registration or choose a separately reviewed schedule; do not silently change region/SKU/image</td>
+</tr>
+<tr>
+<td>Windows client attestation fails</td>
+<td>Confirm qualifying organizational entitlement</td>
+<td>Stop; Marketplace visibility is not license proof</td>
+</tr>
+<tr>
+<td>NAT outbound fails</td>
+<td>Verify NAT public IP, gateway, and both subnet associations; default outbound is disabled</td>
+<td>Repair explicit NAT; do not add inbound paths</td>
+</tr>
+<tr>
+<td>Private DNS/TCP succeeds but TLS fails</td>
+<td>Check DNS name, certificate SAN/trust, SQL binding, and client hostname</td>
+<td>Repair trust/binding; do not make <code>TrustServerCertificate=True</code> the successful path</td>
+</tr>
+<tr>
+<td>SQL marker, Enterprise 2022, Resource Governor, or Query Store check fails</td>
+<td>Run guarded preflight and inspect effective catalog/DMV state</td>
+<td>Restore the approved lab state; do not run pressure until all readbacks pass</td>
+</tr>
+<tr>
+<td>DAB schema validation fails</td>
+<td>Confirm DAB 2.0.9, schema URL, JSON fields, entity parameters, role, and descriptions</td>
+<td>Run <code>dotnet tool run dab -- validate --config mcp/dab-config.json</code>; fix config rather than deleting constraints</td>
+</tr>
+<tr>
+<td>MCP server starts but tools are missing</td>
+<td>Use MCP: List Servers; inspect server output, role, <code>.env</code>, and <code>tools/list</code></td>
+<td>Expect four enabled generic operations and six snake_case custom tools; <code>describe_entities</code> sees configured entities only</td>
+</tr>
+<tr>
+<td>MCP call is denied</td>
+<td>Compare DAB <code>workshop-reader</code> permission and SQL principal grants</td>
+<td>Keep least privilege; do not grant owner/datareader or expose arbitrary SQL</td>
+</tr>
+<tr>
+<td>Workload does not reach 75–85%</td>
+<td>Check marker, tags, worker ramp, parameter schedule, grants, waits, and global deadline</td>
+<td>Report <code>BaselineTargetNotReached</code>; never exceed four workers or ten minutes</td>
+</tr>
+<tr>
+<td>Workload stops early</td>
+<td>Check stop file, host &gt;87.5%, available memory &lt;8 GiB, low-memory flags, health failures, timeout</td>
+<td>Preserve samples, resolve cause, then start a new run ID</td>
+</tr>
+<tr>
+<td>Workload hangs or locks</td>
+<td>Inspect only tagged sessions and active grants</td>
+<td>Use <code>Stop-MemoryGrantLab.ps1</code> for exact run ID; never broad-kill or clear global cache</td>
+</tr>
+<tr>
+<td>Candidate misses 35–45%</td>
+<td>Verify correctness and frozen-condition hash; compare secondary metrics</td>
+<td>Report <code>ImprovedOutsideTarget</code> or <code>NoMaterialImprovement</code> from actual evidence</td>
+</tr>
+<tr>
+<td>Cleanup refuses cross-database dependencies</td>
+<td>Inspect dependency evidence from <code>sql/09-Cleanup.sql</code></td>
+<td>Remove dependencies deliberately or leave cleanup blocked; never force-drop unknown objects</td>
+</tr>
+<tr>
+<td>GitHub Pages route/style/image fails</td>
+<td>Build locally, inspect manifest route uniqueness, relative links, copied assets, and pending screenshot cards</td>
+<td>Rebuild all routes and root assets; absent screenshots must render a pending card, not a broken image</td>
+</tr>
+</tbody>
+</table>
+<p>If the resource-group deletion cannot be positively verified, report ongoing billing risk to the subscription owner.</p>
+  </div>
+
+</article>
+<nav class="page-navigation" aria-label="Previous and next pages">
+
+  <a rel="prev" href="attendee-guide.html">Previous: Attendee guide</a>
+
+
+  <a rel="next" href="evidence-and-sources.html">Next: Evidence and official sources</a>
+
+</nav>
+
+  </main>
+  <footer class="site-footer">
+    <p>Evidence-driven SQL tuning with human review. Do not run the workshop workload against production.</p>
+  </footer>
+</body>
+</html>

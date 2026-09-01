@@ -4,9 +4,10 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="description" content="An evidence-driven L400 workshop for optimizing a SQL Server stored procedure with GitHub Copilot and Microsoft SQL MCP.">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https://cdn.jsdelivr.net; object-src 'none'; base-uri 'none'; form-action 'self'; upgrade-insecure-requests">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'sha256-n2HSwPq71BFLjgICami4p3JNMXLLnlGn5P5K8dJEyHk=' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https://cdn.jsdelivr.net; object-src 'none'; base-uri 'none'; form-action 'self'; upgrade-insecure-requests">
   <title>Orientation and safety contract | MCP SQL Query Store Workshop</title>
   <link rel="stylesheet" href="assets/styles.css">
+  <script>(() => { const param = new URLSearchParams(window.location.search).get("scoutTheme"); const theme = param || (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"); document.documentElement.setAttribute("data-theme", theme); })();</script>
   <script type="module" src="assets/app.js"></script>
 </head>
 <body data-page-route="index.html">
@@ -23,6 +24,11 @@
     </button>
   </header>
   <nav id="module-navigation" class="module-navigation" aria-label="Workshop modules" data-open="false">
+    <form class="site-search" role="search" data-site-search>
+      <label for="site-search-input">Filter workshop pages</label>
+      <input id="site-search-input" type="search" autocomplete="off" placeholder="Search titles and phases" data-site-search-input>
+      <span role="status" aria-live="polite" data-site-search-status></span>
+    </form>
     <ol><!---->
       <li class="module-node">
         <a class="module-node-link" href="index.html" aria-current="page">
@@ -33,10 +39,114 @@
       </li>
       <!---->
       <li class="module-node">
+        <a class="module-node-link" href="01-mcp-and-copilot.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop 01</span>
+          <span class="module-title">MCP, SQL MCP Server, and GitHub Copilot</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="02-scenario-and-architecture.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop 02</span>
+          <span class="module-title">Scenario and two-tier architecture</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="03-deploy-with-powershell.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop 03</span>
+          <span class="module-title">Deploy with native Az PowerShell</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="04-create-memory-pressure.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop 04</span>
+          <span class="module-title">Create bounded query-memory pressure</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="05-investigate-with-vscode.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop 05</span>
+          <span class="module-title">Investigate from VS Code</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="06-optimize-and-prove.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop 06</span>
+          <span class="module-title">Optimize and prove</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="07-teardown.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop 07</span>
+          <span class="module-title">Teardown and review</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
         <a class="module-node-link" href="facilitator-guide.html">
           <span class="module-operator-glyph" aria-hidden="true"></span>
           <span class="module-phase">Facilitator resource</span>
           <span class="module-title">Facilitator guide</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="attendee-guide.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop resource</span>
+          <span class="module-title">Attendee guide</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="troubleshooting.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop resource</span>
+          <span class="module-title">Troubleshooting</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="evidence-and-sources.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop resource</span>
+          <span class="module-title">Evidence and official sources</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="investigation-prompts.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop resource</span>
+          <span class="module-title">Investigation prompt book</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="prompt-evaluation-rubric.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop resource</span>
+          <span class="module-title">Prompt evaluation rubric</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="offline-dependencies.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop resource</span>
+          <span class="module-title">Offline development dependencies</span>
         </a>
       </li>
       <!---->
@@ -66,6 +176,7 @@
   </aside>
   <div class="workshop-content">
     <h1 id="orientation-and-safety-contract">Orientation and safety contract<a class="headerlink" href="#orientation-and-safety-contract" title="Permanent link">&para;</a></h1>
+<p><strong>Instruction: 15 minutes · Workshop elapsed: 15 minutes</strong></p>
 <h2 id="primary-workshop-goal">Primary workshop goal<a class="headerlink" href="#primary-workshop-goal" title="Permanent link">&para;</a></h2>
 <p>Use <strong>GitHub Copilot</strong>, grounded by <strong>Microsoft SQL MCP</strong> and verified SQL Server evidence, to help a DBA optimize a complex stored procedure while preserving its result contract. Copilot proposes and explains; the DBA validates, measures, and decides.</p>
 <p><span class="evidence-label" data-evidence-label="DOC-VERIFIED">DOC-VERIFIED</span> <a href="https://learn.microsoft.com/azure/data-api-builder/mcp/overview">SQL MCP Server</a> exposes configured database entities through Data API Builder permissions, while <a href="https://learn.microsoft.com/sql/relational-databases/security/authentication-access/getting-started-with-database-engine-permissions">SQL Server Database Engine permissions</a> continue to authorize database actions. This controlled tool boundary is not permission to bypass database authorization or human review.</p>
@@ -87,8 +198,13 @@
 <li>Stop when a timeout, safety threshold, unexpected object, or unapproved cost boundary is encountered.</li>
 <li>Azure deployment is a separate billable action. Repository build and test commands create no Azure resources.</li>
 </ul>
+<h3 id="licensing-and-cost-attestations">Licensing and cost attestations<a class="headerlink" href="#licensing-and-cost-attestations" title="Permanent link">&para;</a></h3>
+<p>Before Azure creation, the facilitator must separately attest eligibility to run the Windows 11 Enterprise client image, acknowledge SQL Server 2022 Enterprise PAYG cost, and acknowledge every billable resource category. Azure Hybrid Benefit is not assumed. Marketplace visibility does not prove license eligibility.</p>
+<p>The deployment plan card lists the Windows and SQL VMs, managed disks, NAT Gateway, and public IP resources. Stop and ask the subscription owner if any category is unexpected. A failed or incomplete preflight means <strong>no deployment</strong>.</p>
+<h3 id="operational-stop-conditions">Operational stop conditions<a class="headerlink" href="#operational-stop-conditions" title="Permanent link">&para;</a></h3>
+<p>Stop only the tagged workshop workload when host used memory exceeds 87.5%, host available memory falls below 8 GiB, a SQL low-memory signal appears, SQL health fails twice, the lab marker disappears, a worker times out, the manual stop is requested, or the global ten-minute deadline is reached. Do not respond by increasing pressure or weakening safeguards.</p>
 <p><span class="evidence-label" data-evidence-label="DOC-VERIFIED">DOC-VERIFIED</span> The SQL MCP and SQL Server authorization claims above link to their official Microsoft Learn sources.</p>
-<p><span class="evidence-label" data-evidence-label="SUBSCRIPTION-VALIDATED">SUBSCRIPTION-VALIDATED</span> Subscription-specific availability must be revalidated by the deployment preflight at the time of use.</p>
+<p><span class="evidence-label" data-evidence-label="ASSUMPTION">ASSUMPTION</span> Subscription-specific availability must be revalidated by the deployment preflight at the time of use.</p>
 <h2 id="evidence-language">Evidence language<a class="headerlink" href="#evidence-language" title="Permanent link">&para;</a></h2>
 <table>
 <thead>
@@ -120,6 +236,14 @@
 </tr>
 </tbody>
 </table>
+<h2 id="before-continuing">Before continuing<a class="headerlink" href="#before-continuing" title="Permanent link">&para;</a></h2>
+<ul>
+<li>State the primary goal in one sentence without saying that Copilot makes the decision.</li>
+<li>Identify the exact 80% → 40% denominator: the workshop pool's regular query-workspace semaphore.</li>
+<li>Confirm production use is prohibited and name the manual stop script.</li>
+<li>Confirm that <code>SUBSCRIPTION-VALIDATED</code> expires as capacity, policy, quota, and image availability change.</li>
+</ul>
+<aside class="screenshot-pending" role="note" data-screenshot-file="local-home.png"><strong>Screenshot pending verified milestone</strong><span>Workshop home after local validation · local-home.png</span></aside>
   </div>
 
   <section class="grant-workbench" aria-labelledby="grant-workbench-title">
@@ -153,7 +277,7 @@
 <nav class="page-navigation" aria-label="Previous and next pages">
 
 
-  <a rel="next" href="facilitator-guide.html">Next: Facilitator guide</a>
+  <a rel="next" href="01-mcp-and-copilot.html">Next: MCP, SQL MCP Server, and GitHub Copilot</a>
 
 </nav>
 

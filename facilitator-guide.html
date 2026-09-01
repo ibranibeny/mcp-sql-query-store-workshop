@@ -4,9 +4,10 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="description" content="An evidence-driven L400 workshop for optimizing a SQL Server stored procedure with GitHub Copilot and Microsoft SQL MCP.">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https://cdn.jsdelivr.net; object-src 'none'; base-uri 'none'; form-action 'self'; upgrade-insecure-requests">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'sha256-n2HSwPq71BFLjgICami4p3JNMXLLnlGn5P5K8dJEyHk=' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https://cdn.jsdelivr.net; object-src 'none'; base-uri 'none'; form-action 'self'; upgrade-insecure-requests">
   <title>Facilitator guide | MCP SQL Query Store Workshop</title>
   <link rel="stylesheet" href="assets/styles.css">
+  <script>(() => { const param = new URLSearchParams(window.location.search).get("scoutTheme"); const theme = param || (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"); document.documentElement.setAttribute("data-theme", theme); })();</script>
   <script type="module" src="assets/app.js"></script>
 </head>
 <body data-page-route="facilitator-guide.html">
@@ -23,6 +24,11 @@
     </button>
   </header>
   <nav id="module-navigation" class="module-navigation" aria-label="Workshop modules" data-open="false">
+    <form class="site-search" role="search" data-site-search>
+      <label for="site-search-input">Filter workshop pages</label>
+      <input id="site-search-input" type="search" autocomplete="off" placeholder="Search titles and phases" data-site-search-input>
+      <span role="status" aria-live="polite" data-site-search-status></span>
+    </form>
     <ol><!---->
       <li class="module-node">
         <a class="module-node-link" href="index.html">
@@ -33,10 +39,114 @@
       </li>
       <!---->
       <li class="module-node">
+        <a class="module-node-link" href="01-mcp-and-copilot.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop 01</span>
+          <span class="module-title">MCP, SQL MCP Server, and GitHub Copilot</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="02-scenario-and-architecture.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop 02</span>
+          <span class="module-title">Scenario and two-tier architecture</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="03-deploy-with-powershell.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop 03</span>
+          <span class="module-title">Deploy with native Az PowerShell</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="04-create-memory-pressure.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop 04</span>
+          <span class="module-title">Create bounded query-memory pressure</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="05-investigate-with-vscode.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop 05</span>
+          <span class="module-title">Investigate from VS Code</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="06-optimize-and-prove.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop 06</span>
+          <span class="module-title">Optimize and prove</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="07-teardown.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop 07</span>
+          <span class="module-title">Teardown and review</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
         <a class="module-node-link" href="facilitator-guide.html" aria-current="page">
           <span class="module-operator-glyph" aria-hidden="true"></span>
           <span class="module-phase">Facilitator resource</span>
           <span class="module-title">Facilitator guide</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="attendee-guide.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop resource</span>
+          <span class="module-title">Attendee guide</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="troubleshooting.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop resource</span>
+          <span class="module-title">Troubleshooting</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="evidence-and-sources.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop resource</span>
+          <span class="module-title">Evidence and official sources</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="investigation-prompts.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop resource</span>
+          <span class="module-title">Investigation prompt book</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="prompt-evaluation-rubric.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop resource</span>
+          <span class="module-title">Prompt evaluation rubric</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="offline-dependencies.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop resource</span>
+          <span class="module-title">Offline development dependencies</span>
         </a>
       </li>
       <!---->
@@ -137,6 +247,152 @@
 </tbody>
 </table>
 <p>Lunch is outside the six-hour agenda.</p>
+<h2 id="minute-schedule-and-checkpoints">Minute schedule and checkpoints<a class="headerlink" href="#minute-schedule-and-checkpoints" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th style="text-align: right;">Elapsed</th>
+<th>Action</th>
+<th>Pass evidence</th>
+<th>Fail branch</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: right;">00–15</td>
+<td>Orientation, licenses, cost, labels, stop conditions</td>
+<td>Participants identify TARGET versus measured and prohibit production use</td>
+<td>Restate contract; do not continue without agreement</td>
+</tr>
+<tr>
+<td style="text-align: right;">15–50</td>
+<td>MCP internals and product boundaries</td>
+<td>Group traces initialize → tools/list → approved tools/call → DAB/SQL authorization</td>
+<td>Re-run paper trace; never broaden a role to make a demo work</td>
+</tr>
+<tr>
+<td style="text-align: right;">50–75</td>
+<td>Architecture and verification exercise</td>
+<td>SQL NIC has no public IP; RDP <code>/32</code>; private 1433; NAT on both subnets</td>
+<td>Stop; remediate boundary before workload</td>
+</tr>
+<tr>
+<td style="text-align: right;">75–90</td>
+<td>Offline readiness and Azure context</td>
+<td>Required local versions and authenticated intended subscription</td>
+<td>Use approved offline route or correct context; no deployment</td>
+</tr>
+<tr>
+<td style="text-align: right;">90–110</td>
+<td>Non-destructive preflight</td>
+<td>Every check passes and immutable images resolve</td>
+<td><strong>No deployment if preflight failed</strong></td>
+</tr>
+<tr>
+<td style="text-align: right;">110–120</td>
+<td>Plan-card and attestation review</td>
+<td>Windows eligibility, SQL Enterprise cost, billable categories acknowledged separately</td>
+<td>End deployment portion without creating resources</td>
+</tr>
+<tr>
+<td style="text-align: right;">120–125</td>
+<td>Explicit deployment decision</td>
+<td>Exact deploy phrase and <code>ShouldProcess</code> approval</td>
+<td>No action; preserve plan card</td>
+</tr>
+<tr>
+<td style="text-align: right;">125–135</td>
+<td>Deployment checkpoints/fallback handoff</td>
+<td>Network, VMs, bootstrap, TLS, readiness all pass, or use pre-staged environment</td>
+<td>Preserve last checkpoint; do not claim readiness</td>
+</tr>
+<tr>
+<td style="text-align: right;">135–145</td>
+<td>Break</td>
+<td>No workload active</td>
+<td>Stop exact tagged run</td>
+</tr>
+<tr>
+<td style="text-align: right;">145–165</td>
+<td>SQL setup and Query Store</td>
+<td>Marker valid; Enterprise 2022; Resource Governor and Query Store read back</td>
+<td>Repair setup; never weaken guards</td>
+</tr>
+<tr>
+<td style="text-align: right;">165–190</td>
+<td>Baseline calibration</td>
+<td>Three consecutive 75–85% samples or bounded truthful miss</td>
+<td>Record <code>BaselineTargetNotReached</code>; do not increase limits</td>
+</tr>
+<tr>
+<td style="text-align: right;">190–210</td>
+<td>Evidence interpretation</td>
+<td>Run ID, UTC window, units, grants, waits, plans captured</td>
+<td>Mark missing evidence and defer conclusions</td>
+</tr>
+<tr>
+<td style="text-align: right;">210–235</td>
+<td>VS Code, MSSQL, and DAB</td>
+<td>TLS validates; DAB validates; allowlisted tools only</td>
+<td>Fix trust/config/role; no broad SQL fallback</td>
+</tr>
+<tr>
+<td style="text-align: right;">235–275</td>
+<td>Structured investigation</td>
+<td>Observations are sourced; hypotheses ranked; experiments bounded</td>
+<td>Score with rubric and revise</td>
+</tr>
+<tr>
+<td style="text-align: right;">275–285</td>
+<td>Break</td>
+<td>Workload stopped; run context retained</td>
+<td>Stop tagged run before leaving</td>
+</tr>
+<tr>
+<td style="text-align: right;">285–305</td>
+<td>Candidate review</td>
+<td>Baseline preserved; candidate contract stated</td>
+<td>Reject destructive or unsupported proposal</td>
+</tr>
+<tr>
+<td style="text-align: right;">305–320</td>
+<td>Correctness matrix</td>
+<td>Metadata, counts, hashes, and bidirectional differences pass</td>
+<td>Reject candidate; skip acceptance run</td>
+</tr>
+<tr>
+<td style="text-align: right;">320–335</td>
+<td>Frozen comparison</td>
+<td>Twelve interleaved trials; settings hash unchanged</td>
+<td>Classify invalid/failed; do not combine runs</td>
+</tr>
+<tr>
+<td style="text-align: right;">335–340</td>
+<td>Decision</td>
+<td>Actual outcome and risks recorded</td>
+<td>Use <code>ImprovedOutsideTarget</code> or <code>NoMaterialImprovement</code> truthfully</td>
+</tr>
+<tr>
+<td style="text-align: right;">340–350</td>
+<td>Stop/export/redact</td>
+<td>Evidence bundle passes review</td>
+<td>Quarantine artifact until corrected</td>
+</tr>
+<tr>
+<td style="text-align: right;">350–358</td>
+<td>Delete and verify</td>
+<td>Resource group absent; tagged-resource query empty</td>
+<td>Report billing risk and escalate</td>
+</tr>
+<tr>
+<td style="text-align: right;">358–360</td>
+<td>Close</td>
+<td>Report owner and follow-up named</td>
+<td>Record incomplete action explicitly</td>
+</tr>
+</tbody>
+</table>
+<p>The live deployment cannot reliably finish in ten minutes; prepare a verified environment and use the deployment block to demonstrate gates/readbacks. Never hide a failed live checkpoint to protect the schedule.</p>
 <h2 id="deployment-approval-boundary">Deployment approval boundary<a class="headerlink" href="#deployment-approval-boundary" title="Permanent link">&para;</a></h2>
 <p>Deployment preflight and deployment approval are separate checkpoints:</p>
 <ol>
@@ -164,13 +420,24 @@
 <li>Before closing: remove the lab resource group and verify resource absence.</li>
 </ul>
 <p><span class="evidence-label" data-evidence-label="TARGET">TARGET</span> The approximately 80% to 40% grant-utilization comparison is a target for the isolated workshop query-workspace pool, not a promised result or whole-server memory claim.</p>
+<h2 id="target-miss-protocol">Target miss protocol<a class="headerlink" href="#target-miss-protocol" title="Permanent link">&para;</a></h2>
+<ul>
+<li><code>BaselineTargetNotReached</code>: preserve samples and stop at four workers/ten minutes. Do not resize, extend, or alter memory boundaries during class.</li>
+<li><code>ImprovedOutsideTarget</code>: report measured values and the qualifying reduction; do not round into the target band.</li>
+<li><code>NoMaterialImprovement</code>: retain the evidence, reject the candidate, and discuss the next bounded hypothesis.</li>
+<li><code>SafetyStop</code>, <code>ManualStop</code>, or <code>Failed</code>: do not resume until the cause is understood and the lab identity/safety checks pass.</li>
+</ul>
+<h2 id="screenshot-checklist">Screenshot checklist<a class="headerlink" href="#screenshot-checklist" title="Permanent link">&para;</a></h2>
+<p>Capture only at verified milestones: local home, local architecture, local TARGET panel, Azure preflight, network boundary, VM boundary, SQL readiness, admin readiness, workload outcome, and Pages/teardown. Follow <code>docs/images/screenshot-manifest.json</code>; a missing image remains <code>Screenshot pending verified milestone</code>. Never create illustrative UI and label it verified.</p>
   </div>
 
 </article>
 <nav class="page-navigation" aria-label="Previous and next pages">
 
-  <a rel="prev" href="index.html">Previous: Orientation and safety contract</a>
+  <a rel="prev" href="07-teardown.html">Previous: Teardown and review</a>
 
+
+  <a rel="next" href="attendee-guide.html">Next: Attendee guide</a>
 
 </nav>
 

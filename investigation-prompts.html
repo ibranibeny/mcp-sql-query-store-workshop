@@ -1,0 +1,405 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="An evidence-driven L400 workshop for optimizing a SQL Server stored procedure with GitHub Copilot and Microsoft SQL MCP.">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'sha256-n2HSwPq71BFLjgICami4p3JNMXLLnlGn5P5K8dJEyHk=' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https://cdn.jsdelivr.net; object-src 'none'; base-uri 'none'; form-action 'self'; upgrade-insecure-requests">
+  <title>Investigation prompt book | MCP SQL Query Store Workshop</title>
+  <link rel="stylesheet" href="assets/styles.css">
+  <script>(() => { const param = new URLSearchParams(window.location.search).get("scoutTheme"); const theme = param || (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"); document.documentElement.setAttribute("data-theme", theme); })();</script>
+  <script type="module" src="assets/app.js"></script>
+</head>
+<body data-page-route="investigation-prompts.html">
+  <a class="skip-link" href="#main-content">Skip to main content</a>
+  <header class="site-header">
+    <div>
+      <p class="site-kicker">SQL PERFORMANCE LAB // EVIDENCE FIRST</p>
+      <p class="site-title"><a href="index.html">MCP SQL Query Store Workshop</a></p>
+      <p class="site-description">An evidence-driven L400 workshop for optimizing a SQL Server stored procedure with GitHub Copilot and Microsoft SQL MCP.</p>
+    </div>
+    <button class="nav-toggle" type="button" data-nav-toggle aria-controls="module-navigation" aria-expanded="false">
+      <span aria-hidden="true">☰</span>
+      Modules
+    </button>
+  </header>
+  <nav id="module-navigation" class="module-navigation" aria-label="Workshop modules" data-open="false">
+    <form class="site-search" role="search" data-site-search>
+      <label for="site-search-input">Filter workshop pages</label>
+      <input id="site-search-input" type="search" autocomplete="off" placeholder="Search titles and phases" data-site-search-input>
+      <span role="status" aria-live="polite" data-site-search-status></span>
+    </form>
+    <ol><!---->
+      <li class="module-node">
+        <a class="module-node-link" href="index.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop 00</span>
+          <span class="module-title">Orientation and safety contract</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="01-mcp-and-copilot.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop 01</span>
+          <span class="module-title">MCP, SQL MCP Server, and GitHub Copilot</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="02-scenario-and-architecture.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop 02</span>
+          <span class="module-title">Scenario and two-tier architecture</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="03-deploy-with-powershell.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop 03</span>
+          <span class="module-title">Deploy with native Az PowerShell</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="04-create-memory-pressure.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop 04</span>
+          <span class="module-title">Create bounded query-memory pressure</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="05-investigate-with-vscode.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop 05</span>
+          <span class="module-title">Investigate from VS Code</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="06-optimize-and-prove.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop 06</span>
+          <span class="module-title">Optimize and prove</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="07-teardown.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop 07</span>
+          <span class="module-title">Teardown and review</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="facilitator-guide.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Facilitator resource</span>
+          <span class="module-title">Facilitator guide</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="attendee-guide.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop resource</span>
+          <span class="module-title">Attendee guide</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="troubleshooting.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop resource</span>
+          <span class="module-title">Troubleshooting</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="evidence-and-sources.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop resource</span>
+          <span class="module-title">Evidence and official sources</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="investigation-prompts.html" aria-current="page">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop resource</span>
+          <span class="module-title">Investigation prompt book</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="prompt-evaluation-rubric.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop resource</span>
+          <span class="module-title">Prompt evaluation rubric</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="offline-dependencies.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop resource</span>
+          <span class="module-title">Offline development dependencies</span>
+        </a>
+      </li>
+      <!---->
+    </ol>
+  </nav>
+  <main id="main-content" tabindex="-1">
+
+<article>
+  <header class="module-header">
+    <p class="module-meta">Workshop resource · 0 minutes</p>
+    <h1>Investigation prompt book</h1>
+    <div class="progress-control">
+      <button type="button" data-progress-toggle data-module-id="investigation-prompts.html" aria-pressed="false">
+        Mark module complete
+      </button>
+      <span role="status" data-progress-status aria-live="polite">Progress is stored only in this browser.</span>
+    </div>
+  </header>
+  <aside class="evidence-workbench" aria-labelledby="evidence-path-title">
+    <p class="workbench-label">DBA DECISION PATH</p>
+    <h2 id="evidence-path-title">Move claims through evidence</h2>
+    <ol class="evidence-path">
+      <li data-evidence-stage="hypothesis">TARGET / HYPOTHESIS</li>
+      <li data-evidence-stage="measured">MEASURED</li>
+      <li data-evidence-stage="decision">DECISION</li>
+    </ol>
+  </aside>
+  <div class="workshop-content">
+    <h1 id="investigation-prompt-book">Investigation prompt book<a class="headerlink" href="#investigation-prompt-book" title="Permanent link">&para;</a></h1>
+<p>Use one prompt at a time. Supply only reviewed schema, plan, Query Store, and tool output. Never paste credentials or connection strings. Each response must use every heading shown; “none” is acceptable only with justification.</p>
+<h2 id="prompt-01-schema-and-dependency-map">Prompt 01: Schema and dependency map<a class="headerlink" href="#prompt-01-schema-and-dependency-map" title="Permanent link">&para;</a></h2>
+<p>Analyze only the supplied <code>@mssql</code> schema/index/dependency evidence for the two workshop procedures. Cite object and field names exactly; identify anything not visible through <code>describe_entities</code>.</p>
+<h3 id="observations">Observations<a class="headerlink" href="#observations" title="Permanent link">&para;</a></h3>
+<p>List sourced schema facts.</p>
+<h3 id="missing-evidence">Missing evidence<a class="headerlink" href="#missing-evidence" title="Permanent link">&para;</a></h3>
+<p>List unknown keys, indexes, statistics, dependencies, and permissions.</p>
+<h3 id="hypotheses-ranked-by-confidence">Hypotheses ranked by confidence<a class="headerlink" href="#hypotheses-ranked-by-confidence" title="Permanent link">&para;</a></h3>
+<p>Rank possible schema effects without asserting causality.</p>
+<h3 id="proposed-experiments">Proposed experiments<a class="headerlink" href="#proposed-experiments" title="Permanent link">&para;</a></h3>
+<p>Request bounded metadata checks.</p>
+<h3 id="candidate-changes">Candidate changes<a class="headerlink" href="#candidate-changes" title="Permanent link">&para;</a></h3>
+<p>Describe possibilities; do not emit DDL yet.</p>
+<h3 id="risks-and-rollback">Risks and rollback<a class="headerlink" href="#risks-and-rollback" title="Permanent link">&para;</a></h3>
+<p>Cover dependency and deployment risk.</p>
+<h3 id="validation-criteria">Validation criteria<a class="headerlink" href="#validation-criteria" title="Permanent link">&para;</a></h3>
+<p>Define evidence needed before change.</p>
+<h2 id="prompt-02-business-logic-and-result-contract">Prompt 02: Business logic and result contract<a class="headerlink" href="#prompt-02-business-logic-and-result-contract" title="Permanent link">&para;</a></h2>
+<p>Explain the baseline procedure's business logic from its source and first-result metadata. Define parameters, validation, grain, aggregates, ranking, ordering, null behavior, and result types.</p>
+<h3 id="observations_1">Observations<a class="headerlink" href="#observations_1" title="Permanent link">&para;</a></h3>
+<p>Separate explicit code behavior from interpretation.</p>
+<h3 id="missing-evidence_1">Missing evidence<a class="headerlink" href="#missing-evidence_1" title="Permanent link">&para;</a></h3>
+<p>Identify ambiguous business rules.</p>
+<h3 id="hypotheses-ranked-by-confidence_1">Hypotheses ranked by confidence<a class="headerlink" href="#hypotheses-ranked-by-confidence_1" title="Permanent link">&para;</a></h3>
+<p>Rank interpretations of ambiguous logic.</p>
+<h3 id="proposed-experiments_1">Proposed experiments<a class="headerlink" href="#proposed-experiments_1" title="Permanent link">&para;</a></h3>
+<p>Propose edge-case executions.</p>
+<h3 id="candidate-changes_1">Candidate changes<a class="headerlink" href="#candidate-changes_1" title="Permanent link">&para;</a></h3>
+<p>Name contract-preserving refactor categories only.</p>
+<h3 id="risks-and-rollback_1">Risks and rollback<a class="headerlink" href="#risks-and-rollback_1" title="Permanent link">&para;</a></h3>
+<p>Explain semantic-change hazards.</p>
+<h3 id="validation-criteria_1">Validation criteria<a class="headerlink" href="#validation-criteria_1" title="Permanent link">&para;</a></h3>
+<p>Require metadata and bidirectional result comparison.</p>
+<h2 id="prompt-03-actual-execution-plan-review">Prompt 03: Actual execution plan review<a class="headerlink" href="#prompt-03-actual-execution-plan-review" title="Permanent link">&para;</a></h2>
+<p>Review the supplied actual plan with parameter values. Correlate estimated/actual rows, operators, warnings, joins, scans, sorts, hashes, parallelism, and memory grant properties.</p>
+<h3 id="observations_2">Observations<a class="headerlink" href="#observations_2" title="Permanent link">&para;</a></h3>
+<p>Cite operator IDs and plan properties.</p>
+<h3 id="missing-evidence_2">Missing evidence<a class="headerlink" href="#missing-evidence_2" title="Permanent link">&para;</a></h3>
+<p>Request runtime, statistics, and alternate-parameter evidence.</p>
+<h3 id="hypotheses-ranked-by-confidence_2">Hypotheses ranked by confidence<a class="headerlink" href="#hypotheses-ranked-by-confidence_2" title="Permanent link">&para;</a></h3>
+<p>Rank causes of misestimation or excess work.</p>
+<h3 id="proposed-experiments_2">Proposed experiments<a class="headerlink" href="#proposed-experiments_2" title="Permanent link">&para;</a></h3>
+<p>Define safe plan comparisons.</p>
+<h3 id="candidate-changes_2">Candidate changes<a class="headerlink" href="#candidate-changes_2" title="Permanent link">&para;</a></h3>
+<p>Keep changes provisional.</p>
+<h3 id="risks-and-rollback_2">Risks and rollback<a class="headerlink" href="#risks-and-rollback_2" title="Permanent link">&para;</a></h3>
+<p>Cover parameter sensitivity and regressions.</p>
+<h3 id="validation-criteria_2">Validation criteria<a class="headerlink" href="#validation-criteria_2" title="Permanent link">&para;</a></h3>
+<p>Require actual plans under representative parameters.</p>
+<h2 id="prompt-04-memory-grant-diagnosis">Prompt 04: Memory grant diagnosis<a class="headerlink" href="#prompt-04-memory-grant-diagnosis" title="Permanent link">&para;</a></h2>
+<p>Use <code>get_memory_snapshot</code> and <code>get_active_workshop_grants</code> output to distinguish pool utilization, requested/granted/used memory, waiters, and host/process safety. The denominator is the regular workshop semaphore.</p>
+<h3 id="observations_3">Observations<a class="headerlink" href="#observations_3" title="Permanent link">&para;</a></h3>
+<p>Include timestamps, units, run IDs, and tags.</p>
+<h3 id="missing-evidence_3">Missing evidence<a class="headerlink" href="#missing-evidence_3" title="Permanent link">&para;</a></h3>
+<p>Identify samples or per-request context still needed.</p>
+<h3 id="hypotheses-ranked-by-confidence_3">Hypotheses ranked by confidence<a class="headerlink" href="#hypotheses-ranked-by-confidence_3" title="Permanent link">&para;</a></h3>
+<p>Rank overgrant, concurrency, spill, and estimation explanations.</p>
+<h3 id="proposed-experiments_3">Proposed experiments<a class="headerlink" href="#proposed-experiments_3" title="Permanent link">&para;</a></h3>
+<p>Propose bounded repeated samples.</p>
+<h3 id="candidate-changes_3">Candidate changes<a class="headerlink" href="#candidate-changes_3" title="Permanent link">&para;</a></h3>
+<p>Do not recommend server-memory changes from one snapshot.</p>
+<h3 id="risks-and-rollback_3">Risks and rollback<a class="headerlink" href="#risks-and-rollback_3" title="Permanent link">&para;</a></h3>
+<p>Preserve safety thresholds.</p>
+<h3 id="validation-criteria_3">Validation criteria<a class="headerlink" href="#validation-criteria_3" title="Permanent link">&para;</a></h3>
+<p>Require three consecutive band samples and corroboration.</p>
+<h2 id="prompt-05-query-store-runtime-and-waits">Prompt 05: Query Store runtime and waits<a class="headerlink" href="#prompt-05-query-store-runtime-and-waits" title="Permanent link">&para;</a></h2>
+<p>Analyze bounded <code>get_query_store_top_queries</code> and <code>get_query_store_waits</code> results for the exact UTC window. Correlate Query ID, Plan ID, execution count, duration, CPU, reads, memory, TempDB, and wait categories.</p>
+<h3 id="observations_4">Observations<a class="headerlink" href="#observations_4" title="Permanent link">&para;</a></h3>
+<p>Use weighted metrics and exact windows.</p>
+<h3 id="missing-evidence_4">Missing evidence<a class="headerlink" href="#missing-evidence_4" title="Permanent link">&para;</a></h3>
+<p>Call out interval overlap and absent plans.</p>
+<h3 id="hypotheses-ranked-by-confidence_4">Hypotheses ranked by confidence<a class="headerlink" href="#hypotheses-ranked-by-confidence_4" title="Permanent link">&para;</a></h3>
+<p>Rank explanations for dominant waits.</p>
+<h3 id="proposed-experiments_4">Proposed experiments<a class="headerlink" href="#proposed-experiments_4" title="Permanent link">&para;</a></h3>
+<p>Propose a bounded comparison window.</p>
+<h3 id="candidate-changes_4">Candidate changes<a class="headerlink" href="#candidate-changes_4" title="Permanent link">&para;</a></h3>
+<p>Avoid treating waits as a direct prescription.</p>
+<h3 id="risks-and-rollback_4">Risks and rollback<a class="headerlink" href="#risks-and-rollback_4" title="Permanent link">&para;</a></h3>
+<p>Cover workload drift.</p>
+<h3 id="validation-criteria_4">Validation criteria<a class="headerlink" href="#validation-criteria_4" title="Permanent link">&para;</a></h3>
+<p>Require matching run/procedure/time identity.</p>
+<h2 id="prompt-06-grant-and-spill-relationship">Prompt 06: Grant and spill relationship<a class="headerlink" href="#prompt-06-grant-and-spill-relationship" title="Permanent link">&para;</a></h2>
+<p>Compare requested, granted, ideal, used, max-used, waiter, and spill evidence. Explain why both overgrant and spill can occur across parameter sets.</p>
+<h3 id="observations_5">Observations<a class="headerlink" href="#observations_5" title="Permanent link">&para;</a></h3>
+<p>Quote values and units.</p>
+<h3 id="missing-evidence_5">Missing evidence<a class="headerlink" href="#missing-evidence_5" title="Permanent link">&para;</a></h3>
+<p>Request plan warnings, TempDB, and cardinality evidence.</p>
+<h3 id="hypotheses-ranked-by-confidence_5">Hypotheses ranked by confidence<a class="headerlink" href="#hypotheses-ranked-by-confidence_5" title="Permanent link">&para;</a></h3>
+<p>Rank causes per parameter set.</p>
+<h3 id="proposed-experiments_5">Proposed experiments<a class="headerlink" href="#proposed-experiments_5" title="Permanent link">&para;</a></h3>
+<p>Use fixed parameters and conditions.</p>
+<h3 id="candidate-changes_5">Candidate changes<a class="headerlink" href="#candidate-changes_5" title="Permanent link">&para;</a></h3>
+<p>Separate query-shape, index, statistics, and hint options.</p>
+<h3 id="risks-and-rollback_5">Risks and rollback<a class="headerlink" href="#risks-and-rollback_5" title="Permanent link">&para;</a></h3>
+<p>Avoid global cache or server changes.</p>
+<h3 id="validation-criteria_5">Validation criteria<a class="headerlink" href="#validation-criteria_5" title="Permanent link">&para;</a></h3>
+<p>Require reduced grant plus no spill/wait regression.</p>
+<h2 id="prompt-07-baseline-versus-candidate-comparison">Prompt 07: Baseline versus candidate comparison<a class="headerlink" href="#prompt-07-baseline-versus-candidate-comparison" title="Permanent link">&para;</a></h2>
+<p>Use <code>compare_workshop_runs</code> output and the frozen-settings hash to compare peak/median utilization, duration, CPU, reads, spills, and waits across exactly twelve <code>ABBA BAAB ABBA</code> trials.</p>
+<h3 id="observations_6">Observations<a class="headerlink" href="#observations_6" title="Permanent link">&para;</a></h3>
+<p>Report actual values and outcome band.</p>
+<h3 id="missing-evidence_6">Missing evidence<a class="headerlink" href="#missing-evidence_6" title="Permanent link">&para;</a></h3>
+<p>Identify any linkage or trial gap.</p>
+<h3 id="hypotheses-ranked-by-confidence_6">Hypotheses ranked by confidence<a class="headerlink" href="#hypotheses-ranked-by-confidence_6" title="Permanent link">&para;</a></h3>
+<p>Rank explanations for differences and bias.</p>
+<h3 id="proposed-experiments_6">Proposed experiments<a class="headerlink" href="#proposed-experiments_6" title="Permanent link">&para;</a></h3>
+<p>Propose repetition only if bounded and justified.</p>
+<h3 id="candidate-changes_6">Candidate changes<a class="headerlink" href="#candidate-changes_6" title="Permanent link">&para;</a></h3>
+<p>State retain, reject, or investigate—not an automatic decision.</p>
+<h3 id="risks-and-rollback_6">Risks and rollback<a class="headerlink" href="#risks-and-rollback_6" title="Permanent link">&para;</a></h3>
+<p>Cover regressions and environmental drift.</p>
+<h3 id="validation-criteria_6">Validation criteria<a class="headerlink" href="#validation-criteria_6" title="Permanent link">&para;</a></h3>
+<p>Require correctness, secondary improvement, and no material regression.</p>
+<h2 id="prompt-08-correctness-and-contract-preservation">Prompt 08: Correctness and contract preservation<a class="headerlink" href="#prompt-08-correctness-and-contract-preservation" title="Permanent link">&para;</a></h2>
+<p>Skeptically review results from <code>sql/07-ValidateEquivalence.sql</code>. Check metadata, row counts, hashes, bidirectional <code>EXCEPT</code>, error behavior, nulls, ordering, and parameter matrix.</p>
+<h3 id="observations_7">Observations<a class="headerlink" href="#observations_7" title="Permanent link">&para;</a></h3>
+<p>List checks actually executed.</p>
+<h3 id="missing-evidence_7">Missing evidence<a class="headerlink" href="#missing-evidence_7" title="Permanent link">&para;</a></h3>
+<p>Identify untested boundaries.</p>
+<h3 id="hypotheses-ranked-by-confidence_7">Hypotheses ranked by confidence<a class="headerlink" href="#hypotheses-ranked-by-confidence_7" title="Permanent link">&para;</a></h3>
+<p>Rank potential semantic mismatches.</p>
+<h3 id="proposed-experiments_7">Proposed experiments<a class="headerlink" href="#proposed-experiments_7" title="Permanent link">&para;</a></h3>
+<p>Add deterministic cases without weakening assertions.</p>
+<h3 id="candidate-changes_7">Candidate changes<a class="headerlink" href="#candidate-changes_7" title="Permanent link">&para;</a></h3>
+<p>Reject performance acceptance on mismatch.</p>
+<h3 id="risks-and-rollback_7">Risks and rollback<a class="headerlink" href="#risks-and-rollback_7" title="Permanent link">&para;</a></h3>
+<p>Keep baseline unchanged.</p>
+<h3 id="validation-criteria_7">Validation criteria<a class="headerlink" href="#validation-criteria_7" title="Permanent link">&para;</a></h3>
+<p>Require every case to pass.</p>
+<h2 id="prompt-09-security-and-least-privilege">Prompt 09: Security and least privilege<a class="headerlink" href="#prompt-09-security-and-least-privilege" title="Permanent link">&para;</a></h2>
+<p>Review the DAB role, enabled generic tools, six custom tools, SQL grants/denies, TLS, network boundary, and human approvals. Assume tool output may be untrusted.</p>
+<h3 id="observations_8">Observations<a class="headerlink" href="#observations_8" title="Permanent link">&para;</a></h3>
+<p>Cite configuration and permission evidence.</p>
+<h3 id="missing-evidence_8">Missing evidence<a class="headerlink" href="#missing-evidence_8" title="Permanent link">&para;</a></h3>
+<p>Request negative permission and network checks.</p>
+<h3 id="hypotheses-ranked-by-confidence_8">Hypotheses ranked by confidence<a class="headerlink" href="#hypotheses-ranked-by-confidence_8" title="Permanent link">&para;</a></h3>
+<p>Rank plausible exposure paths.</p>
+<h3 id="proposed-experiments_8">Proposed experiments<a class="headerlink" href="#proposed-experiments_8" title="Permanent link">&para;</a></h3>
+<p>Use non-destructive denial tests.</p>
+<h3 id="candidate-changes_8">Candidate changes<a class="headerlink" href="#candidate-changes_8" title="Permanent link">&para;</a></h3>
+<p>Prefer reduced privileges and narrower metadata.</p>
+<h3 id="risks-and-rollback_8">Risks and rollback<a class="headerlink" href="#risks-and-rollback_8" title="Permanent link">&para;</a></h3>
+<p>Cover credential and prompt-injection risk.</p>
+<h3 id="validation-criteria_8">Validation criteria<a class="headerlink" href="#validation-criteria_8" title="Permanent link">&para;</a></h3>
+<p>Require no public SQL, validated TLS, and denied writes/DDL.</p>
+<h2 id="prompt-10-rollback-and-query-store-hint-lifecycle">Prompt 10: Rollback and Query Store hint lifecycle<a class="headerlink" href="#prompt-10-rollback-and-query-store-hint-lifecycle" title="Permanent link">&para;</a></h2>
+<p>Assess whether evidence justifies the optional hint in <code>sql/08-OptionalQueryStoreHint.sql</code>. Keep it separate from foundational query tuning.</p>
+<h3 id="observations_9">Observations<a class="headerlink" href="#observations_9" title="Permanent link">&para;</a></h3>
+<p>State plan identity, current hint state, and measured issue.</p>
+<h3 id="missing-evidence_9">Missing evidence<a class="headerlink" href="#missing-evidence_9" title="Permanent link">&para;</a></h3>
+<p>List statistics/index/query-design checks not exhausted.</p>
+<h3 id="hypotheses-ranked-by-confidence_9">Hypotheses ranked by confidence<a class="headerlink" href="#hypotheses-ranked-by-confidence_9" title="Permanent link">&para;</a></h3>
+<p>Rank why a hint might mitigate rather than fix.</p>
+<h3 id="proposed-experiments_9">Proposed experiments<a class="headerlink" href="#proposed-experiments_9" title="Permanent link">&para;</a></h3>
+<p>Define inspect, set, measure, clear, and verify steps.</p>
+<h3 id="candidate-changes_9">Candidate changes<a class="headerlink" href="#candidate-changes_9" title="Permanent link">&para;</a></h3>
+<p>Propose only a supported bounded hint.</p>
+<h3 id="risks-and-rollback_9">Risks and rollback<a class="headerlink" href="#risks-and-rollback_9" title="Permanent link">&para;</a></h3>
+<p>Name clear operation and failure states.</p>
+<h3 id="validation-criteria_9">Validation criteria<a class="headerlink" href="#validation-criteria_9" title="Permanent link">&para;</a></h3>
+<p>Require verified removal and separate evidence.</p>
+<h2 id="prompt-11-skeptical-peer-review">Prompt 11: Skeptical peer review<a class="headerlink" href="#prompt-11-skeptical-peer-review" title="Permanent link">&para;</a></h2>
+<p>Act as an independent senior DBA. Attempt to falsify the investigation, contract proof, performance attribution, and security conclusions. Flag targets presented as measurements.</p>
+<h3 id="observations_10">Observations<a class="headerlink" href="#observations_10" title="Permanent link">&para;</a></h3>
+<p>List claims with direct support.</p>
+<h3 id="missing-evidence_10">Missing evidence<a class="headerlink" href="#missing-evidence_10" title="Permanent link">&para;</a></h3>
+<p>List evidence that blocks acceptance.</p>
+<h3 id="hypotheses-ranked-by-confidence_10">Hypotheses ranked by confidence<a class="headerlink" href="#hypotheses-ranked-by-confidence_10" title="Permanent link">&para;</a></h3>
+<p>Rank alternative explanations.</p>
+<h3 id="proposed-experiments_10">Proposed experiments<a class="headerlink" href="#proposed-experiments_10" title="Permanent link">&para;</a></h3>
+<p>Prioritize the cheapest decisive checks.</p>
+<h3 id="candidate-changes_10">Candidate changes<a class="headerlink" href="#candidate-changes_10" title="Permanent link">&para;</a></h3>
+<p>Recommend no change when evidence is insufficient.</p>
+<h3 id="risks-and-rollback_10">Risks and rollback<a class="headerlink" href="#risks-and-rollback_10" title="Permanent link">&para;</a></h3>
+<p>Identify hidden blast radius.</p>
+<h3 id="validation-criteria_10">Validation criteria<a class="headerlink" href="#validation-criteria_10" title="Permanent link">&para;</a></h3>
+<p>Define a reproducible sign-off threshold.</p>
+<h2 id="prompt-12-executive-evidence-summary">Prompt 12: Executive evidence summary<a class="headerlink" href="#prompt-12-executive-evidence-summary" title="Permanent link">&para;</a></h2>
+<p>Prepare a concise decision memo for a technical owner. Preserve actual outcome classification, correctness status, performance evidence, limitations, security boundary, cost stop, and next action.</p>
+<h3 id="observations_11">Observations<a class="headerlink" href="#observations_11" title="Permanent link">&para;</a></h3>
+<p>Summarize only attributed facts.</p>
+<h3 id="missing-evidence_11">Missing evidence<a class="headerlink" href="#missing-evidence_11" title="Permanent link">&para;</a></h3>
+<p>State unresolved questions plainly.</p>
+<h3 id="hypotheses-ranked-by-confidence_11">Hypotheses ranked by confidence<a class="headerlink" href="#hypotheses-ranked-by-confidence_11" title="Permanent link">&para;</a></h3>
+<p>Include only decision-relevant hypotheses.</p>
+<h3 id="proposed-experiments_11">Proposed experiments<a class="headerlink" href="#proposed-experiments_11" title="Permanent link">&para;</a></h3>
+<p>Name follow-up owner and bounded test.</p>
+<h3 id="candidate-changes_11">Candidate changes<a class="headerlink" href="#candidate-changes_11" title="Permanent link">&para;</a></h3>
+<p>State retained/rejected/deferred disposition.</p>
+<h3 id="risks-and-rollback_11">Risks and rollback<a class="headerlink" href="#risks-and-rollback_11" title="Permanent link">&para;</a></h3>
+<p>Summarize rollback and production caveats.</p>
+<h3 id="validation-criteria_11">Validation criteria<a class="headerlink" href="#validation-criteria_11" title="Permanent link">&para;</a></h3>
+<p>Include approval and teardown proof.</p>
+<h2 id="prompt-13-teardown-and-evidence-integrity">Prompt 13: Teardown and evidence integrity<a class="headerlink" href="#prompt-13-teardown-and-evidence-integrity" title="Permanent link">&para;</a></h2>
+<p>Review the exported bundle and teardown output. Confirm classification, hashes, redaction, run linkage, resource-group absence, and empty tagged-resource result.</p>
+<h3 id="observations_12">Observations<a class="headerlink" href="#observations_12" title="Permanent link">&para;</a></h3>
+<p>List artifact and Azure readback facts.</p>
+<h3 id="missing-evidence_12">Missing evidence<a class="headerlink" href="#missing-evidence_12" title="Permanent link">&para;</a></h3>
+<p>Identify absent hashes, timestamps, or ownership.</p>
+<h3 id="hypotheses-ranked-by-confidence_12">Hypotheses ranked by confidence<a class="headerlink" href="#hypotheses-ranked-by-confidence_12" title="Permanent link">&para;</a></h3>
+<p>Rank residual cost or disclosure risks.</p>
+<h3 id="proposed-experiments_12">Proposed experiments<a class="headerlink" href="#proposed-experiments_12" title="Permanent link">&para;</a></h3>
+<p>Request read-only verification only.</p>
+<h3 id="candidate-changes_12">Candidate changes<a class="headerlink" href="#candidate-changes_12" title="Permanent link">&para;</a></h3>
+<p>Propose redaction or evidence correction.</p>
+<h3 id="risks-and-rollback_12">Risks and rollback<a class="headerlink" href="#risks-and-rollback_12" title="Permanent link">&para;</a></h3>
+<p>Do not destroy required audit evidence.</p>
+<h3 id="validation-criteria_12">Validation criteria<a class="headerlink" href="#validation-criteria_12" title="Permanent link">&para;</a></h3>
+<p>Require sanitized artifacts and proved cost stop.</p>
+  </div>
+
+</article>
+<nav class="page-navigation" aria-label="Previous and next pages">
+
+  <a rel="prev" href="evidence-and-sources.html">Previous: Evidence and official sources</a>
+
+
+  <a rel="next" href="prompt-evaluation-rubric.html">Next: Prompt evaluation rubric</a>
+
+</nav>
+
+  </main>
+  <footer class="site-footer">
+    <p>Evidence-driven SQL tuning with human review. Do not run the workshop workload against production.</p>
+  </footer>
+</body>
+</html>

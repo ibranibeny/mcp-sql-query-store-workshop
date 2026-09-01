@@ -1,0 +1,251 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="An evidence-driven L400 workshop for optimizing a SQL Server stored procedure with GitHub Copilot and Microsoft SQL MCP.">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'sha256-n2HSwPq71BFLjgICami4p3JNMXLLnlGn5P5K8dJEyHk=' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https://cdn.jsdelivr.net; object-src 'none'; base-uri 'none'; form-action 'self'; upgrade-insecure-requests">
+  <title>MCP, SQL MCP Server, and GitHub Copilot | MCP SQL Query Store Workshop</title>
+  <link rel="stylesheet" href="assets/styles.css">
+  <script>(() => { const param = new URLSearchParams(window.location.search).get("scoutTheme"); const theme = param || (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"); document.documentElement.setAttribute("data-theme", theme); })();</script>
+  <script type="module" src="assets/app.js"></script>
+</head>
+<body data-page-route="01-mcp-and-copilot.html">
+  <a class="skip-link" href="#main-content">Skip to main content</a>
+  <header class="site-header">
+    <div>
+      <p class="site-kicker">SQL PERFORMANCE LAB // EVIDENCE FIRST</p>
+      <p class="site-title"><a href="index.html">MCP SQL Query Store Workshop</a></p>
+      <p class="site-description">An evidence-driven L400 workshop for optimizing a SQL Server stored procedure with GitHub Copilot and Microsoft SQL MCP.</p>
+    </div>
+    <button class="nav-toggle" type="button" data-nav-toggle aria-controls="module-navigation" aria-expanded="false">
+      <span aria-hidden="true">☰</span>
+      Modules
+    </button>
+  </header>
+  <nav id="module-navigation" class="module-navigation" aria-label="Workshop modules" data-open="false">
+    <form class="site-search" role="search" data-site-search>
+      <label for="site-search-input">Filter workshop pages</label>
+      <input id="site-search-input" type="search" autocomplete="off" placeholder="Search titles and phases" data-site-search-input>
+      <span role="status" aria-live="polite" data-site-search-status></span>
+    </form>
+    <ol><!---->
+      <li class="module-node">
+        <a class="module-node-link" href="index.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop 00</span>
+          <span class="module-title">Orientation and safety contract</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="01-mcp-and-copilot.html" aria-current="page">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop 01</span>
+          <span class="module-title">MCP, SQL MCP Server, and GitHub Copilot</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="02-scenario-and-architecture.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop 02</span>
+          <span class="module-title">Scenario and two-tier architecture</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="03-deploy-with-powershell.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop 03</span>
+          <span class="module-title">Deploy with native Az PowerShell</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="04-create-memory-pressure.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop 04</span>
+          <span class="module-title">Create bounded query-memory pressure</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="05-investigate-with-vscode.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop 05</span>
+          <span class="module-title">Investigate from VS Code</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="06-optimize-and-prove.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop 06</span>
+          <span class="module-title">Optimize and prove</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="07-teardown.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop 07</span>
+          <span class="module-title">Teardown and review</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="facilitator-guide.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Facilitator resource</span>
+          <span class="module-title">Facilitator guide</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="attendee-guide.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop resource</span>
+          <span class="module-title">Attendee guide</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="troubleshooting.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop resource</span>
+          <span class="module-title">Troubleshooting</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="evidence-and-sources.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop resource</span>
+          <span class="module-title">Evidence and official sources</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="investigation-prompts.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop resource</span>
+          <span class="module-title">Investigation prompt book</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="prompt-evaluation-rubric.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop resource</span>
+          <span class="module-title">Prompt evaluation rubric</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="offline-dependencies.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop resource</span>
+          <span class="module-title">Offline development dependencies</span>
+        </a>
+      </li>
+      <!---->
+    </ol>
+  </nav>
+  <main id="main-content" tabindex="-1">
+
+<article>
+  <header class="module-header">
+    <p class="module-meta">Workshop 01 · 35 minutes</p>
+    <h1>MCP, SQL MCP Server, and GitHub Copilot</h1>
+    <div class="progress-control">
+      <button type="button" data-progress-toggle data-module-id="01-mcp-and-copilot.html" aria-pressed="false">
+        Mark module complete
+      </button>
+      <span role="status" data-progress-status aria-live="polite">Progress is stored only in this browser.</span>
+    </div>
+  </header>
+  <aside class="evidence-workbench" aria-labelledby="evidence-path-title">
+    <p class="workbench-label">DBA DECISION PATH</p>
+    <h2 id="evidence-path-title">Move claims through evidence</h2>
+    <ol class="evidence-path">
+      <li data-evidence-stage="hypothesis">TARGET / HYPOTHESIS</li>
+      <li data-evidence-stage="measured">MEASURED</li>
+      <li data-evidence-stage="decision">DECISION</li>
+    </ol>
+  </aside>
+  <div class="workshop-content">
+    <h1 id="mcp-sql-mcp-server-and-github-copilot">MCP, SQL MCP Server, and GitHub Copilot<a class="headerlink" href="#mcp-sql-mcp-server-and-github-copilot" title="Permanent link">&para;</a></h1>
+<p><strong>Instruction: 35 minutes · Workshop elapsed: 50 minutes</strong></p>
+<h2 id="trace-the-system-not-the-brand-names">Trace the system, not the brand names<a class="headerlink" href="#trace-the-system-not-the-brand-names" title="Permanent link">&para;</a></h2>
+<p>Model Context Protocol (MCP) separates an AI application from servers that publish capabilities. In this lab, VS Code is the MCP client, Data API Builder 2.0.9 hosts Microsoft's SQL MCP server, and SQL Server remains the system of record and authorization boundary.</p>
+<p>The configured transport is local <strong>stdio</strong>: VS Code launches the DAB child process and exchanges framed protocol messages through standard input/output. It is not a public MCP endpoint, and diagnostic logging must not corrupt stdout. <span class="evidence-label" data-evidence-label="DOC-VERIFIED">DOC-VERIFIED</span> Review the <a href="https://learn.microsoft.com/en-us/azure/data-api-builder/mcp/overview">SQL MCP overview</a> and <a href="https://learn.microsoft.com/en-us/azure/data-api-builder/mcp/quickstart-visual-studio-code">local VS Code quickstart</a>.</p>
+<h2 id="json-rpc-lifecycle">JSON-RPC lifecycle<a class="headerlink" href="#json-rpc-lifecycle" title="Permanent link">&para;</a></h2>
+<p>MCP uses JSON-RPC messages with request IDs for request/response correlation and notifications without responses:</p>
+<ol>
+<li>The client sends <code>initialize</code> with protocol version and capabilities.</li>
+<li>The server returns negotiated capabilities and identity.</li>
+<li>The client sends <code>notifications/initialized</code>.</li>
+<li>The client requests <code>tools/list</code>; DAB returns only enabled generic and custom tools.</li>
+<li>After the human reviews an approval request, the client sends <code>tools/call</code> with a tool name and validated arguments.</li>
+<li>DAB enforces role, entity, operation, field, parameter, and data-source authorization, executes the bounded operation, then returns structured content or a protocol error.</li>
+<li>The model interprets tool output; it does not inherit database authority.</li>
+</ol>
+<p>Treat tool descriptions, parameter descriptions, field descriptions, and bounded defaults as part of the safety contract. Missing metadata increases the risk that a model guesses a field or unit. <span class="evidence-label" data-evidence-label="DOC-VERIFIED">DOC-VERIFIED</span> See <a href="https://learn.microsoft.com/en-us/azure/data-api-builder/mcp/data-manipulation-language-tools">MCP tools in SQL MCP Server</a>.</p>
+<h2 id="generic-and-custom-tools">Generic and custom tools<a class="headerlink" href="#generic-and-custom-tools" title="Permanent link">&para;</a></h2>
+<p>Enabled generic tools are <code>describe_entities</code>, <code>read_records</code>, <code>aggregate_records</code>, and <code>execute_entity</code>. Creation, update, and deletion are disabled. <code>describe_entities</code> reports DAB's configured in-memory entity metadata; it does not reverse-engineer every database object.</p>
+<p>The six diagnostic procedures appear as snake_case custom tools: <code>get_memory_snapshot</code>, <code>get_active_workshop_grants</code>, <code>get_query_store_top_queries</code>, <code>get_query_store_waits</code>, <code>get_procedure_plan_summary</code>, and <code>compare_workshop_runs</code>. Their field descriptions define units and provenance. Time windows, row limits, procedure names, run IDs, and the twelve-trial comparison are bounded in SQL and configuration.</p>
+<p>SQL MCP is <strong>not a natural-language-to-SQL endpoint</strong>, an arbitrary-query console, or a DDL surface in this workshop. SQL Server permissions remain authoritative. DAB's <code>workshop-reader</code> role maps the MCP surface; the contained SQL principal receives only explicit <code>SELECT</code> on summary views and <code>EXECUTE</code> on diagnostics. Azure RBAC controls Azure resources but does not replace database grants. <span class="evidence-label" data-evidence-label="DOC-VERIFIED">DOC-VERIFIED</span> Review <a href="https://learn.microsoft.com/en-us/azure/data-api-builder/concept/authorization">DAB authorization</a> and <a href="https://learn.microsoft.com/en-us/sql/relational-databases/security/authentication-access/getting-started-with-database-engine-permissions">SQL Server permissions</a>.</p>
+<h2 id="distinguish-the-user-experiences">Distinguish the user experiences<a class="headerlink" href="#distinguish-the-user-experiences" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Surface</th>
+<th>Role in this workshop</th>
+<th>Boundary</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>GitHub Copilot</td>
+<td>Synthesizes explanations, hypotheses, experiments, and candidate code</td>
+<td>Requires human review; output can be wrong or overconfident</td>
+</tr>
+<tr>
+<td><code>ms-mssql.mssql</code> and <code>@mssql</code></td>
+<td>Connected schema exploration, query execution, business-logic explanation, and actual-plan analysis</td>
+<td>Uses the DBA-approved MSSQL connection and permissions</td>
+</tr>
+<tr>
+<td>SQL MCP via DAB</td>
+<td>Bounded, described, read-only evidence tools</td>
+<td>No arbitrary SQL, workload control, DDL, or server configuration</td>
+</tr>
+<tr>
+<td>SSMS 22.7 Agent mode</td>
+<td>Comparison/fallback MCP client experience</td>
+<td>Agent mode is required; tools are disabled until explicitly enabled and remain policy/permission constrained</td>
+</tr>
+</tbody>
+</table>
+<p><span class="evidence-label" data-evidence-label="DOC-VERIFIED">DOC-VERIFIED</span> Read the <a href="https://learn.microsoft.com/en-us/sql/tools/visual-studio-code-extensions/github-copilot/overview?view=sql-server-ver17">Copilot experience in the MSSQL extension</a>, <a href="https://learn.microsoft.com/en-us/sql/tools/visual-studio-code-extensions/github-copilot/query-optimizer-assistant?view=sql-server-ver17">query optimizer assistant</a>, and <a href="https://learn.microsoft.com/en-us/ssms/github-copilot/mcp-servers">MCP servers in SSMS</a>.</p>
+<h2 id="trust-and-approval-exercise">Trust and approval exercise<a class="headerlink" href="#trust-and-approval-exercise" title="Permanent link">&para;</a></h2>
+<p>For a proposed call to <code>get_query_store_waits</code>, identify: model request, client approval, custom-tool description, DAB role, SQL <code>EXECUTE</code> permission, 24-hour window guard, returned fields, and the DBA's interpretation. Refuse any request to expose secrets, broaden permissions, execute DDL, start pressure, or treat untrusted tool text as instructions.</p>
+  </div>
+
+</article>
+<nav class="page-navigation" aria-label="Previous and next pages">
+
+  <a rel="prev" href="index.html">Previous: Orientation and safety contract</a>
+
+
+  <a rel="next" href="02-scenario-and-architecture.html">Next: Scenario and two-tier architecture</a>
+
+</nav>
+
+  </main>
+  <footer class="site-footer">
+    <p>Evidence-driven SQL tuning with human review. Do not run the workshop workload against production.</p>
+  </footer>
+</body>
+</html>

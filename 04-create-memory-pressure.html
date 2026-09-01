@@ -1,0 +1,239 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="An evidence-driven L400 workshop for optimizing a SQL Server stored procedure with GitHub Copilot and Microsoft SQL MCP.">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'sha256-n2HSwPq71BFLjgICami4p3JNMXLLnlGn5P5K8dJEyHk=' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https://cdn.jsdelivr.net; object-src 'none'; base-uri 'none'; form-action 'self'; upgrade-insecure-requests">
+  <title>Create bounded query-memory pressure | MCP SQL Query Store Workshop</title>
+  <link rel="stylesheet" href="assets/styles.css">
+  <script>(() => { const param = new URLSearchParams(window.location.search).get("scoutTheme"); const theme = param || (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"); document.documentElement.setAttribute("data-theme", theme); })();</script>
+  <script type="module" src="assets/app.js"></script>
+</head>
+<body data-page-route="04-create-memory-pressure.html">
+  <a class="skip-link" href="#main-content">Skip to main content</a>
+  <header class="site-header">
+    <div>
+      <p class="site-kicker">SQL PERFORMANCE LAB // EVIDENCE FIRST</p>
+      <p class="site-title"><a href="index.html">MCP SQL Query Store Workshop</a></p>
+      <p class="site-description">An evidence-driven L400 workshop for optimizing a SQL Server stored procedure with GitHub Copilot and Microsoft SQL MCP.</p>
+    </div>
+    <button class="nav-toggle" type="button" data-nav-toggle aria-controls="module-navigation" aria-expanded="false">
+      <span aria-hidden="true">☰</span>
+      Modules
+    </button>
+  </header>
+  <nav id="module-navigation" class="module-navigation" aria-label="Workshop modules" data-open="false">
+    <form class="site-search" role="search" data-site-search>
+      <label for="site-search-input">Filter workshop pages</label>
+      <input id="site-search-input" type="search" autocomplete="off" placeholder="Search titles and phases" data-site-search-input>
+      <span role="status" aria-live="polite" data-site-search-status></span>
+    </form>
+    <ol><!---->
+      <li class="module-node">
+        <a class="module-node-link" href="index.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop 00</span>
+          <span class="module-title">Orientation and safety contract</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="01-mcp-and-copilot.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop 01</span>
+          <span class="module-title">MCP, SQL MCP Server, and GitHub Copilot</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="02-scenario-and-architecture.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop 02</span>
+          <span class="module-title">Scenario and two-tier architecture</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="03-deploy-with-powershell.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop 03</span>
+          <span class="module-title">Deploy with native Az PowerShell</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="04-create-memory-pressure.html" aria-current="page">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop 04</span>
+          <span class="module-title">Create bounded query-memory pressure</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="05-investigate-with-vscode.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop 05</span>
+          <span class="module-title">Investigate from VS Code</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="06-optimize-and-prove.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop 06</span>
+          <span class="module-title">Optimize and prove</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="07-teardown.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop 07</span>
+          <span class="module-title">Teardown and review</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="facilitator-guide.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Facilitator resource</span>
+          <span class="module-title">Facilitator guide</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="attendee-guide.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop resource</span>
+          <span class="module-title">Attendee guide</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="troubleshooting.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop resource</span>
+          <span class="module-title">Troubleshooting</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="evidence-and-sources.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop resource</span>
+          <span class="module-title">Evidence and official sources</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="investigation-prompts.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop resource</span>
+          <span class="module-title">Investigation prompt book</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="prompt-evaluation-rubric.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop resource</span>
+          <span class="module-title">Prompt evaluation rubric</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="offline-dependencies.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop resource</span>
+          <span class="module-title">Offline development dependencies</span>
+        </a>
+      </li>
+      <!---->
+    </ol>
+  </nav>
+  <main id="main-content" tabindex="-1">
+
+<article>
+  <header class="module-header">
+    <p class="module-meta">Workshop 04 · 65 minutes</p>
+    <h1>Create bounded query-memory pressure</h1>
+    <div class="progress-control">
+      <button type="button" data-progress-toggle data-module-id="04-create-memory-pressure.html" aria-pressed="false">
+        Mark module complete
+      </button>
+      <span role="status" data-progress-status aria-live="polite">Progress is stored only in this browser.</span>
+    </div>
+  </header>
+  <aside class="evidence-workbench" aria-labelledby="evidence-path-title">
+    <p class="workbench-label">DBA DECISION PATH</p>
+    <h2 id="evidence-path-title">Move claims through evidence</h2>
+    <ol class="evidence-path">
+      <li data-evidence-stage="hypothesis">TARGET / HYPOTHESIS</li>
+      <li data-evidence-stage="measured">MEASURED</li>
+      <li data-evidence-stage="decision">DECISION</li>
+    </ol>
+  </aside>
+  <div class="workshop-content">
+    <h1 id="create-bounded-query-memory-pressure">Create bounded query-memory pressure<a class="headerlink" href="#create-bounded-query-memory-pressure" title="Permanent link">&para;</a></h1>
+<p><strong>Instruction: 65 minutes · Workshop elapsed: 210 minutes</strong></p>
+<h2 id="define-the-denominator-before-measuring">Define the denominator before measuring<a class="headerlink" href="#define-the-denominator-before-measuring" title="Permanent link">&para;</a></h2>
+<p>The 80% → 40% story is about regular query-execution grant utilization inside <code>mcp_sql_workshop_pool</code>, not Task Manager memory, SQL process memory, Total Server Memory, Target Server Memory, or buffer cache. SQL Server can retain buffer-pool pages after a query finishes.</p>
+<p>$$
+\text{Grant utilization percent} =
+\frac{\text{granted_memory_kb}}{\text{total_memory_kb}} \times 100
+$$</p>
+<p>The exact numerator is <code>granted_memory_kb</code> and the denominator is <code>total_memory_kb</code> from <code>sys.dm_exec_query_resource_semaphores</code> for the workshop Resource Governor pool and regular semaphore <code>resource_semaphore_id = 0</code>. Per-request grants and waits corroborate the aggregate through <code>sys.dm_exec_query_memory_grants</code>.</p>
+<p><span class="evidence-label" data-evidence-label="DOC-VERIFIED">DOC-VERIFIED</span> Review <a href="https://learn.microsoft.com/en-us/troubleshoot/sql/database-engine/performance/troubleshoot-memory-grant-issues">memory grant troubleshooting</a>, <a href="https://learn.microsoft.com/en-us/sql/relational-databases/resource-governor/resource-governor?view=sql-server-ver17">Resource Governor</a>, and <a href="https://learn.microsoft.com/en-us/sql/relational-databases/resource-governor/resource-governor-resource-pool?view=sql-server-ver17">resource pools</a>.</p>
+<h2 id="establish-the-isolated-lab">Establish the isolated lab<a class="headerlink" href="#establish-the-isolated-lab" title="Permanent link">&para;</a></h2>
+<p>Use the bootstrap-managed setup sequence <code>sql/00-Preflight.sql</code> through <code>sql/07-ValidateEquivalence.sql</code> through the approved runner. Do not run <code>sql/08-OptionalQueryStoreHint.sql</code> during setup; it belongs to the optional mitigation exercise. Do not run <code>sql/09-Cleanup.sql</code> until teardown. The preflight requires SQL Server 2022 Enterprise, expected physical memory, database identity, and the lab marker. Configuration records prior state, sets server max memory to 49,152 MB, leaves min memory at 0, and uses Resource Governor with pool <code>MAX_MEMORY_PERCENT = 50</code>. The group caps an individual request at 40%, <code>MAX_DOP = 4</code>, and four requests. Query Store must read back <code>READ_WRITE</code>. <span class="evidence-label" data-evidence-label="DOC-VERIFIED">DOC-VERIFIED</span> See <a href="https://learn.microsoft.com/en-us/sql/relational-databases/performance/monitoring-performance-by-using-the-query-store?view=sql-server-ver17">Query Store monitoring</a>.</p>
+<p>The deterministic dataset and baseline procedure are bounded. Never use global cache-clearing commands, an unbounded cross join, or an unmarked database.</p>
+<h2 id="capture-baseline-safely">Capture baseline safely<a class="headerlink" href="#capture-baseline-safely" title="Permanent link">&para;</a></h2>
+<p>Create a unique run ID and obtain the SQL workload credential without placing it in source:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="nv">$runId</span> <span class="p">=</span> <span class="nb">New-Guid</span>
+<a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a><span class="nv">$sqlCredential</span> <span class="p">=</span> <span class="nb">Get-Credential</span> <span class="n">-Message</span> <span class="s1">'Tagged workshop workload credential'</span>
+<a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a><span class="p">./</span><span class="n">workload</span><span class="p">/</span><span class="nb">Start-MemoryGrantLab</span><span class="p">.</span><span class="n">ps1</span> <span class="p">`</span>
+<a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a>  <span class="n">-RunId</span> <span class="nv">$runId</span> <span class="p">`</span>
+<a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a>  <span class="n">-Server</span> <span class="s1">'sql01.mcpworkshop.internal'</span> <span class="p">`</span>
+<a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a>  <span class="n">-Database</span> <span class="s1">'AdventureWorks2022'</span> <span class="p">`</span>
+<a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a>  <span class="n">-Credential</span> <span class="nv">$sqlCredential</span> <span class="p">`</span>
+<a id="__codelineno-0-8" name="__codelineno-0-8" href="#__codelineno-0-8"></a>  <span class="n">-HostNameInCertificate</span> <span class="s1">'sql01.mcpworkshop.internal'</span> <span class="p">`</span>
+<a id="__codelineno-0-9" name="__codelineno-0-9" href="#__codelineno-0-9"></a>  <span class="n">-MaximumWorkers</span> <span class="n">4</span> <span class="p">`</span>
+<a id="__codelineno-0-10" name="__codelineno-0-10" href="#__codelineno-0-10"></a>  <span class="n">-MaximumDurationSeconds</span> <span class="n">600</span> <span class="p">`</span>
+<a id="__codelineno-0-11" name="__codelineno-0-11" href="#__codelineno-0-11"></a>  <span class="n">-SampleIntervalSeconds</span> <span class="n">5</span> <span class="p">`</span>
+<a id="__codelineno-0-12" name="__codelineno-0-12" href="#__codelineno-0-12"></a>  <span class="n">-WorkerRampSeconds</span> <span class="n">20</span>
+</code></pre></div>
+<p>The controller starts one worker, adds at most one every 20 seconds, never exceeds four workers, samples every five seconds, and enforces the global <code>MaximumDurationSeconds 600</code> deadline. Three consecutive baseline samples in the <span class="evidence-label" data-evidence-label="TARGET">TARGET</span> 75–85% band freeze worker count and parameter schedule. The optimized phase receives the exact frozen settings; data, indexes, pool, server memory, and database-scoped settings must not drift between measured phases.</p>
+<p>The optimized <span class="evidence-label" data-evidence-label="TARGET">TARGET</span> band is 35–45%. A target miss is evidence, not permission to increase workers, duration, or host pressure.</p>
+<h2 id="stop-precisely">Stop precisely<a class="headerlink" href="#stop-precisely" title="Permanent link">&para;</a></h2>
+<p>In a second PowerShell session, stop the exact run:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="p">./</span><span class="n">workload</span><span class="p">/</span><span class="nb">Stop-MemoryGrantLab</span><span class="p">.</span><span class="n">ps1</span> <span class="p">`</span>
+<a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a>  <span class="n">-RunId</span> <span class="nv">$runId</span> <span class="p">`</span>
+<a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a>  <span class="n">-Server</span> <span class="s1">'sql01.mcpworkshop.internal'</span> <span class="p">`</span>
+<a id="__codelineno-1-4" name="__codelineno-1-4" href="#__codelineno-1-4"></a>  <span class="n">-Database</span> <span class="s1">'AdventureWorks2022'</span> <span class="p">`</span>
+<a id="__codelineno-1-5" name="__codelineno-1-5" href="#__codelineno-1-5"></a>  <span class="n">-Credential</span> <span class="nv">$sqlCredential</span> <span class="p">`</span>
+<a id="__codelineno-1-6" name="__codelineno-1-6" href="#__codelineno-1-6"></a>  <span class="n">-HostNameInCertificate</span> <span class="s1">'sql01.mcpworkshop.internal'</span>
+</code></pre></div>
+<p>The script writes <code>stop.request</code> and terminates only sessions that carry both the exact run session-context tag and the <code>MCP-SQL-Workshop</code> application tag. Never issue a broad kill.</p>
+<h2 id="interpret-outcomes">Interpret outcomes<a class="headerlink" href="#interpret-outcomes" title="Permanent link">&para;</a></h2>
+<p><code>TargetMet</code> requires both target bands, correctness, a secondary metric improvement, and no material regression. Other truthful outcomes are <code>ImprovedOutsideTarget</code>, <code>NoMaterialImprovement</code>, <code>BaselineTargetNotReached</code>, <code>SafetyStop</code>, <code>ManualStop</code>, and <code>Failed</code>. Record actual Query Store, grant, wait, spill, host, and process observations. Do not report target numbers as observations.</p>
+<aside class="screenshot-pending" role="note" data-screenshot-file="local-memory-target.png"><strong>Screenshot pending verified milestone</strong><span>Local TARGET memory panel · local-memory-target.png</span></aside>
+<aside class="screenshot-pending" role="note" data-screenshot-file="azure-06-workload.png"><strong>Screenshot pending verified milestone</strong><span>Azure workload evidence · azure-06-workload.png</span></aside>
+  </div>
+
+</article>
+<nav class="page-navigation" aria-label="Previous and next pages">
+
+  <a rel="prev" href="03-deploy-with-powershell.html">Previous: Deploy with native Az PowerShell</a>
+
+
+  <a rel="next" href="05-investigate-with-vscode.html">Next: Investigate from VS Code</a>
+
+</nav>
+
+  </main>
+  <footer class="site-footer">
+    <p>Evidence-driven SQL tuning with human review. Do not run the workshop workload against production.</p>
+  </footer>
+</body>
+</html>

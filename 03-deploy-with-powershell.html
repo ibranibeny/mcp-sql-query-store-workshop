@@ -1,0 +1,249 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="An evidence-driven L400 workshop for optimizing a SQL Server stored procedure with GitHub Copilot and Microsoft SQL MCP.">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'sha256-n2HSwPq71BFLjgICami4p3JNMXLLnlGn5P5K8dJEyHk=' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https://cdn.jsdelivr.net; object-src 'none'; base-uri 'none'; form-action 'self'; upgrade-insecure-requests">
+  <title>Deploy with native Az PowerShell | MCP SQL Query Store Workshop</title>
+  <link rel="stylesheet" href="assets/styles.css">
+  <script>(() => { const param = new URLSearchParams(window.location.search).get("scoutTheme"); const theme = param || (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"); document.documentElement.setAttribute("data-theme", theme); })();</script>
+  <script type="module" src="assets/app.js"></script>
+</head>
+<body data-page-route="03-deploy-with-powershell.html">
+  <a class="skip-link" href="#main-content">Skip to main content</a>
+  <header class="site-header">
+    <div>
+      <p class="site-kicker">SQL PERFORMANCE LAB // EVIDENCE FIRST</p>
+      <p class="site-title"><a href="index.html">MCP SQL Query Store Workshop</a></p>
+      <p class="site-description">An evidence-driven L400 workshop for optimizing a SQL Server stored procedure with GitHub Copilot and Microsoft SQL MCP.</p>
+    </div>
+    <button class="nav-toggle" type="button" data-nav-toggle aria-controls="module-navigation" aria-expanded="false">
+      <span aria-hidden="true">☰</span>
+      Modules
+    </button>
+  </header>
+  <nav id="module-navigation" class="module-navigation" aria-label="Workshop modules" data-open="false">
+    <form class="site-search" role="search" data-site-search>
+      <label for="site-search-input">Filter workshop pages</label>
+      <input id="site-search-input" type="search" autocomplete="off" placeholder="Search titles and phases" data-site-search-input>
+      <span role="status" aria-live="polite" data-site-search-status></span>
+    </form>
+    <ol><!---->
+      <li class="module-node">
+        <a class="module-node-link" href="index.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop 00</span>
+          <span class="module-title">Orientation and safety contract</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="01-mcp-and-copilot.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop 01</span>
+          <span class="module-title">MCP, SQL MCP Server, and GitHub Copilot</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="02-scenario-and-architecture.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop 02</span>
+          <span class="module-title">Scenario and two-tier architecture</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="03-deploy-with-powershell.html" aria-current="page">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop 03</span>
+          <span class="module-title">Deploy with native Az PowerShell</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="04-create-memory-pressure.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop 04</span>
+          <span class="module-title">Create bounded query-memory pressure</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="05-investigate-with-vscode.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop 05</span>
+          <span class="module-title">Investigate from VS Code</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="06-optimize-and-prove.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop 06</span>
+          <span class="module-title">Optimize and prove</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="07-teardown.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop 07</span>
+          <span class="module-title">Teardown and review</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="facilitator-guide.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Facilitator resource</span>
+          <span class="module-title">Facilitator guide</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="attendee-guide.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop resource</span>
+          <span class="module-title">Attendee guide</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="troubleshooting.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop resource</span>
+          <span class="module-title">Troubleshooting</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="evidence-and-sources.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop resource</span>
+          <span class="module-title">Evidence and official sources</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="investigation-prompts.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop resource</span>
+          <span class="module-title">Investigation prompt book</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="prompt-evaluation-rubric.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop resource</span>
+          <span class="module-title">Prompt evaluation rubric</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="offline-dependencies.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop resource</span>
+          <span class="module-title">Offline development dependencies</span>
+        </a>
+      </li>
+      <!---->
+    </ol>
+  </nav>
+  <main id="main-content" tabindex="-1">
+
+<article>
+  <header class="module-header">
+    <p class="module-meta">Workshop 03 · 60 minutes + 10-minute break</p>
+    <h1>Deploy with native Az PowerShell</h1>
+    <div class="progress-control">
+      <button type="button" data-progress-toggle data-module-id="03-deploy-with-powershell.html" aria-pressed="false">
+        Mark module complete
+      </button>
+      <span role="status" data-progress-status aria-live="polite">Progress is stored only in this browser.</span>
+    </div>
+  </header>
+  <aside class="evidence-workbench" aria-labelledby="evidence-path-title">
+    <p class="workbench-label">DBA DECISION PATH</p>
+    <h2 id="evidence-path-title">Move claims through evidence</h2>
+    <ol class="evidence-path">
+      <li data-evidence-stage="hypothesis">TARGET / HYPOTHESIS</li>
+      <li data-evidence-stage="measured">MEASURED</li>
+      <li data-evidence-stage="decision">DECISION</li>
+    </ol>
+  </aside>
+  <div class="workshop-content">
+    <h1 id="deploy-with-native-az-powershell">Deploy with native Az PowerShell<a class="headerlink" href="#deploy-with-native-az-powershell" title="Permanent link">&para;</a></h1>
+<p><strong>Instruction: 60 minutes + 10-minute break · Workshop elapsed: 145 minutes</strong></p>
+<p>This module uses only repository entry points. It never bypasses the preflight gate. Prepare the repository's Python and PowerShell validation dependencies before class with <a href="offline-dependencies.html">the offline dependency routes</a>. The deployed VMs still require the documented NAT outbound path to approved Microsoft, GitHub, NuGet, Winget, update, activation, and AdventureWorks endpoints during bootstrap; they do not use PyPI at runtime.</p>
+<h2 id="1-collect-immutable-inputs">1. Collect immutable inputs<a class="headerlink" href="#1-collect-immutable-inputs" title="Permanent link">&para;</a></h2>
+<p>From a PowerShell 7 session at the repository root, define the subscription, optional tenant, facilitator IPv4 <code>/32</code>, expiration within seven days, repository HTTPS URL, and the exact 40-character commit SHA. Obtain administrator credentials securely:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="nv">$credential</span> <span class="p">=</span> <span class="nb">Get-Credential</span> <span class="n">-Message</span> <span class="s1">'Workshop VM administrator credential'</span>
+<a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a><span class="nv">$databaseMasterKeyPassword</span> <span class="p">=</span> <span class="nb">Read-Host</span> <span class="s1">'Database master key password'</span> <span class="n">-AsSecureString</span>
+<a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a><span class="nv">$mcpReaderPassword</span> <span class="p">=</span> <span class="nb">Read-Host</span> <span class="s1">'MCP reader password'</span> <span class="n">-AsSecureString</span>
+</code></pre></div>
+<p>Do not put passwords in shell history, source files, screenshots, or evidence.</p>
+<h2 id="2-run-non-destructive-preflight">2. Run non-destructive preflight<a class="headerlink" href="#2-run-non-destructive-preflight" title="Permanent link">&para;</a></h2>
+<p>Use the parameters implemented by <code>deploy/Test-WorkshopPrerequisites.ps1</code>:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="p">./</span><span class="n">deploy</span><span class="p">/</span><span class="nb">Test-WorkshopPrerequisites</span><span class="p">.</span><span class="n">ps1</span> <span class="p">`</span>
+<a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a>  <span class="n">-SubscriptionId</span> <span class="nv">$subscriptionId</span> <span class="p">`</span>
+<a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a>  <span class="n">-TenantId</span> <span class="nv">$tenantId</span> <span class="p">`</span>
+<a id="__codelineno-1-4" name="__codelineno-1-4" href="#__codelineno-1-4"></a>  <span class="n">-FacilitatorCidr</span> <span class="nv">$facilitatorCidr</span> <span class="p">`</span>
+<a id="__codelineno-1-5" name="__codelineno-1-5" href="#__codelineno-1-5"></a>  <span class="n">-ExpiresOn</span> <span class="nv">$expiresOn</span> <span class="p">`</span>
+<a id="__codelineno-1-6" name="__codelineno-1-6" href="#__codelineno-1-6"></a>  <span class="n">-WindowsClientLicenseAttested</span> <span class="p">`</span>
+<a id="__codelineno-1-7" name="__codelineno-1-7" href="#__codelineno-1-7"></a>  <span class="n">-SqlEnterpriseCostAcknowledged</span> <span class="p">`</span>
+<a id="__codelineno-1-8" name="__codelineno-1-8" href="#__codelineno-1-8"></a>  <span class="n">-BillableResourcesAcknowledged</span>
+</code></pre></div>
+<p>The three attestations are independent: Windows client license eligibility, SQL Enterprise cost, and all billable resource categories. The preflight reads context, providers, regional SKUs, restrictions, family quota, exact image versions, source CIDR, names, and expiration. It prints checks and a plan card. <strong>If preflight fails or the plan card is unavailable, do not deploy.</strong> Never substitute a region, SKU, image, or broad CIDR silently.</p>
+<aside class="screenshot-pending" role="note" data-screenshot-file="azure-01-preflight.png"><strong>Screenshot pending verified milestone</strong><span>Azure preflight and plan card · azure-01-preflight.png</span></aside>
+<h2 id="3-review-the-plan-card-aloud">3. Review the plan card aloud<a class="headerlink" href="#3-review-the-plan-card-aloud" title="Permanent link">&para;</a></h2>
+<p>Confirm <code>indonesiacentral</code>, resource group <code>rg-mcp-sql-workshop</code>, admin <code>Standard_D4s_v5</code>, SQL <code>Standard_E8s_v5</code>, SQL Enterprise PAYG, disk categories, NAT Gateway, one admin public IP, admin RDP <code>/32</code>, SQL private TCP 1433, SQL public IP none, immutable image versions, tags, expiration, and auto-shutdown. This review is not deployment approval.</p>
+<h2 id="4-invoke-the-gated-deployment">4. Invoke the gated deployment<a class="headerlink" href="#4-invoke-the-gated-deployment" title="Permanent link">&para;</a></h2>
+<p>Only after the plan card passes and the facilitator separately approves billing, run the deployment with the implemented parameters:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="p">./</span><span class="n">deploy</span><span class="p">/</span><span class="n">Deploy-WorkshopEnvironment</span><span class="p">.</span><span class="n">ps1</span> <span class="p">`</span>
+<a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a>  <span class="n">-SubscriptionId</span> <span class="nv">$subscriptionId</span> <span class="p">`</span>
+<a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a>  <span class="n">-TenantId</span> <span class="nv">$tenantId</span> <span class="p">`</span>
+<a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a>  <span class="n">-FacilitatorCidr</span> <span class="nv">$facilitatorCidr</span> <span class="p">`</span>
+<a id="__codelineno-2-5" name="__codelineno-2-5" href="#__codelineno-2-5"></a>  <span class="n">-ExpiresOn</span> <span class="nv">$expiresOn</span> <span class="p">`</span>
+<a id="__codelineno-2-6" name="__codelineno-2-6" href="#__codelineno-2-6"></a>  <span class="n">-Credential</span> <span class="nv">$credential</span> <span class="p">`</span>
+<a id="__codelineno-2-7" name="__codelineno-2-7" href="#__codelineno-2-7"></a>  <span class="n">-DatabaseMasterKeyPassword</span> <span class="nv">$databaseMasterKeyPassword</span> <span class="p">`</span>
+<a id="__codelineno-2-8" name="__codelineno-2-8" href="#__codelineno-2-8"></a>  <span class="n">-McpReaderPassword</span> <span class="nv">$mcpReaderPassword</span> <span class="p">`</span>
+<a id="__codelineno-2-9" name="__codelineno-2-9" href="#__codelineno-2-9"></a>  <span class="n">-RepositoryUrl</span> <span class="nv">$repositoryUrl</span> <span class="p">`</span>
+<a id="__codelineno-2-10" name="__codelineno-2-10" href="#__codelineno-2-10"></a>  <span class="n">-RepositoryCommit</span> <span class="nv">$repositoryCommit</span> <span class="p">`</span>
+<a id="__codelineno-2-11" name="__codelineno-2-11" href="#__codelineno-2-11"></a>  <span class="n">-WindowsClientLicenseAttested</span> <span class="p">`</span>
+<a id="__codelineno-2-12" name="__codelineno-2-12" href="#__codelineno-2-12"></a>  <span class="n">-SqlEnterpriseCostAcknowledged</span> <span class="p">`</span>
+<a id="__codelineno-2-13" name="__codelineno-2-13" href="#__codelineno-2-13"></a>  <span class="n">-BillableResourcesAcknowledged</span> <span class="p">`</span>
+<a id="__codelineno-2-14" name="__codelineno-2-14" href="#__codelineno-2-14"></a>  <span class="n">-ApproveBillableDeployment</span> <span class="p">`</span>
+<a id="__codelineno-2-15" name="__codelineno-2-15" href="#__codelineno-2-15"></a>  <span class="n">-ConfirmationPhrase</span> <span class="s1">'DEPLOY rg-mcp-sql-workshop'</span>
+</code></pre></div>
+<p>The exact phrase is case-sensitive: <code>DEPLOY rg-mcp-sql-workshop</code>. The script also uses PowerShell <code>ShouldProcess</code>; both gates must approve creation.</p>
+<h2 id="5-read-every-phase-back">5. Read every phase back<a class="headerlink" href="#5-read-every-phase-back" title="Permanent link">&para;</a></h2>
+<p>The entry point verifies, in order: Azure context; preflight and immutable images; network creation; network boundary; admin VM; SQL VM; SQL IaaS PAYG registration; auto-shutdown; VM boundary; SQL bootstrap; admin bootstrap; and end-to-end readiness. A phase must return <code>Completed = true</code>, and each boundary/readiness object must pass, before the next result is accepted.</p>
+<p>On partial failure, the script reports the last checkpoint and explicitly performs no automatic rollback. Preserve the sanitized failure, inspect what exists, then choose deliberate remediation or teardown. Do not rerun blindly.</p>
+<p>Expected milestone evidence includes preflight/plan, network boundary, VM boundary, SQL readiness, admin readiness, workload, and Pages screenshots. Redact subscription, tenant, public IP, usernames, credentials, tokens, connection strings, machine-specific paths, and certificate details before publication.</p>
+<aside class="screenshot-pending" role="note" data-screenshot-file="azure-04-sql-readiness.png"><strong>Screenshot pending verified milestone</strong><span>Azure SQL readiness · azure-04-sql-readiness.png</span></aside>
+<aside class="screenshot-pending" role="note" data-screenshot-file="azure-05-admin-readiness.png"><strong>Screenshot pending verified milestone</strong><span>Azure administration readiness · azure-05-admin-readiness.png</span></aside>
+<h2 id="6-enter-the-admin-vm">6. Enter the admin VM<a class="headerlink" href="#6-enter-the-admin-vm" title="Permanent link">&para;</a></h2>
+<p>RDP only to the admin public IP from the attested <code>/32</code>. From that VM, verify private DNS and validated TLS to <code>sql01.mcpworkshop.internal,1433</code>. <code>TrustServerCertificate=True</code> is not the success path. Do not expose or directly RDP to the SQL VM from the internet.</p>
+<h3 id="break-10-minutes">Break — 10 minutes<a class="headerlink" href="#break-10-minutes" title="Permanent link">&para;</a></h3>
+<p>Leave no workload running during the break. If deployment is incomplete, retain the exact failed checkpoint; do not use the break to bypass a failed preflight or readiness gate.</p>
+  </div>
+
+</article>
+<nav class="page-navigation" aria-label="Previous and next pages">
+
+  <a rel="prev" href="02-scenario-and-architecture.html">Previous: Scenario and two-tier architecture</a>
+
+
+  <a rel="next" href="04-create-memory-pressure.html">Next: Create bounded query-memory pressure</a>
+
+</nav>
+
+  </main>
+  <footer class="site-footer">
+    <p>Evidence-driven SQL tuning with human review. Do not run the workshop workload against production.</p>
+  </footer>
+</body>
+</html>

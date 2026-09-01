@@ -24,6 +24,35 @@ This L400 workshop demonstrates how GitHub Copilot, grounded by Microsoft SQL MC
 
 Lunch is outside the six-hour agenda.
 
+## Minute schedule and checkpoints
+
+| Elapsed | Action | Pass evidence | Fail branch |
+|---:|---|---|---|
+| 00–15 | Orientation, licenses, cost, labels, stop conditions | Participants identify TARGET versus measured and prohibit production use | Restate contract; do not continue without agreement |
+| 15–50 | MCP internals and product boundaries | Group traces initialize → tools/list → approved tools/call → DAB/SQL authorization | Re-run paper trace; never broaden a role to make a demo work |
+| 50–75 | Architecture and verification exercise | SQL NIC has no public IP; RDP `/32`; private 1433; NAT on both subnets | Stop; remediate boundary before workload |
+| 75–90 | Offline readiness and Azure context | Required local versions and authenticated intended subscription | Use approved offline route or correct context; no deployment |
+| 90–110 | Non-destructive preflight | Every check passes and immutable images resolve | **No deployment if preflight failed** |
+| 110–120 | Plan-card and attestation review | Windows eligibility, SQL Enterprise cost, billable categories acknowledged separately | End deployment portion without creating resources |
+| 120–125 | Explicit deployment decision | Exact deploy phrase and `ShouldProcess` approval | No action; preserve plan card |
+| 125–135 | Deployment checkpoints/fallback handoff | Network, VMs, bootstrap, TLS, readiness all pass, or use pre-staged environment | Preserve last checkpoint; do not claim readiness |
+| 135–145 | Break | No workload active | Stop exact tagged run |
+| 145–165 | SQL setup and Query Store | Marker valid; Enterprise 2022; Resource Governor and Query Store read back | Repair setup; never weaken guards |
+| 165–190 | Baseline calibration | Three consecutive 75–85% samples or bounded truthful miss | Record `BaselineTargetNotReached`; do not increase limits |
+| 190–210 | Evidence interpretation | Run ID, UTC window, units, grants, waits, plans captured | Mark missing evidence and defer conclusions |
+| 210–235 | VS Code, MSSQL, and DAB | TLS validates; DAB validates; allowlisted tools only | Fix trust/config/role; no broad SQL fallback |
+| 235–275 | Structured investigation | Observations are sourced; hypotheses ranked; experiments bounded | Score with rubric and revise |
+| 275–285 | Break | Workload stopped; run context retained | Stop tagged run before leaving |
+| 285–305 | Candidate review | Baseline preserved; candidate contract stated | Reject destructive or unsupported proposal |
+| 305–320 | Correctness matrix | Metadata, counts, hashes, and bidirectional differences pass | Reject candidate; skip acceptance run |
+| 320–335 | Frozen comparison | Twelve interleaved trials; settings hash unchanged | Classify invalid/failed; do not combine runs |
+| 335–340 | Decision | Actual outcome and risks recorded | Use `ImprovedOutsideTarget` or `NoMaterialImprovement` truthfully |
+| 340–350 | Stop/export/redact | Evidence bundle passes review | Quarantine artifact until corrected |
+| 350–358 | Delete and verify | Resource group absent; tagged-resource query empty | Report billing risk and escalate |
+| 358–360 | Close | Report owner and follow-up named | Record incomplete action explicitly |
+
+The live deployment cannot reliably finish in ten minutes; prepare a verified environment and use the deployment block to demonstrate gates/readbacks. Never hide a failed live checkpoint to protect the schedule.
+
 ## Deployment approval boundary
 
 Deployment preflight and deployment approval are separate checkpoints:
@@ -53,3 +82,14 @@ Deployment preflight and deployment approval are separate checkpoints:
 - Before closing: remove the lab resource group and verify resource absence.
 
 [!TARGET] The approximately 80% to 40% grant-utilization comparison is a target for the isolated workshop query-workspace pool, not a promised result or whole-server memory claim.
+
+## Target miss protocol
+
+- `BaselineTargetNotReached`: preserve samples and stop at four workers/ten minutes. Do not resize, extend, or alter memory boundaries during class.
+- `ImprovedOutsideTarget`: report measured values and the qualifying reduction; do not round into the target band.
+- `NoMaterialImprovement`: retain the evidence, reject the candidate, and discuss the next bounded hypothesis.
+- `SafetyStop`, `ManualStop`, or `Failed`: do not resume until the cause is understood and the lab identity/safety checks pass.
+
+## Screenshot checklist
+
+Capture only at verified milestones: local home, local architecture, local TARGET panel, Azure preflight, network boundary, VM boundary, SQL readiness, admin readiness, workload outcome, and Pages/teardown. Follow `docs/images/screenshot-manifest.json`; a missing image remains `Screenshot pending verified milestone`. Never create illustrative UI and label it verified.

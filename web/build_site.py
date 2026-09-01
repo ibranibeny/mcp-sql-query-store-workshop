@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import html
 import json
 import os
@@ -22,6 +23,9 @@ EVIDENCE_RE = re.compile(
 MERMAID_FENCE_RE = re.compile(
     r"^```mermaid[ \t]*\r?\n(?P<diagram>.*?)^```[ \t]*$",
     re.MULTILINE | re.DOTALL,
+)
+SCREENSHOT_RE = re.compile(
+    r"!\[(?P<alt>[^\]]+)\]\(docs/images/(?P<name>[A-Za-z0-9._-]+\.png)\)"
 )
 TRAILING_WHITESPACE_RE = re.compile(r"[ \t]+(?=\r?$)", re.MULTILINE)
 REQUIRED_SITE_PROPERTIES = ("title", "description", "language")
@@ -259,8 +263,40 @@ def _sanitize_rendered_html(rendered: str) -> str:
     return "".join(parser.parts)
 
 
-def render_markdown(text: str) -> str:
+def render_markdown(
+    text: str,
+    screenshot_root: Path | None = None,
+    verified_screenshots: set[str] | None = None,
+) -> str:
     mermaid_blocks: list[str] = []
+    screenshot_blocks: list[str] = []
+
+    def reserve_screenshot(match: re.Match[str]) -> str:
+        name = match.group("name")
+        alt = match.group("alt")
+        token = f"MCPWORKSHOPSCREENSHOT{len(screenshot_blocks)}TOKEN"
+        image = screenshot_root / name if screenshot_root is not None else None
+        if (
+            image is not None
+            and image.is_file()
+            and verified_screenshots is not None
+            and name in verified_screenshots
+        ):
+            block = (
+                '<figure class="verified-screenshot">'
+                f'<img src="docs/images/{html.escape(name, quote=True)}" '
+                f'alt="{html.escape(alt, quote=True)}" loading="lazy">'
+                f'<figcaption>{html.escape(alt)}</figcaption></figure>'
+            )
+        else:
+            block = (
+                '<aside class="screenshot-pending" role="note" '
+                f'data-screenshot-file="{html.escape(name, quote=True)}">'
+                '<strong>Screenshot pending verified milestone</strong>'
+                f'<span>{html.escape(alt)} · {html.escape(name)}</span></aside>'
+            )
+        screenshot_blocks.append(block)
+        return f"\n\n{token}\n\n"
 
     def reserve_mermaid(match: re.Match[str]) -> str:
         token = f"MCPWORKSHOPMERMAID{len(mermaid_blocks)}TOKEN"
@@ -270,7 +306,8 @@ def render_markdown(text: str) -> str:
         )
         return f"\n\n{token}\n\n"
 
-    prepared = MERMAID_FENCE_RE.sub(reserve_mermaid, text)
+    prepared = SCREENSHOT_RE.sub(reserve_screenshot, text)
+    prepared = MERMAID_FENCE_RE.sub(reserve_mermaid, prepared)
     converter = markdown.Markdown(
         extensions=["tables", "toc", "pymdownx.superfences", "pymdownx.highlight"],
         extension_configs={
@@ -285,6 +322,9 @@ def render_markdown(text: str) -> str:
     for index, block in enumerate(mermaid_blocks):
         token = f"MCPWORKSHOPMERMAID{index}TOKEN"
         rendered = rendered.replace(f"<p>{token}</p>", block)
+    for index, block in enumerate(screenshot_blocks):
+        token = f"MCPWORKSHOPSCREENSHOT{index}TOKEN"
+        rendered = rendered.replace(f"<p>{token}</p>", block)
     return _sanitize_rendered_html(rendered)
 
 
@@ -295,6 +335,30 @@ def _relative_href(current_route: str, target_route: str) -> str:
 
 def _normalize_generated_text(text: str) -> str:
     return TRAILING_WHITESPACE_RE.sub("", text)
+
+
+def _verified_screenshot_names(root: Path) -> set[str]:
+    screenshot_root = root / "docs" / "images"
+    manifest_path = screenshot_root / "screenshot-manifest.json"
+    if not manifest_path.is_file():
+        return set()
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    verified: set[str] = set()
+    for entry in manifest.get("screenshots", []):
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get("file")
+        classification = entry.get("classification")
+        expected_hash = entry.get("sha256")
+        if not isinstance(name, str) or not isinstance(classification, str):
+            continue
+        image = screenshot_root / name
+        if not classification.endswith("Verified") or not image.is_file():
+            continue
+        actual_hash = hashlib.sha256(image.read_bytes()).hexdigest()
+        if isinstance(expected_hash, str) and actual_hash == expected_hash.lower():
+            verified.add(name)
+    return verified
 
 
 def build_site(root: Path, destination: Path) -> None:
@@ -344,6 +408,18 @@ def build_site(root: Path, destination: Path) -> None:
     destination.mkdir(parents=True)
     if canonical_assets is not None:
         _copy_asset_tree(assets, destination / "assets", canonical_assets)
+    screenshot_root = root / "docs" / "images"
+    verified_screenshots = _verified_screenshot_names(root)
+    if screenshot_root.is_dir():
+        screenshot_destination = destination / "docs" / "images"
+        for image in screenshot_root.glob("*.png"):
+            if (
+                image.name in verified_screenshots
+                and image.is_file()
+                and not _is_link_or_reparse_point(image)
+            ):
+                screenshot_destination.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(image, screenshot_destination / image.name)
 
     pages = manifest["pages"]
     for index, page in enumerate(pages):
@@ -359,7 +435,13 @@ def build_site(root: Path, destination: Path) -> None:
             site=manifest["site"],
             page=page,
             pages=navigation,
-            content=Markup(render_markdown(source_text)),
+            content=Markup(
+                render_markdown(
+                    source_text,
+                    screenshot_root,
+                    verified_screenshots=verified_screenshots,
+                )
+            ),
             previous=previous,
             next=next_page,
             asset_prefix=_relative_href(route, "assets/").rstrip("/"),
