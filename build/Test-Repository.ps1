@@ -14,6 +14,9 @@ $script:RepositoryRoot = Split-Path -Parent $PSScriptRoot
 $script:GateFailures = [System.Collections.Generic.List[string]]::new()
 $script:OptionalGateSkips = 0
 $script:RequestedBaseRef = $BaseRef
+if ($BaseRef -match '^0{40}$') {
+    $script:RequestedBaseRef = $null
+}
 $script:AnalyzerIsRequired = [bool] $RequirePSScriptAnalyzer
 
 Import-Module (Join-Path $PSScriptRoot 'RepositoryValidation.psm1') -Force
