@@ -21,6 +21,7 @@
     "targetBands",
     "samples",
     "requestSamples",
+    "trials",
     "measuredPeaks",
     "correctness",
     "terminationEvidence",
@@ -62,6 +63,11 @@
       "type": "array",
       "items": { "$ref": "#/$defs/requestSample" }
     },
+    "trials": {
+      "type": "array",
+      "maxItems": 12,
+      "items": { "$ref": "#/$defs/trial" }
+    },
     "measuredPeaks": { "$ref": "#/$defs/measuredPeaks" },
     "correctness": {
       "oneOf": [
@@ -93,6 +99,7 @@
           "endUtc": { "type": "null" },
           "samples": { "maxItems": 0 },
           "requestSamples": { "maxItems": 0 },
+          "trials": { "maxItems": 0 },
           "measuredPeaks": {
             "properties": {
               "baseline": { "type": "null" },
@@ -175,6 +182,7 @@
         ],
         "oneOf": [
           {
+            "required": ["trials"],
             "properties": {
               "status": { "const": "Completed" },
               "phase": { "const": "Comparison" },
@@ -184,6 +192,7 @@
                   { "contains": { "$ref": "#/$defs/optimizedSample" }, "minContains": 1 }
                 ]
               },
+              "trials": { "minItems": 12, "maxItems": 12 },
               "measuredPeaks": {
                 "properties": {
                   "baseline": { "type": "number", "minimum": 0, "maximum": 100 },
@@ -297,13 +306,11 @@
     "environment": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["sqlVersion", "sqlEdition", "vmSku", "region", "imageVersion"],
+      "required": ["sqlVersion", "sqlEdition", "physicalMemoryMB"],
       "properties": {
         "sqlVersion": { "type": "string", "minLength": 1 },
         "sqlEdition": { "type": "string", "minLength": 1 },
-        "vmSku": { "type": "string", "minLength": 1 },
-        "region": { "type": "string", "minLength": 1 },
-        "imageVersion": { "type": "string", "minLength": 1 }
+        "physicalMemoryMB": { "type": "number", "exclusiveMinimum": 0 }
       }
     },
     "frozenSettings": {
@@ -318,6 +325,7 @@
         "workloadGroup",
         "maxServerMemoryMB",
         "databaseScopedConfigurationHash",
+        "validationBatchHash",
         "parameterSchedule",
         "parameterScheduleHash"
       ],
@@ -325,11 +333,12 @@
         "workers": { "type": "integer", "minimum": 1, "maximum": 4 },
         "maximumDurationSeconds": { "type": "integer", "minimum": 1, "maximum": 600 },
         "sampleIntervalSeconds": { "type": "integer", "minimum": 5, "maximum": 30 },
-        "workerRampSeconds": { "type": "integer", "minimum": 10, "maximum": 60 },
+        "workerRampSeconds": { "type": "integer", "minimum": 20, "maximum": 60 },
         "resourcePool": { "type": "string", "minLength": 1 },
         "workloadGroup": { "type": "string", "minLength": 1 },
         "maxServerMemoryMB": { "type": "integer", "minimum": 1 },
         "databaseScopedConfigurationHash": { "$ref": "#/$defs/sha256" },
+        "validationBatchHash": { "$ref": "#/$defs/sha256" },
         "parameterSchedule": {
           "type": "array",
           "minItems": 1,
@@ -407,25 +416,64 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "sequence",
-        "timestampUtc",
-        "phase",
-        "durationMs",
-        "cpuMs",
-        "logicalReads",
-        "spillsMb",
-        "waitMs"
+        "sampleSequence", "sessionId", "requestId", "requestedMemoryKB",
+        "grantedMemoryKB", "requiredMemoryKB", "idealMemoryKB", "usedMemoryKB",
+        "maxUsedMemoryKB", "waitOrder", "waitTimeMs", "queryId", "planId"
       ],
       "properties": {
-        "sequence": { "type": "integer", "minimum": 1 },
-        "timestampUtc": { "$ref": "#/$defs/utcTimestamp" },
+        "sampleSequence": { "type": "integer", "minimum": 1 },
+        "sessionId": { "type": "integer", "minimum": 1, "maximum": 32767 },
+        "requestId": { "type": "integer", "minimum": 0 },
+        "requestedMemoryKB": { "type": "number", "minimum": 0 },
+        "grantedMemoryKB": { "type": "number", "minimum": 0 },
+        "requiredMemoryKB": { "type": "number", "minimum": 0 },
+        "idealMemoryKB": { "type": "number", "minimum": 0 },
+        "usedMemoryKB": { "type": "number", "minimum": 0 },
+        "maxUsedMemoryKB": { "type": "number", "minimum": 0 },
+        "waitOrder": { "type": ["integer", "null"], "minimum": 0 },
+        "waitTimeMs": { "type": "number", "minimum": 0 },
+        "queryId": { "type": ["integer", "null"], "minimum": 1 },
+        "planId": { "type": ["integer", "null"], "minimum": 1 }
+      }
+    },
+    "trial": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "trialSequence", "parameterSlot", "phase", "durationMs", "cpuMs",
+        "logicalReads", "grantedKB", "usedKB", "spillKB", "waitMs",
+        "resultRowCount", "resultHash", "expectedRowCount", "actualRowCount",
+        "differenceCount", "correct", "validationBatchId", "startedAtUtc",
+        "completedAtUtc"
+      ],
+      "properties": {
+        "trialSequence": { "type": "integer", "minimum": 1, "maximum": 12 },
+        "parameterSlot": { "type": "integer", "minimum": 1, "maximum": 6 },
         "phase": { "enum": ["Baseline", "Optimized"] },
         "durationMs": { "type": "number", "minimum": 0 },
         "cpuMs": { "type": "number", "minimum": 0 },
         "logicalReads": { "type": "number", "minimum": 0 },
-        "spillsMb": { "type": "number", "minimum": 0 },
-        "waitMs": { "type": "number", "minimum": 0 }
-      }
+        "grantedKB": { "type": "number", "minimum": 0 },
+        "usedKB": { "type": "number", "minimum": 0 },
+        "spillKB": { "type": "number", "minimum": 0 },
+        "waitMs": { "type": "number", "minimum": 0 },
+        "resultRowCount": { "type": "integer", "minimum": 0 },
+        "resultHash": { "$ref": "#/$defs/sha256" },
+        "expectedRowCount": { "type": "integer", "minimum": 0 },
+        "actualRowCount": { "type": "integer", "minimum": 0 },
+        "differenceCount": { "type": "integer", "minimum": 0 },
+        "correct": { "type": "boolean" },
+        "validationBatchId": { "type": "string", "format": "uuid" },
+        "startedAtUtc": { "$ref": "#/$defs/utcTimestamp" },
+        "completedAtUtc": { "$ref": "#/$defs/utcTimestamp" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "correct": { "const": true } }, "required": ["correct"] },
+          "then": { "properties": { "differenceCount": { "const": 0 } } },
+          "else": { "properties": { "differenceCount": { "minimum": 1 } } }
+        }
+      ]
     },
     "measuredPeaks": {
       "type": "object",

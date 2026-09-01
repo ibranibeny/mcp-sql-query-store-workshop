@@ -967,6 +967,12 @@ def test_equivalence_harness_checks_metadata_rows_sets_hashes_order_and_errors()
     assert "LAB.VALIDATIONRUN" in text
 
 
+def test_workload_trial_metrics_are_correlated_to_the_exact_trial_interval() -> None:
+    text = (ROOT / "workload" / "Workshop.Workload.psm1").read_text(encoding="utf-8").upper()
+    assert "LAST_EXECUTION_TIME >= @STARTED" in text
+    assert "LAST_EXECUTION_TIME <= @COMPLETED" in text
+
+
 def test_equivalence_harness_rejects_an_existing_transaction_before_side_effects() -> None:
     text = normalized("07-ValidateEquivalence.sql")
     guard = re.search(r"IF\s+@@TRANCOUNT\s*<>\s*0\s+THROW\s+51515,\s*'[^']*TRANSACTION[^']*'", text)
@@ -1192,6 +1198,91 @@ def test_validation_run_contract_is_task9_compatible_and_verified() -> None:
     assert "(VALIDATIONBATCHID, BASELINERUNID, OPTIMIZEDRUNID, VALIDATIONCASENAME" in task9
 
 
+def test_workshop_trial_has_exact_ordered_persistence_contract() -> None:
+    text = normalized("05-CreateDiagnostics.sql")
+    assert "IF OBJECT_ID(N'LAB.WORKSHOPTRIAL', N'U') IS NULL" in text
+    assert "CREATE TABLE LAB.WORKSHOPTRIAL" in text
+    expected_columns = (
+        (1, "RUNID", "UNIQUEIDENTIFIER", 16, 0, 0, 0, 0),
+        (2, "TRIALSEQUENCE", "INT", 4, 10, 0, 0, 0),
+        (3, "PARAMETERSLOT", "INT", 4, 10, 0, 0, 0),
+        (4, "PHASE", "VARCHAR", 16, 0, 0, 0, 0),
+        (5, "DURATIONMS", "BIGINT", 8, 19, 0, 0, 0),
+        (6, "CPUMS", "BIGINT", 8, 19, 0, 0, 0),
+        (7, "LOGICALREADS", "BIGINT", 8, 19, 0, 0, 0),
+        (8, "GRANTEDKB", "BIGINT", 8, 19, 0, 0, 0),
+        (9, "USEDKB", "BIGINT", 8, 19, 0, 0, 0),
+        (10, "SPILLKB", "BIGINT", 8, 19, 0, 0, 0),
+        (11, "WAITMS", "BIGINT", 8, 19, 0, 0, 0),
+        (12, "RESULTROWCOUNT", "BIGINT", 8, 19, 0, 0, 0),
+        (13, "RESULTHASH", "VARBINARY", 32, 0, 0, 0, 0),
+        (14, "EXPECTEDROWCOUNT", "BIGINT", 8, 19, 0, 0, 0),
+        (15, "ACTUALROWCOUNT", "BIGINT", 8, 19, 0, 0, 0),
+        (16, "DIFFERENCECOUNT", "BIGINT", 8, 19, 0, 0, 0),
+        (17, "CORRECT", "BIT", 1, 1, 0, 0, 0),
+        (18, "VALIDATIONBATCHID", "UNIQUEIDENTIFIER", 16, 0, 0, 0, 0),
+        (19, "STARTEDATUTC", "DATETIME2", 7, 23, 3, 0, 0),
+        (20, "COMPLETEDATUTC", "DATETIME2", 7, 23, 3, 0, 0),
+    )
+    for column_id, name, type_name, max_length, precision, scale, nullable, identity in expected_columns:
+        assert (
+            f"(N'WORKSHOPTRIAL', {column_id}, N'{name}', N'{type_name}', "
+            f"{max_length}, {precision}, {scale}, {nullable}, {identity})"
+        ) in text
+
+
+def test_workshop_trial_has_exact_keys_checks_and_validation_index() -> None:
+    text = normalized("05-CreateDiagnostics.sql")
+    for contract in (
+        "CONSTRAINT PK_WORKSHOPTRIAL PRIMARY KEY (RUNID, TRIALSEQUENCE)",
+        "CONSTRAINT FK_WORKSHOPTRIAL_WORKSHOPRUN FOREIGN KEY (RUNID) REFERENCES LAB.WORKSHOPRUN (RUNID)",
+        "CONSTRAINT CK_WORKSHOPTRIAL_SEQUENCE CHECK (TRIALSEQUENCE BETWEEN 1 AND 12)",
+        "CONSTRAINT CK_WORKSHOPTRIAL_PARAMETERSLOT CHECK (PARAMETERSLOT BETWEEN 1 AND 6)",
+        "CONSTRAINT CK_WORKSHOPTRIAL_PHASE CHECK (PHASE IN ('BASELINE', 'OPTIMIZED'))",
+        "CONSTRAINT CK_WORKSHOPTRIAL_METRICS CHECK",
+        "CONSTRAINT CK_WORKSHOPTRIAL_VALIDATION CHECK",
+        "CONSTRAINT CK_WORKSHOPTRIAL_TIMESTAMPS CHECK (COMPLETEDATUTC >= STARTEDATUTC)",
+        "CREATE INDEX IX_WORKSHOPTRIAL_VALIDATIONBATCHID ON LAB.WORKSHOPTRIAL (VALIDATIONBATCHID, RUNID)",
+    ):
+        assert contract in text
+    for metric in (
+        "DURATIONMS", "CPUMS", "LOGICALREADS", "GRANTEDKB", "USEDKB", "SPILLKB", "WAITMS",
+        "RESULTROWCOUNT", "EXPECTEDROWCOUNT", "ACTUALROWCOUNT", "DIFFERENCECOUNT",
+    ):
+        assert f"{metric} >= 0" in text
+    assert "DATALENGTH(RESULTHASH) = 32" in text
+    assert "CORRECT = 1 AND DIFFERENCECOUNT = 0" in text
+    assert "CORRECT = 0 AND DIFFERENCECOUNT > 0" in text
+    for metadata in (
+        "PK_WORKSHOPTRIAL", "FK_WORKSHOPTRIAL_WORKSHOPRUN", "IX_WORKSHOPTRIAL_VALIDATIONBATCHID",
+        "CK_WORKSHOPTRIAL_SEQUENCE", "CK_WORKSHOPTRIAL_PARAMETERSLOT", "CK_WORKSHOPTRIAL_PHASE",
+        "CK_WORKSHOPTRIAL_METRICS", "CK_WORKSHOPTRIAL_VALIDATION", "CK_WORKSHOPTRIAL_TIMESTAMPS",
+        "#EXPECTEDWORKSHOPTRIALCHECKSHAPE",
+    ):
+        assert metadata in text
+    assert "OBJECT_ID(N'LAB.WORKSHOPTRIAL') IS NOT NULL AND OBJECT_ID(N'LAB.WORKSHOPTRIAL', N'U') IS NULL" in text
+    assert "REFERENCED_SCHEMA" in text
+    assert "OBJECT_SCHEMA_NAME(FK.REFERENCED_OBJECT_ID)" in text
+    assert "@EXPECTEDWORKSHOPTRIALINDEXCOLUMNS" in text
+    assert "INDEX_COLUMN_ID" in text and "IS_INCLUDED_COLUMN" in text
+    assert "@EXPECTEDWORKSHOPTRIALCHECKDEFINITIONS" in text
+    exact_check_region = text[
+        text.index("DECLARE @EXPECTEDWORKSHOPTRIALCHECKDEFINITIONS"):
+        text.index("THROW 51604, 'EXISTING WORKSHOPTRIAL CHECK DEFINITION CONTRACT IS INCOMPATIBLE.'")
+    ]
+    assert "CC.DEFINITION COLLATE LATIN1_GENERAL_100_BIN2" in exact_check_region
+    assert "REPLACE(" not in exact_check_region
+
+
+def test_workshop_trial_is_not_reader_exposed_and_has_exact_denies() -> None:
+    text = normalized("05-CreateDiagnostics.sql")
+    for permission in ("INSERT", "UPDATE", "DELETE", "ALTER", "CONTROL"):
+        assert f"DENY {permission} ON OBJECT::LAB.WORKSHOPTRIAL TO [MCP_WORKSHOP_READER]" in text
+        assert f"(1, OBJECT_ID(N'LAB.WORKSHOPTRIAL'), 0, N'{permission}', N'D')" in text
+        assert f"N'LAB.WORKSHOPTRIAL', N'OBJECT', N'{permission}'" in text
+    assert "GRANT SELECT ON OBJECT::LAB.WORKSHOPTRIAL TO [MCP_WORKSHOP_READER]" not in text
+
+
 def test_all_four_evidence_tables_have_exact_deterministic_column_metadata_checks() -> None:
     text = normalized("05-CreateDiagnostics.sql")
     for table, last_column in (
@@ -1307,25 +1398,19 @@ def test_workshop_outcome_check_has_only_the_exact_allowed_terminal_states() -> 
         assert legacy not in text
 
 
-def test_validation_batch_has_a_privileged_exact_run_linker_not_exposed_to_reader() -> None:
+def test_validation_batch_remains_unlinked_and_uses_workshop_trials_for_experiment_linkage() -> None:
     text = normalized("05-CreateDiagnostics.sql")
-    assert "CREATE OR ALTER PROCEDURE LAB.USP_LINKVALIDATIONBATCH" in text
-    assert "@VALIDATIONBATCHID UNIQUEIDENTIFIER" in text
-    assert "@BASELINERUNID UNIQUEIDENTIFIER" in text
-    assert "@OPTIMIZEDRUNID UNIQUEIDENTIFIER" in text
-    assert "REQUIREDVALIDATIONCASES" in text
-    assert "PASSED = 0" in text
-    assert "BASELINERUNID IS NOT NULL" in text
-    assert "OPTIMIZEDRUNID IS NOT NULL" in text
-    assert "UPDATE LAB.VALIDATIONRUN" in text
-    assert "SET BASELINERUNID = @BASELINERUNID" in text
-    assert "OPTIMIZEDRUNID = @OPTIMIZEDRUNID" in text
-    assert "GRANT EXECUTE ON OBJECT::LAB.USP_LINKVALIDATIONBATCH TO [MCP_WORKSHOP_READER]" not in text
+    assert "CREATE OR ALTER PROCEDURE LAB.USP_LINKVALIDATIONBATCH" not in text
+    assert "UPDATE LAB.VALIDATIONRUN SET BASELINERUNID" not in text
+    comparison = re.sub(r"\s+", " ", diagnostic_batch("lab.usp_CompareWorkshopRuns")).upper()
+    assert "FROM LAB.WORKSHOPTRIAL" in comparison
+    assert "VALIDATIONBATCHID = @VALIDATIONBATCHID" in comparison
+    assert "CORRECT = 1" in comparison
 
 
 def test_six_diagnostic_procedures_are_separate_stable_owner_batches() -> None:
     text = normalized("05-CreateDiagnostics.sql")
-    assert text.count("CREATE OR ALTER PROCEDURE LAB.USP_") == 7
+    assert text.count("CREATE OR ALTER PROCEDURE LAB.USP_") == 6
     for procedure in DIAGNOSTIC_PROCEDURES:
         batch = re.sub(r"\s+", " ", diagnostic_batch(procedure)).upper()
         assert "WITH EXECUTE AS OWNER" in batch
@@ -1427,10 +1512,11 @@ def test_query_store_diagnostics_validate_windows_scope_and_safe_procedure_enum(
 
 def test_run_comparison_requires_exact_validation_linkage_and_material_improvement() -> None:
     body = re.sub(r"\s+", " ", diagnostic_batch("lab.usp_CompareWorkshopRuns")).upper()
-    assert "@BASELINERUNID UNIQUEIDENTIFIER = NULL" in body
-    assert "@OPTIMIZEDRUNID UNIQUEIDENTIFIER = NULL" in body
+    assert "@RUNID UNIQUEIDENTIFIER" in body
+    assert "@BASELINERUNID UNIQUEIDENTIFIER" not in body
+    assert "@OPTIMIZEDRUNID UNIQUEIDENTIFIER" not in body
     assert "@VALIDATIONBATCHID UNIQUEIDENTIFIER = NULL" in body
-    assert "@PARENTCOMPARISONID UNIQUEIDENTIFIER = NULL" in body
+    assert "@PARENTCOMPARISONID UNIQUEIDENTIFIER" not in body
     assert "ROW_NUMBER() OVER (PARTITION BY" in body
     assert "COUNT_BIG(*) OVER (PARTITION BY" in body
     assert "PEAKGRANTUTILIZATIONPERCENT" in body
@@ -1448,12 +1534,10 @@ def test_run_comparison_requires_exact_validation_linkage_and_material_improveme
     assert "BASELINEPEAKGRANTUTILIZATIONPERCENT BETWEEN 75.00 AND 85.00" in body
     assert "OPTIMIZEDPEAKGRANTUTILIZATIONPERCENT BETWEEN 35.00 AND 45.00" in body
     assert "BASELINEPEAKGRANTUTILIZATIONPERCENT - OPTIMIZEDPEAKGRANTUTILIZATIONPERCENT >= 25.00" in body
-    assert "LAB.VALIDATIONRUN" in body and "PASSED = 0" in body
-    assert "VALIDATION.VALIDATIONBATCHID = @VALIDATIONBATCHID" in body
-    assert "VALIDATION.BASELINERUNID = @BASELINERUNID" in body
-    assert "VALIDATION.OPTIMIZEDRUNID = @OPTIMIZEDRUNID" in body
-    assert "REQUIREDVALIDATIONCASES" in body
-    assert "N'REPEATED-EXECUTION'" in body
+    assert "LAB.WORKSHOPTRIAL" in body
+    assert "TRIAL.VALIDATIONBATCHID = @VALIDATIONBATCHID" in body
+    assert "TRIAL.CORRECT = 1" in body
+    assert "COUNT_BIG(*)" in body and "<> 12" in body
     assert "CORRECTNESSPASSED" in body
     assert "HASMATERIALREGRESSION" in body
     assert "HASADDITIONALMETRICIMPROVEMENT" in body

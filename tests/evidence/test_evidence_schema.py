@@ -61,6 +61,26 @@ def measured_evidence(target: dict, *, outcome: str = "TargetMet") -> dict:
         "NoMaterialImprovement": 56,
     }[outcome]
     measured = copy.deepcopy(target)
+    trials = [
+        measured_trial(index + 1, index // 2 + 1, phase)
+        for index, phase in enumerate(
+            ("Baseline", "Optimized", "Optimized", "Baseline", "Optimized", "Baseline",
+             "Baseline", "Optimized", "Baseline", "Optimized", "Optimized", "Baseline")
+        )
+    ]
+    linkage = [
+        {
+            "sequence": trial["trialSequence"], "slot": trial["parameterSlot"],
+            "phase": trial["phase"], "resultRowCount": trial["resultRowCount"],
+            "resultHash": trial["resultHash"], "expectedRowCount": trial["expectedRowCount"],
+            "actualRowCount": trial["actualRowCount"], "differenceCount": trial["differenceCount"],
+            "correct": trial["correct"],
+        }
+        for trial in trials
+    ]
+    validation_hash = hashlib.sha256(
+        json.dumps(linkage, separators=(",", ":")).encode()
+    ).hexdigest()
     measured.update(
         evidenceClassification="LAB-MEASURED",
         disclaimer="LAB-MEASURED evidence captured from the identified workshop environment.",
@@ -76,11 +96,75 @@ def measured_evidence(target: dict, *, outcome: str = "TargetMet") -> dict:
             "passed": True,
             "materialRegression": False,
             "additionalMetricImproved": True,
-            "validationHash": "c" * 64,
+            "validationHash": validation_hash,
         },
+        trials=trials,
         outcome=outcome,
     )
     return measured
+
+
+def measured_trial(sequence: int, slot: int, phase: str) -> dict:
+    optimized = phase == "Optimized"
+    return {
+        "trialSequence": sequence,
+        "parameterSlot": slot,
+        "phase": phase,
+        "durationMs": 9 if optimized else 10,
+        "cpuMs": 5,
+        "logicalReads": 20,
+        "grantedKB": 30,
+        "usedKB": 25,
+        "spillKB": 0,
+        "waitMs": 1,
+        "resultRowCount": 2,
+        "resultHash": "ab" * 32,
+        "expectedRowCount": 2,
+        "actualRowCount": 2,
+        "differenceCount": 0,
+        "correct": True,
+        "validationBatchId": "11111111-1111-1111-1111-111111111111",
+        "startedAtUtc": "2026-09-01T10:00:00.0000000Z",
+        "completedAtUtc": "2026-09-01T10:00:01.0000000Z",
+    }
+
+
+def set_validation_hash(document: dict) -> None:
+    linkage = [
+        {
+            "sequence": trial["trialSequence"], "slot": trial["parameterSlot"],
+            "phase": trial["phase"], "resultRowCount": trial["resultRowCount"],
+            "resultHash": trial["resultHash"], "expectedRowCount": trial["expectedRowCount"],
+            "actualRowCount": trial["actualRowCount"], "differenceCount": trial["differenceCount"],
+            "correct": trial["correct"],
+        }
+        for trial in document["trials"]
+    ]
+    document["correctness"]["validationHash"] = hashlib.sha256(
+        json.dumps(linkage, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+def test_measured_evidence_requires_exact_complete_paired_twelve_trials(
+    schema: dict, target: dict
+) -> None:
+    measured = measured_evidence(target)
+    measured["trials"] = [
+        measured_trial(index + 1, index // 2 + 1, phase)
+        for index, phase in enumerate(
+            ("Baseline", "Optimized", "Optimized", "Baseline", "Optimized", "Baseline",
+             "Baseline", "Optimized", "Baseline", "Optimized", "Optimized", "Baseline")
+        )
+    ]
+    validate_evidence(measured, schema)
+
+    for mutation in (
+        measured["trials"][:-1],
+        [dict(trial, correct=False, differenceCount=1) for trial in measured["trials"]],
+    ):
+        invalid = copy.deepcopy(measured)
+        invalid["trials"] = mutation
+        assert_invalid(schema, invalid)
 
 
 def test_target_example_is_valid_and_truthfully_unmeasured(
@@ -92,6 +176,7 @@ def test_target_example_is_valid_and_truthfully_unmeasured(
     assert target["endUtc"] is None
     assert target["samples"] == []
     assert target["requestSamples"] == []
+    assert target["trials"] == []
     assert target["measuredPeaks"] == {"baseline": None, "optimized": None}
     assert target["correctness"] is None
     assert target["terminationEvidence"] == {
@@ -108,8 +193,16 @@ def test_target_example_is_valid_and_truthfully_unmeasured(
     assert "not an executed benchmark" in target["disclaimer"].lower()
 
 
+def test_root_trials_property_is_required(schema: dict, target: dict) -> None:
+    missing_trials = copy.deepcopy(target)
+    missing_trials.pop("trials", None)
+
+    assert_invalid(schema, missing_trials)
+
+
 def test_target_example_frozen_hashes_are_reproducible(target: dict) -> None:
     settings = target["frozenSettings"]
+    assert settings["validationBatchHash"] == "d" * 64
     assert json.loads(target["frozenSettingsJson"]) == settings
     assert hashlib.sha256(target["frozenSettingsJson"].encode()).hexdigest() == target[
         "frozenSettingsHash"
@@ -118,6 +211,35 @@ def test_target_example_frozen_hashes_are_reproducible(target: dict) -> None:
     assert hashlib.sha256(schedule_json.encode()).hexdigest() == settings[
         "parameterScheduleHash"
     ]
+
+
+def test_canonical_validator_rejects_stale_frozen_fingerprints(
+    schema: dict, target: dict
+) -> None:
+    for mutation in ("settings", "settingsJson", "settingsHash", "scheduleHash"):
+        changed = copy.deepcopy(target)
+        if mutation == "settings":
+            changed["frozenSettings"]["workers"] = 3
+        elif mutation == "settingsJson":
+            changed["frozenSettingsJson"] = "{}"
+        elif mutation == "settingsHash":
+            changed["frozenSettingsHash"] = "0" * 64
+        else:
+            changed["frozenSettings"]["parameterScheduleHash"] = "0" * 64
+        assert_invalid(schema, changed)
+
+
+def test_frozen_settings_require_validation_batch_hash(schema: dict, target: dict) -> None:
+    missing = copy.deepcopy(target)
+    missing["frozenSettings"].pop("validationBatchHash", None)
+    missing["frozenSettingsJson"] = json.dumps(
+        missing["frozenSettings"], separators=(",", ":"), sort_keys=True
+    )
+    missing["frozenSettingsHash"] = hashlib.sha256(
+        missing["frozenSettingsJson"].encode()
+    ).hexdigest()
+
+    assert_invalid(schema, missing)
 
 
 def test_target_rejects_measured_fields(
@@ -237,7 +359,10 @@ def test_lab_measured_requires_samples_end_outcome_and_correctness(
     ]
     assert_invalid(schema, measured)
 
+    canonical = measured_evidence(target)
     measured["samples"].append(measured_sample(2, "Optimized", 40))
+    measured["trials"] = canonical["trials"]
+    measured["correctness"] = canonical["correctness"]
     validate_evidence(measured, schema)
 
     measured["status"] = "SafetyStop"
@@ -385,6 +510,7 @@ def test_schema_requires_independent_consistent_termination_evidence(
         },
         outcome="SafetyStop",
     )
+    set_validation_hash(safety)
     validate_evidence(safety, schema)
 
     safety["terminationEvidence"]["safetyStopTriggered"] = False
@@ -476,6 +602,21 @@ def test_semantic_validation_rejects_outcome_inconsistent_with_samples(
     assert_invalid(schema, measured)
 
 
+def test_semantic_validation_derives_trial_flags_and_validation_hash(
+    schema: dict, target: dict
+) -> None:
+    measured = measured_evidence(target)
+
+    for field, value in (
+        ("materialRegression", True),
+        ("additionalMetricImproved", False),
+        ("validationHash", "0" * 64),
+    ):
+        mutation = copy.deepcopy(measured)
+        mutation["correctness"][field] = value
+        assert_invalid(schema, mutation)
+
+
 def test_outcome_delta_comparison_does_not_round_up_to_twenty_five(
     schema: dict, target: dict
 ) -> None:
@@ -513,6 +654,51 @@ def test_semantic_validation_rejects_utilization_inconsistent_with_raw_grant(
     assert_invalid(schema, measured)
 
 
+def test_partial_failed_trial_accepts_equal_instants_with_different_fractional_precision(
+    schema: dict, target: dict
+) -> None:
+    measured = measured_evidence(target)
+    measured.update(status="Failed", outcome="Failed")
+    measured["correctness"]["passed"] = False
+    measured["trials"] = [measured["trials"][0]]
+    measured["trials"][0]["startedAtUtc"] = "2026-09-01T10:00:00.1Z"
+    measured["trials"][0]["completedAtUtc"] = "2026-09-01T10:00:00.10Z"
+    measured["correctness"]["additionalMetricImproved"] = False
+    set_validation_hash(measured)
+
+    validate_evidence(measured, schema)
+
+
+def test_partial_failed_trial_accepts_whole_second_utc_instants(
+    schema: dict, target: dict
+) -> None:
+    measured = measured_evidence(target)
+    measured.update(status="Failed", outcome="Failed")
+    measured["correctness"]["passed"] = False
+    measured["trials"] = [measured["trials"][0]]
+    measured["trials"][0]["startedAtUtc"] = "2026-09-01T10:00:00Z"
+    measured["trials"][0]["completedAtUtc"] = "2026-09-01T10:00:01Z"
+    measured["correctness"]["additionalMetricImproved"] = False
+    set_validation_hash(measured)
+
+    validate_evidence(measured, schema)
+
+
+def test_partial_failed_trial_rejects_reversed_fractional_timestamp_interval(
+    schema: dict, target: dict
+) -> None:
+    measured = measured_evidence(target)
+    measured.update(status="Failed", outcome="Failed")
+    measured["correctness"]["passed"] = False
+    measured["trials"] = [measured["trials"][0]]
+    measured["trials"][0]["startedAtUtc"] = "2026-09-01T10:00:00.1000001Z"
+    measured["trials"][0]["completedAtUtc"] = "2026-09-01T10:00:00.1000000Z"
+    measured["correctness"]["additionalMetricImproved"] = False
+    set_validation_hash(measured)
+
+    assert_invalid(schema, measured)
+
+
 @pytest.mark.parametrize("constant", ["NaN", "Infinity", "-Infinity"])
 def test_cli_rejects_nonstandard_nonfinite_json_numbers_without_echoing_them(
     target: dict, tmp_path: Path, constant: str
@@ -523,14 +709,19 @@ def test_cli_rejects_nonstandard_nonfinite_json_numbers_without_echoing_them(
         measured = measured_evidence(target)
         measured["requestSamples"] = [
             {
-                "sequence": 1,
-                "timestampUtc": "2026-09-01T10:00:06.0000000Z",
-                "phase": "Baseline",
-                "durationMs": 1,
-                "cpuMs": 1,
-                "logicalReads": 1,
-                "spillsMb": 1,
-                "waitMs": 1,
+                "sampleSequence": 1,
+                "sessionId": 51,
+                "requestId": 0,
+                "requestedMemoryKB": 1,
+                "grantedMemoryKB": 1,
+                "requiredMemoryKB": 1,
+                "idealMemoryKB": 1,
+                "usedMemoryKB": 1,
+                "maxUsedMemoryKB": 1,
+                "waitOrder": None,
+                "waitTimeMs": 1,
+                "queryId": None,
+                "planId": None,
             }
         ]
         text = json.dumps(measured).replace('"waitMs": 1', f'"waitMs": {constant}')

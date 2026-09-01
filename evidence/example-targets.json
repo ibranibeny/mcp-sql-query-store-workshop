@@ -8,11 +8,9 @@
   "startUtc": "2026-09-01T10:00:00.0000000Z",
   "endUtc": null,
   "environment": {
-    "imageVersion": "16.0.1135.2",
-    "region": "indonesiacentral",
+    "physicalMemoryMB": 65536,
     "sqlEdition": "Enterprise Edition (64-bit)",
-    "sqlVersion": "16.0.1135.2",
-    "vmSku": "Standard_E8s_v5"
+    "sqlVersion": "16.0.1135.2"
   },
   "frozenSettings": {
     "databaseScopedConfigurationHash": "f17f4c4220d254854e22408ef682ff809567b66df49560b17a21169614ee0dc4",
@@ -25,12 +23,13 @@
     "parameterScheduleHash": "095562b669618122fb74005f471f9c67e41e88a1e8ad0398ef0cc593170b1bb1",
     "resourcePool": "mcp_sql_workshop_pool",
     "sampleIntervalSeconds": 5,
+    "validationBatchHash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
     "workerRampSeconds": 20,
     "workers": 2,
     "workloadGroup": "mcp_sql_workshop_group"
   },
-  "frozenSettingsJson": "{\"databaseScopedConfigurationHash\":\"f17f4c4220d254854e22408ef682ff809567b66df49560b17a21169614ee0dc4\",\"maximumDurationSeconds\":300,\"maxServerMemoryMB\":49152,\"parameterSchedule\":[\"2025-01-01/2025-02-01\",\"2025-02-01/2025-03-01\"],\"parameterScheduleHash\":\"095562b669618122fb74005f471f9c67e41e88a1e8ad0398ef0cc593170b1bb1\",\"resourcePool\":\"mcp_sql_workshop_pool\",\"sampleIntervalSeconds\":5,\"workerRampSeconds\":20,\"workers\":2,\"workloadGroup\":\"mcp_sql_workshop_group\"}",
-  "frozenSettingsHash": "2255dc18616fbf6a6ee259a2326b1c8b0e57381c364145b885253b2a91d79580",
+  "frozenSettingsJson": "{\"databaseScopedConfigurationHash\":\"f17f4c4220d254854e22408ef682ff809567b66df49560b17a21169614ee0dc4\",\"maxServerMemoryMB\":49152,\"maximumDurationSeconds\":300,\"parameterSchedule\":[\"2025-01-01/2025-02-01\",\"2025-02-01/2025-03-01\"],\"parameterScheduleHash\":\"095562b669618122fb74005f471f9c67e41e88a1e8ad0398ef0cc593170b1bb1\",\"resourcePool\":\"mcp_sql_workshop_pool\",\"sampleIntervalSeconds\":5,\"validationBatchHash\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\",\"workerRampSeconds\":20,\"workers\":2,\"workloadGroup\":\"mcp_sql_workshop_group\"}",
+  "frozenSettingsHash": "981519e72874d3e6f925a40a867be89213d55017364d2184220a441681e371ab",
   "targetBands": {
     "baseline": {
       "minimum": 75,
@@ -43,6 +42,7 @@
   },
   "samples": [],
   "requestSamples": [],
+  "trials": [],
   "measuredPeaks": {
     "baseline": null,
     "optimized": null

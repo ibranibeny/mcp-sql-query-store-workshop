@@ -14,6 +14,7 @@ BeforeAll {
             workloadGroup = 'mcp_sql_workshop_group'
             maxServerMemoryMB = 49152
             databaseScopedConfigurationHash = 'f17f4c4220d254854e22408ef682ff809567b66df49560b17a21169614ee0dc4'
+            validationBatchHash = ('d' * 64)
             parameterSchedule = @('2025-01-01/2025-02-01', '2025-02-01/2025-03-01')
             parameterScheduleHash = '095562b669618122fb74005f471f9c67e41e88a1e8ad0398ef0cc593170b1bb1'
         }
@@ -23,9 +24,7 @@ BeforeAll {
         [ordered]@{
             sqlVersion = '16.0.1135.2'
             sqlEdition = 'Enterprise Edition (64-bit)'
-            vmSku = 'Standard_E8s_v5'
-            region = 'indonesiacentral'
-            imageVersion = '16.0.1135.2'
+            physicalMemoryMB = 65536
         }
     }
 
@@ -37,11 +36,26 @@ BeforeAll {
     }
 
     function Get-MeasuredRun {
-        New-WorkshopRunRecord -Phase Comparison -Status Completed `
+        $run = New-WorkshopRunRecord -Phase Comparison -Status Completed `
             -EvidenceClassification LAB-MEASURED -FrozenSettings (Get-TestSetting) `
             -EnvironmentFingerprint (Get-TestEnvironment) -TargetBands (Get-TestTargetBand) `
             -StartUtc ([datetimeoffset]'2026-09-01T10:00:00Z') `
             -EndUtc ([datetimeoffset]'2026-09-01T10:01:00Z')
+        $run | Add-Member NoteProperty Trials (Get-ValidTrial)
+        return $run
+    }
+
+    function Get-ValidTrial {
+        $phases = @('Baseline','Optimized','Optimized','Baseline','Optimized','Baseline','Baseline','Optimized','Baseline','Optimized','Optimized','Baseline')
+        for ($index = 0; $index -lt 12; $index++) {
+            [pscustomobject][ordered]@{
+                TrialSequence=$index+1; ParameterSlot=[math]::Floor($index/2)+1; Phase=$phases[$index]
+                DurationMs=10; CpuMs=5; LogicalReads=20; GrantedKB=30; UsedKB=25; SpillKB=0; WaitMs=1
+                ResultRowCount=2; ResultHash=('ab'*32); ExpectedRowCount=2; ActualRowCount=2
+                DifferenceCount=0; Correct=$true; ValidationBatchID='11111111-1111-1111-1111-111111111111'
+                StartedAtUtc='2026-09-01T10:00:00.0000000Z'; CompletedAtUtc='2026-09-01T10:00:01.0000000Z'
+            }
+        }
     }
 
     function Get-ValidSample {
@@ -64,12 +78,14 @@ BeforeAll {
     function Get-ValidRequestSample {
         @(
             [ordered]@{
-                sequence = 1; timestampUtc = '2026-09-01T10:00:06.0000000Z'; phase = 'Baseline'
-                durationMs = 1200; cpuMs = 800; logicalReads = 20000; spillsMb = 24; waitMs = 100
+                sampleSequence=1; sessionId=51; requestId=0; requestedMemoryKB=1000; grantedMemoryKB=900
+                requiredMemoryKB=100; idealMemoryKB=1200; usedMemoryKB=800; maxUsedMemoryKB=850
+                waitOrder=$null; waitTimeMs=100; queryId=$null; planId=$null
             }
             [ordered]@{
-                sequence = 2; timestampUtc = '2026-09-01T10:00:11.0000000Z'; phase = 'Optimized'
-                durationMs = 700; cpuMs = 450; logicalReads = 12000; spillsMb = 4; waitMs = 20
+                sampleSequence=2; sessionId=52; requestId=0; requestedMemoryKB=500; grantedMemoryKB=450
+                requiredMemoryKB=100; idealMemoryKB=600; usedMemoryKB=400; maxUsedMemoryKB=425
+                waitOrder=$null; waitTimeMs=20; queryId=$null; planId=$null
             }
         )
     }
@@ -88,6 +104,7 @@ Describe 'Workshop workload module contract' {
     It 'exports the workload decision, orchestration, stop, and export functions' {
         $manifest = Test-ModuleManifest $ModulePath
         @($manifest.ExportedFunctions.Keys | Sort-Object) | Should -Be @(
+            'ConvertFrom-WorkshopTrialReader'
             'ConvertTo-WorkshopEvidence'
             'Export-WorkshopEvidenceFile'
             'Get-GrantUtilization'
@@ -96,10 +113,12 @@ Describe 'Workshop workload module contract' {
             'Get-WorkshopOutcome'
             'Get-WorkshopParameterSchedule'
             'Get-WorkshopSqlOperationSet'
+            'Get-WorkshopTrialAssessment'
             'Get-WorkshopTrialSequence'
             'Invoke-WorkshopExperiment'
             'New-WorkshopRunRecord'
             'Test-TargetBand'
+            'Test-WorkshopFingerprintMatch'
             'Test-WorkshopPreflight'
             'Test-WorkshopSafetySample'
         )
@@ -420,7 +439,7 @@ Describe 'ConvertTo-WorkshopEvidence' {
         $first.psobject.Properties.Name | Should -Be @(
             'schemaVersion', 'evidenceClassification', 'disclaimer', 'runId', 'phase', 'status',
             'startUtc', 'endUtc', 'environment', 'frozenSettings', 'frozenSettingsJson',
-            'frozenSettingsHash', 'targetBands', 'samples', 'requestSamples', 'measuredPeaks',
+            'frozenSettingsHash', 'targetBands', 'samples', 'requestSamples', 'trials', 'measuredPeaks',
             'correctness', 'terminationEvidence', 'outcome'
         )
         ($first | ConvertTo-Json -Depth 20 -Compress) | Should -Be `
@@ -451,7 +470,7 @@ Describe 'ConvertTo-WorkshopEvidence' {
         $result.phase | Should -BeExactly 'Comparison'
         $result.status | Should -BeExactly 'Completed'
         $result.samples.phase | Should -BeExactly @('Baseline', 'Optimized')
-        $result.requestSamples.phase | Should -BeExactly @('Baseline', 'Optimized')
+        $result.requestSamples.sampleSequence | Should -BeExactly @(1, 2)
         $result.outcome | Should -BeExactly 'TargetMet'
     }
 
@@ -702,17 +721,35 @@ Describe 'Task 12 workload orchestration' {
             [pscustomobject]@{
                 MarkerValid = $true
                 SqlMajorVersion = 16
+                SqlProductVersion = '16.0.1135.2'
                 SqlEdition = 'Enterprise Edition (64-bit)'
+                VmSku = 'Standard_E8s_v5'
+                Region = 'indonesiacentral'
+                ImageVersion = '16.0.2026.801'
                 PhysicalMemoryMB = 65536
                 QueryStoreActualState = 'READ_WRITE'
                 ResourcePool = 'mcp_sql_workshop_pool'
+                PoolMinMemoryPercent = 0
+                PoolMaxMemoryPercent = 50
                 WorkloadGroup = 'mcp_sql_workshop_group'
-                MemoryGrantFeedbackDisabled = $true
+                GroupRequestMaxMemoryGrantPercent = 40
+                GroupMaxDop = 4
+                GroupMaxRequests = 4
+                MaxServerMemoryMB = 49152
+                MinServerMemoryMB = 0
+                RowModeMemoryGrantFeedbackDisabled = $true
+                BatchModeMemoryGrantFeedbackDisabled = $true
+                ControllerSessionInWorkloadGroup = $true
                 PriorMemoryGrantFeedbackState = 'ON'
                 ProceduresPresent = $true
-                EvidenceSchemaPresent = $true
+                WorkshopRunPresent = $true
+                WorkshopSamplePresent = $true
+                WorkshopRequestSamplePresent = $true
+                WorkshopTrialPresent = $true
                 ValidationBatchID = '11111111-1111-1111-1111-111111111111'
                 ValidationPassed = $true
+                ValidationValidatedAtUtc = [datetimeoffset]::UtcNow.AddMinutes(-5)
+                ValidationBatchHash = ('d' * 64)
                 ServerConfigurationHash = $Hash
                 PoolConfigurationHash = $Hash
                 DatabaseConfigurationHash = $Hash
@@ -744,6 +781,9 @@ Describe 'Task 12 workload orchestration' {
                 [object[]] $Baseline = @(
                     (Get-TestSample Baseline 60),
                     (Get-TestSample Baseline 70),
+                    (Get-TestSample Baseline 70),
+                    (Get-TestSample Baseline 70),
+                    (Get-TestSample Baseline 70),
                     (Get-TestSample Baseline 75),
                     (Get-TestSample Baseline 80),
                     (Get-TestSample Baseline 82)
@@ -764,25 +804,30 @@ Describe 'Task 12 workload orchestration' {
                 Stops = [System.Collections.Generic.List[object]]::new()
                 Trials = [System.Collections.Generic.List[object]]::new()
                 Persisted = [System.Collections.Generic.List[object]]::new()
+                Events = [System.Collections.Generic.List[object]]::new()
+                KillCalls = 0
                 Exported = $false
+                ExportedResult = $null
                 Preflight = $Preflight
+                HealthChecks = 0
             }
             $operations = @{
                 OpenConnection = { param($Purpose) Write-Verbose $Purpose; $state.Preflight }
                 StartWorker = {
-                    param($RunId, $Phase, $Worker, $ApplicationName, $Schedule)
-                    $handle = [pscustomobject]@{ RunId = $RunId; Phase = $Phase; Worker = $Worker; ApplicationName = $ApplicationName; Schedule = @($Schedule); Disposed = $false }
+                    param($RunId, $Phase, $Worker, $ApplicationName, $Schedule, $Deadline)
+                    $handle = [pscustomobject]@{ RunId = $RunId; Phase = $Phase; Worker = $Worker; ApplicationName = $ApplicationName; Schedule = @($Schedule); Deadline = $Deadline; StartedAt = $state.Now; Disposed = $false }
                     $handle | Add-Member ScriptMethod Dispose { $this.Disposed = $true }
                     $state.Starts.Add($handle)
                     $handle
                 }
                 Sample = {
-                    param($RunId, $Phase, $Kind, $TrialPhase, $ScheduleEntry)
-                    Write-Verbose $RunId
+                    param($RunId, $Phase, $Kind, $TrialPhase, $ScheduleEntry, $RemainingSeconds)
+                    Write-Verbose "$RunId $ScheduleEntry"
+                    $state.Events.Add([pscustomobject]@{ Phase=$Phase; Kind=$Kind; TrialPhase=$TrialPhase; At=$state.Now; RemainingSeconds=$RemainingSeconds })
                     if ($Kind -eq 'Fingerprint') { return $state.Preflight }
                     if ($Kind -eq 'Trial') {
                         $optimizedTrial = $TrialPhase -eq 'Optimized'
-                        $trial = [pscustomobject]@{ Phase = $TrialPhase; DurationMs = if ($optimizedTrial) { 70 } else { 100 }; CpuMs = if ($optimizedTrial) { 35 } else { 50 }; LogicalReads = if ($optimizedTrial) { 700 } else { 1000 }; GrantsKb = if ($optimizedTrial) { 200 } else { 400 }; SpillsMb = 0; WaitMs = if ($optimizedTrial) { 2 } else { 5 }; Correct = $true; ScheduleEntry = $ScheduleEntry }
+                        $trial = [pscustomobject]@{ Phase = $TrialPhase; DurationMs = if ($optimizedTrial) { 70 } else { 100 }; CpuMs = if ($optimizedTrial) { 35 } else { 50 }; LogicalReads = if ($optimizedTrial) { 700 } else { 1000 }; GrantedKB = if ($optimizedTrial) { 200 } else { 400 }; UsedKB = if ($optimizedTrial) { 150 } else { 300 }; SpillKB = 0; WaitMs = if ($optimizedTrial) { 2 } else { 5 }; ResultRowCount=2; ResultHash=('ab'*32); ExpectedRowCount=2; ActualRowCount=2; DifferenceCount=1; Correct=$false; ValidationBatchID=$state.Preflight.ValidationBatchID; StartedAtUtc=$state.Now; CompletedAtUtc=$state.Now.AddSeconds(1) }
                         $state.Trials.Add($trial)
                         return $trial
                     }
@@ -798,12 +843,17 @@ Describe 'Task 12 workload orchestration' {
                     $state.OptimizedIndex++
                     return $result
                 }
+                TestWorkerHealth = {
+                    param([object[]] $Handles)
+                    $state.HealthChecks++
+                    [pscustomobject]@{ Healthy = $true; Reason = $null; ActiveHandleCount = $Handles.Count }
+                }
                 StopWorker = { param($Handle) $state.Stops.Add($Handle) }
-                KillTagged = { param($RunId) Write-Verbose $RunId; @() }
+                KillTagged = { param($RunId) Write-Verbose $RunId; $state.KillCalls++; @() }
                 Persist = { param($Record) $state.Persisted.Add($Record) }
                 Delay = { param([int] $Seconds) $state.Now = $state.Now.AddSeconds($Seconds) }
                 Clock = { $state.Now }
-                Export = { param($Result) Write-Verbose $Result.Outcome; $state.Exported = $true }
+                Export = { param($Result) Write-Verbose $Result.Outcome; $state.Exported = $true; $state.ExportedResult = $Result }
             }
             foreach ($name in @($operations.Keys)) {
                 $operations[$name] = $operations[$name].GetNewClosure()
@@ -825,11 +875,43 @@ Describe 'Task 12 workload orchestration' {
         }
     }
 
+    It 'rejects a worker ramp interval below twenty seconds' {
+        $fixture = Get-TestOperationSet
+        { Invoke-WorkshopExperiment -RunId ([guid]::NewGuid()) -OperationSet $fixture.Operations `
+                -WorkerRampSeconds 19 } | Should -Throw
+    }
+
+    It 'requires two consecutive worker health failures and resets after recovery' {
+        $transient = Get-TestOperationSet
+        $transient.State | Add-Member NoteProperty HealthSequence @($false, $true)
+        $transient.Operations.TestWorkerHealth = {
+            param([object[]] $Handles)
+            $healthy = if ($transient.State.HealthChecks -lt $transient.State.HealthSequence.Count) {
+                $transient.State.HealthSequence[$transient.State.HealthChecks]
+            }
+            else { $true }
+            $transient.State.HealthChecks++
+            [pscustomobject]@{ Healthy = $healthy; Reason = 'injected'; ActiveHandleCount = $Handles.Count }
+        }.GetNewClosure()
+        (Invoke-WorkshopExperiment -RunId ([guid]::NewGuid()) -OperationSet $transient.Operations `
+                -WorkerRampSeconds 20).Outcome | Should -Be 'TargetMet'
+
+        $consecutive = Get-TestOperationSet
+        $consecutive.Operations.TestWorkerHealth = {
+            param([object[]] $Handles)
+            $consecutive.State.HealthChecks++
+            [pscustomobject]@{ Healthy = $false; Reason = 'injected'; ActiveHandleCount = $Handles.Count }
+        }.GetNewClosure()
+        (Invoke-WorkshopExperiment -RunId ([guid]::NewGuid()) -OperationSet $consecutive.Operations `
+                -WorkerRampSeconds 20).Outcome | Should -Be 'SafetyStop'
+        $consecutive.State.HealthChecks | Should -Be 2
+    }
+
     It 'ramps one worker at a time, freezes after three baseline samples, and reuses exact conditions' {
         $fixture = Get-TestOperationSet
         $result = Invoke-WorkshopExperiment -RunId ([guid]'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa') `
             -OperationSet $fixture.Operations -MaximumWorkers 4 -MaximumDurationSeconds 600 `
-            -SampleIntervalSeconds 5 -WorkerRampSeconds 10
+            -SampleIntervalSeconds 5 -WorkerRampSeconds 20
 
         $result.Outcome | Should -Be 'TargetMet'
         $result.FrozenSettings.Workers | Should -Be 2
@@ -842,25 +924,358 @@ Describe 'Task 12 workload orchestration' {
         @($fixture.State.Starts | Where-Object Disposed -eq $false).Count | Should -Be 0
     }
 
+    It 'preserves the invoked run identity through evidence and export injection' {
+        $runId = [guid]'12345678-1234-1234-1234-123456789abc'
+        $fixture = Get-TestOperationSet
+        $result = Invoke-WorkshopExperiment -RunId $runId -OperationSet $fixture.Operations -WorkerRampSeconds 20
+
+        $result.RunId | Should -Be $runId
+        $result.Evidence.runId | Should -BeExactly $runId.ToString('D')
+        $fixture.State.ExportedResult.RunId | Should -Be $runId
+        $fixture.State.ExportedResult.Evidence.runId | Should -BeExactly $runId.ToString('D')
+    }
+
+    It 'uses actual bounded settings when baseline stops before freeze' {
+        $baseline = 1..20 | ForEach-Object { Get-TestSample Baseline 70 }
+        $fixture = Get-TestOperationSet -Baseline $baseline
+        $result = Invoke-WorkshopExperiment -RunId ([guid]::NewGuid()) -OperationSet $fixture.Operations `
+            -MaximumWorkers 3 -MaximumDurationSeconds 60 -SampleIntervalSeconds 6 -WorkerRampSeconds 20
+
+        $result.Outcome | Should -Be 'BaselineTargetNotReached'
+        $result.FrozenSettings.maximumDurationSeconds | Should -Be 60
+        $result.FrozenSettings.sampleIntervalSeconds | Should -Be 6
+        $result.FrozenSettings.workerRampSeconds | Should -Be 20
+    }
+
+    It 'builds evidence environment only from SQL-observed preflight values' {
+        $fixture = Get-TestOperationSet
+        $result = Invoke-WorkshopExperiment -RunId ([guid]::NewGuid()) -OperationSet $fixture.Operations -WorkerRampSeconds 20
+
+        $result.Evidence.environment.sqlVersion | Should -BeExactly '16.0.1135.2'
+        $result.Evidence.environment.physicalMemoryMB | Should -BeExactly 65536
+    }
+
+    It 'sets the first ramp clock when worker one starts and never starts worker two before the exact ramp' {
+        $fixture = Get-TestOperationSet
+        [void](Invoke-WorkshopExperiment -RunId ([guid]::NewGuid()) -OperationSet $fixture.Operations `
+            -MaximumWorkers 4 -MaximumDurationSeconds 600 -SampleIntervalSeconds 5 -WorkerRampSeconds 20)
+        $baselineStarts = @($fixture.State.Starts | Where-Object Phase -eq Baseline)
+        $baselineStarts[0].StartedAt | Should -BeExactly ([datetimeoffset]'2026-09-01T10:00:00Z')
+        $baselineStarts[1].StartedAt | Should -BeExactly ([datetimeoffset]'2026-09-01T10:00:20Z')
+    }
+
+    It 'samples safety immediately before and after every one of twelve trials' {
+        $fixture = Get-TestOperationSet
+        $result = Invoke-WorkshopExperiment -RunId ([guid]::NewGuid()) -OperationSet $fixture.Operations `
+            -WorkerRampSeconds 20
+        $trialStart = [array]::IndexOf(@($fixture.State.Events.Kind), 'Trial')
+        $comparisonEvents = @($fixture.State.Events | Select-Object -Skip ($trialStart - 1) |
+            Where-Object Kind -ne 'Fingerprint')
+        $comparisonEvents.Count | Should -Be 36
+        for ($index = 0; $index -lt 12; $index++) {
+            $comparisonEvents[$index*3].Kind | Should -Be 'Memory'
+            $comparisonEvents[$index*3+1].Kind | Should -Be 'Trial'
+            $comparisonEvents[$index*3+2].Kind | Should -Be 'Memory'
+        }
+        $result.Trials.Count | Should -Be 12
+    }
+
+    It 'passes a positive bounded remaining deadline to every synchronous sample operation' {
+        $fixture = Get-TestOperationSet
+        [void](Invoke-WorkshopExperiment -RunId ([guid]::NewGuid()) -OperationSet $fixture.Operations `
+            -MaximumDurationSeconds 60 -WorkerRampSeconds 20)
+
+        @($fixture.State.Events).Count | Should -BeGreaterThan 0
+        foreach ($sampleCall in $fixture.State.Events) {
+            $sampleCall.RemainingSeconds | Should -BeGreaterOrEqual 1
+            $sampleCall.RemainingSeconds | Should -BeLessOrEqual 60
+        }
+    }
+
+    It 'passes the same absolute experiment deadline to every worker start' {
+        $fixture = Get-TestOperationSet
+        [void](Invoke-WorkshopExperiment -RunId ([guid]::NewGuid()) -OperationSet $fixture.Operations `
+            -MaximumDurationSeconds 60 -WorkerRampSeconds 20)
+
+        @($fixture.State.Starts).Count | Should -BeGreaterThan 0
+        @($fixture.State.Starts | Select-Object -ExpandProperty Deadline -Unique).Count | Should -Be 1
+        $fixture.State.Starts[0].Deadline | Should -BeExactly ([datetimeoffset]'2026-09-01T10:01:00Z')
+    }
+
+    It 'fails at the exact experiment deadline during drain without entering optimized measurement' {
+        $fixture = Get-TestOperationSet
+        $inner = $fixture.Operations.Sample
+        $fixture.Operations.Sample = {
+            param($RunId,$Phase,$Kind,$TrialPhase,$ScheduleEntry,$RemainingSeconds)
+            $value = & $inner $RunId $Phase $Kind $TrialPhase $ScheduleEntry $RemainingSeconds
+            if ($Kind -eq 'Drain') {
+                $fixture.State.Now = [datetimeoffset]'2026-09-01T10:01:00Z'
+                $value.ActiveGrantCount = 1
+            }
+            return $value
+        }.GetNewClosure()
+
+        $result = Invoke-WorkshopExperiment -RunId ([guid]::NewGuid()) -OperationSet $fixture.Operations `
+            -MaximumDurationSeconds 60 -WorkerRampSeconds 20
+
+        $result.Outcome | Should -BeExactly 'Failed'
+        $result.TerminationEvidence.Timeout | Should -BeTrue
+        @($fixture.State.Starts | Where-Object Phase -eq Optimized).Count | Should -Be 0
+        $fixture.State.KillCalls | Should -BeGreaterOrEqual 1
+    }
+
+    It 'fails at the exact experiment deadline after a synchronous trial and discards partial performance evidence' {
+        $fixture = Get-TestOperationSet
+        $inner = $fixture.Operations.Sample
+        $fixture.Operations.Sample = {
+            param($RunId,$Phase,$Kind,$TrialPhase,$ScheduleEntry,$RemainingSeconds)
+            $value = & $inner $RunId $Phase $Kind $TrialPhase $ScheduleEntry $RemainingSeconds
+            if ($Kind -eq 'Trial') {
+                $fixture.State.Now = [datetimeoffset]'2026-09-01T10:01:00Z'
+            }
+            return $value
+        }.GetNewClosure()
+
+        $result = Invoke-WorkshopExperiment -RunId ([guid]::NewGuid()) -OperationSet $fixture.Operations `
+            -MaximumDurationSeconds 60 -WorkerRampSeconds 20
+
+        $result.Outcome | Should -BeExactly 'Failed'
+        $result.TerminationEvidence.Timeout | Should -BeTrue
+        $result.Trials.Count | Should -Be 0
+        $result.Validation.Passed | Should -BeFalse
+        $fixture.State.KillCalls | Should -BeGreaterOrEqual 1
+    }
+
+    It 'fails and kills tagged sessions when an active worker completes or errors unexpectedly' -ForEach @(
+        @{ Reason = 'Worker completed unexpectedly.' }
+        @{ Reason = 'Worker failed: injected async failure.' }
+    ) {
+        $fixture = Get-TestOperationSet
+        $fixture.Operations.TestWorkerHealth = {
+            param([object[]] $Handles)
+            [pscustomobject]@{ Healthy = $false; Reason = $Reason; ActiveHandleCount = $Handles.Count }
+        }.GetNewClosure()
+
+        $result = Invoke-WorkshopExperiment -RunId ([guid]::NewGuid()) -OperationSet $fixture.Operations `
+            -MaximumDurationSeconds 60 -WorkerRampSeconds 20
+
+        $result.Outcome | Should -BeExactly 'SafetyStop'
+        $result.Trials.Count | Should -Be 0
+        $fixture.State.KillCalls | Should -BeGreaterOrEqual 1
+        @($fixture.State.Starts | Where-Object Disposed -eq $false).Count | Should -Be 0
+    }
+
+    It 'gives a trial manual stop precedence, cancels tagged sessions immediately, and never succeeds partially' {
+        $fixture = Get-TestOperationSet
+        $inner = $fixture.Operations.Sample
+        $fixture.State | Add-Member NoteProperty TrialSeen $false
+        $fixture.Operations.Sample = {
+            param($RunId,$Phase,$Kind,$TrialPhase,$ScheduleEntry,$RemainingSeconds)
+            if ($Kind -eq 'Trial') { $fixture.State.TrialSeen = $true }
+            $value = & $inner $RunId $Phase $Kind $TrialPhase $ScheduleEntry $RemainingSeconds
+            if ($fixture.State.TrialSeen -and $Kind -eq 'Memory') {
+                $value = $value.psobject.Copy()
+                $value.ManualStopRequested = $true
+                $value.HostUsedPercent = 99
+            }
+            return $value
+        }.GetNewClosure()
+        $result = Invoke-WorkshopExperiment -RunId ([guid]::NewGuid()) -OperationSet $fixture.Operations `
+            -WorkerRampSeconds 20
+        $result.Outcome | Should -Be 'ManualStop'
+        $result.Trials.Count | Should -BeLessThan 12
+        $result.Trials.Count | Should -BeGreaterThan 0
+        @($result.Trials | Where-Object { $_.Correct -or $_.DifferenceCount -lt 1 }).Count | Should -Be 0
+        $result.Validation.Passed | Should -BeFalse
+        $fixture.State.KillCalls | Should -BeGreaterOrEqual 1
+    }
+
+    It 'kills and returns persisted exported Failed evidence for operational exceptions after a safety sample' -ForEach @(
+        @{ FailurePoint = 'Sample' }
+        @{ FailurePoint = 'Worker' }
+        @{ FailurePoint = 'Fingerprint' }
+        @{ FailurePoint = 'Trial' }
+    ) {
+        $fixture = Get-TestOperationSet
+        if ($FailurePoint -eq 'Sample') {
+            $inner = $fixture.Operations.Sample
+            $script:memoryCalls = 0
+            $fixture.Operations.Sample = {
+                param($RunId,$Phase,$Kind,$TrialPhase,$ScheduleEntry,$RemainingSeconds)
+                if ($Kind -eq 'Memory') {
+                    $script:memoryCalls++
+                    if ($script:memoryCalls -eq 2) { throw 'injected sample failure' }
+                }
+                & $inner $RunId $Phase $Kind $TrialPhase $ScheduleEntry $RemainingSeconds
+            }.GetNewClosure()
+        }
+        elseif ($FailurePoint -eq 'Worker') {
+            $inner = $fixture.Operations.StartWorker
+            $fixture.Operations.StartWorker = {
+                param($RunId,$Phase,$Worker,$ApplicationName,$Schedule,$Deadline)
+                if ($Worker -eq 2) { throw 'injected worker failure' }
+                & $inner $RunId $Phase $Worker $ApplicationName $Schedule $Deadline
+            }.GetNewClosure()
+        }
+        elseif ($FailurePoint -eq 'Fingerprint') {
+            $inner = $fixture.Operations.Sample
+            $fixture.Operations.Sample = {
+                param($RunId,$Phase,$Kind,$TrialPhase,$ScheduleEntry,$RemainingSeconds)
+                if ($Kind -eq 'Fingerprint') { throw 'injected fingerprint failure' }
+                & $inner $RunId $Phase $Kind $TrialPhase $ScheduleEntry $RemainingSeconds
+            }.GetNewClosure()
+        }
+        else {
+            $inner = $fixture.Operations.Sample
+            $script:trialCalls = 0
+            $fixture.Operations.Sample = {
+                param($RunId,$Phase,$Kind,$TrialPhase,$ScheduleEntry,$RemainingSeconds)
+                if ($Kind -eq 'Trial') {
+                    $script:trialCalls++
+                    if ($script:trialCalls -eq 2) { throw 'injected trial failure' }
+                }
+                & $inner $RunId $Phase $Kind $TrialPhase $ScheduleEntry $RemainingSeconds
+            }.GetNewClosure()
+        }
+
+        $result = Invoke-WorkshopExperiment -RunId ([guid]::NewGuid()) -OperationSet $fixture.Operations `
+            -MaximumDurationSeconds 60 -WorkerRampSeconds 20
+
+        $result.Outcome | Should -BeExactly 'Failed'
+        $result.Samples.Count | Should -BeGreaterThan 0
+        @($result.Trials | Where-Object { $_.Correct -or $_.DifferenceCount -lt 1 }).Count | Should -Be 0
+        $result.Validation.Passed | Should -BeFalse
+        $fixture.State.KillCalls | Should -BeGreaterOrEqual 1
+        $fixture.State.Persisted.Count | Should -Be 1
+        $fixture.State.Exported | Should -BeTrue
+    }
+
+    It 'kills tagged sessions when the initial worker start fails before evidence exists' {
+        $fixture = Get-TestOperationSet
+        $fixture.Operations.StartWorker = { throw 'injected initial worker failure' }
+        { Invoke-WorkshopExperiment -RunId ([guid]::NewGuid()) -OperationSet $fixture.Operations } |
+            Should -Throw '*initial worker failure*'
+        $fixture.State.KillCalls | Should -Be 1
+        $fixture.State.Persisted.Count | Should -Be 0
+    }
+
+    It 'throws a finalization failure with the original operational failure retained in the message' {
+        $fixture = Get-TestOperationSet
+        $inner = $fixture.Operations.Sample
+        $script:memoryCalls = 0
+        $fixture.Operations.Sample = {
+            param($RunId,$Phase,$Kind,$TrialPhase,$ScheduleEntry,$RemainingSeconds)
+            if ($Kind -eq 'Memory') {
+                $script:memoryCalls++
+                if ($script:memoryCalls -eq 2) { throw 'original sample failure' }
+            }
+            & $inner $RunId $Phase $Kind $TrialPhase $ScheduleEntry $RemainingSeconds
+        }.GetNewClosure()
+        $fixture.Operations.Persist = { throw 'injected persistence failure' }
+
+        { Invoke-WorkshopExperiment -RunId ([guid]::NewGuid()) -OperationSet $fixture.Operations `
+                -MaximumDurationSeconds 60 -WorkerRampSeconds 20 } |
+            Should -Throw '*original sample failure*persistence failure*'
+        $fixture.State.KillCalls | Should -BeGreaterOrEqual 1
+    }
+
+    It 'returns Failed and does not calculate performance success for a paired trial mismatch' {
+        $fixture = Get-TestOperationSet
+        $inner = $fixture.Operations.Sample
+        $fixture.State | Add-Member NoteProperty TrialNumber 0
+        $fixture.Operations.Sample = {
+            param($RunId,$Phase,$Kind,$TrialPhase,$ScheduleEntry,$RemainingSeconds)
+            $value = & $inner $RunId $Phase $Kind $TrialPhase $ScheduleEntry $RemainingSeconds
+            if ($Kind -eq 'Trial') {
+                $fixture.State.TrialNumber++
+                if ($fixture.State.TrialNumber -eq 2) { $value.ResultHash = ('cd'*32) }
+            }
+            return $value
+        }.GetNewClosure()
+        $result = Invoke-WorkshopExperiment -RunId ([guid]::NewGuid()) -OperationSet $fixture.Operations `
+            -WorkerRampSeconds 20
+        $result.Outcome | Should -Be 'Failed'
+        $result.Validation.Passed | Should -BeFalse
+    }
+
+    It 'hashes the final assessed trial linkage with byte hashes encoded as hex' {
+        $matching = Get-TestOperationSet
+        $matchingSample = $matching.Operations.Sample
+        $matching.Operations.Sample = {
+            param($RunId,$Phase,$Kind,$TrialPhase,$ScheduleEntry,$RemainingSeconds)
+            $value = & $matchingSample $RunId $Phase $Kind $TrialPhase $ScheduleEntry $RemainingSeconds
+            if ($Kind -eq 'Trial') { $value.ResultHash = [byte[]](1..32) }
+            return $value
+        }.GetNewClosure()
+        $matchingResult = Invoke-WorkshopExperiment -RunId ([guid]::NewGuid()) -OperationSet $matching.Operations -WorkerRampSeconds 20
+
+        $mismatching = Get-TestOperationSet
+        $mismatchingSample = $mismatching.Operations.Sample
+        $mismatching.State | Add-Member NoteProperty TrialNumber 0
+        $mismatching.Operations.Sample = {
+            param($RunId,$Phase,$Kind,$TrialPhase,$ScheduleEntry,$RemainingSeconds)
+            $value = & $mismatchingSample $RunId $Phase $Kind $TrialPhase $ScheduleEntry $RemainingSeconds
+            if ($Kind -eq 'Trial') {
+                $mismatching.State.TrialNumber++
+                $value.ResultHash = if ($mismatching.State.TrialNumber -eq 2) { [byte[]](2..33) } else { [byte[]](1..32) }
+            }
+            return $value
+        }.GetNewClosure()
+        $mismatchingResult = Invoke-WorkshopExperiment -RunId ([guid]::NewGuid()) -OperationSet $mismatching.Operations -WorkerRampSeconds 20
+
+        $matchingResult.Validation.Passed | Should -BeTrue
+        $mismatchingResult.Validation.Passed | Should -BeFalse
+        $mismatchingResult.Outcome | Should -Be 'Failed'
+        $mismatchingResult.Validation.validationHash | Should -Not -BeExactly $matchingResult.Validation.validationHash
+    }
+
     It 'requires exact unchanged optimized fingerprints' {
         $fixture = Get-TestOperationSet
         $sampleOperation = $fixture.Operations.Sample
         $drift = Get-TestPreflight -Hash ('a' * 64)
         $drift.DataHash = ('b' * 64)
         $fixture.Operations.Sample = {
-            param($RunId, $Phase, $Kind, $TrialPhase, $ScheduleEntry)
+            param($RunId, $Phase, $Kind, $TrialPhase, $ScheduleEntry, $RemainingSeconds)
             if ($Kind -eq 'Fingerprint') { return $drift }
-            & $sampleOperation $RunId $Phase $Kind $TrialPhase $ScheduleEntry
+            & $sampleOperation $RunId $Phase $Kind $TrialPhase $ScheduleEntry $RemainingSeconds
         }.GetNewClosure()
-        { Invoke-WorkshopExperiment -RunId ([guid]::NewGuid()) -OperationSet $fixture.Operations } |
-            Should -Throw '*configuration or data drift*'
+        $result = Invoke-WorkshopExperiment -RunId ([guid]::NewGuid()) -OperationSet $fixture.Operations
+        $result.Outcome | Should -BeExactly 'Failed'
+        $result.Validation.Passed | Should -BeFalse
+        $fixture.State.KillCalls | Should -BeGreaterOrEqual 1
+        $fixture.State.Persisted.Count | Should -Be 1
+        $fixture.State.Exported | Should -BeTrue
+    }
+
+    It 'rejects fingerprint drift introduced during optimized measurement' {
+        $fixture = Get-TestOperationSet
+        $sampleOperation = $fixture.Operations.Sample
+        $fixture.State | Add-Member NoteProperty FingerprintCalls 0
+        $fixture.Operations.Sample = {
+            param($RunId, $Phase, $Kind, $TrialPhase, $ScheduleEntry, $RemainingSeconds)
+            if ($Kind -eq 'Fingerprint') {
+                $fixture.State.FingerprintCalls++
+                if ($fixture.State.FingerprintCalls -ge 2) {
+                    $drift = $fixture.State.Preflight.psobject.Copy()
+                    $drift.IndexStatisticsHash = ('b' * 64)
+                    return $drift
+                }
+            }
+            & $sampleOperation $RunId $Phase $Kind $TrialPhase $ScheduleEntry $RemainingSeconds
+        }.GetNewClosure()
+
+        $result = Invoke-WorkshopExperiment -RunId ([guid]::NewGuid()) `
+            -OperationSet $fixture.Operations -WorkerRampSeconds 20
+        $result.Outcome | Should -BeExactly 'Failed'
+        $result.Validation.Passed | Should -BeFalse
+        $fixture.State.FingerprintCalls | Should -BeGreaterOrEqual 2
     }
 
     It 'never claims optimized success when baseline cannot reach target' {
         $baseline = 1..130 | ForEach-Object { Get-TestSample Baseline 70 }
         $fixture = Get-TestOperationSet -Baseline $baseline
         $result = Invoke-WorkshopExperiment -RunId ([guid]::NewGuid()) -OperationSet $fixture.Operations `
-            -MaximumWorkers 4 -MaximumDurationSeconds 60 -SampleIntervalSeconds 5 -WorkerRampSeconds 10
+            -MaximumWorkers 4 -MaximumDurationSeconds 60 -SampleIntervalSeconds 5 -WorkerRampSeconds 20
         $result.Outcome | Should -Be 'BaselineTargetNotReached'
         @($fixture.State.Starts | Where-Object Phase -eq Optimized).Count | Should -Be 0
         $fixture.State.Exported | Should -BeTrue
@@ -885,10 +1300,11 @@ Describe 'Task 12 workload orchestration' {
         Get-WorkshopTrialSequence | Should -BeExactly @('A','B','B','A','B','A','A','B','A','B','B','A')
         $fixture = Get-TestOperationSet
         $result = Invoke-WorkshopExperiment -RunId ([guid]::NewGuid()) -OperationSet $fixture.Operations `
-            -WorkerRampSeconds 10
+            -WorkerRampSeconds 20
         $result.Trials.Count | Should -Be 12
         $result.Trials.Phase | Should -BeExactly @('Baseline','Optimized','Optimized','Baseline','Optimized','Baseline','Baseline','Optimized','Baseline','Optimized','Optimized','Baseline')
-        foreach ($metric in @('DurationMs','CpuMs','LogicalReads','GrantsKb','SpillsMb','WaitMs')) {
+        @($result.Trials.ValidationBatchID | Select-Object -Unique) | Should -Be @('11111111-1111-1111-1111-111111111111')
+        foreach ($metric in @('DurationMs','CpuMs','LogicalReads','GrantedKB','UsedKB','SpillKB','WaitMs')) {
             $result.Trials[0].psobject.Properties.Name | Should -Contain $metric
         }
     }
@@ -896,20 +1312,33 @@ Describe 'Task 12 workload orchestration' {
     It 'rejects incomplete preflight including SQL, memory, Query Store, MGF, objects, and validation' -ForEach @(
         @{ Property = 'MarkerValid'; Value = $false }
         @{ Property = 'SqlMajorVersion'; Value = 15 }
+        @{ Property = 'SqlProductVersion'; Value = '' }
         @{ Property = 'SqlEdition'; Value = 'Standard Edition' }
         @{ Property = 'PhysicalMemoryMB'; Value = 32768 }
         @{ Property = 'QueryStoreActualState'; Value = 'READ_ONLY' }
         @{ Property = 'ResourcePool'; Value = 'default' }
         @{ Property = 'WorkloadGroup'; Value = 'default' }
-        @{ Property = 'MemoryGrantFeedbackDisabled'; Value = $false }
+        @{ Property = 'RowModeMemoryGrantFeedbackDisabled'; Value = $false }
         @{ Property = 'PriorMemoryGrantFeedbackState'; Value = $null }
         @{ Property = 'ProceduresPresent'; Value = $false }
-        @{ Property = 'EvidenceSchemaPresent'; Value = $false }
+        @{ Property = 'WorkshopTrialPresent'; Value = $false }
         @{ Property = 'ValidationPassed'; Value = $false }
+        @{ Property = 'ValidationValidatedAtUtc'; Value = ([datetimeoffset]::UtcNow.AddHours(-25)) }
+        @{ Property = 'ValidationBatchHash'; Value = ('z' * 64) }
     ) {
         $preflight = Get-TestPreflight
         $preflight.$Property = $Value
         { Test-WorkshopPreflight -Snapshot $preflight } | Should -Throw
+    }
+
+    It 'treats validation batch identity and hash as frozen optimized fingerprint inputs' {
+        $snapshot = Get-TestPreflight
+        Test-WorkshopPreflight $snapshot | Should -BeTrue
+        foreach ($field in @('ValidationBatchID','ValidationBatchHash')) {
+            $copy = $snapshot.psobject.Copy()
+            $copy.$field = if ($field -eq 'ValidationBatchID') { [guid]::NewGuid().ToString('D') } else { 'e' * 64 }
+            Test-WorkshopFingerprintMatch -Expected $snapshot -Actual $copy | Should -BeFalse
+        }
     }
 }
 
@@ -930,11 +1359,15 @@ Describe 'Task 12 stop and export safety' {
 
     It 'rejects noncanonical run paths and reparse-point output' {
         { Export-WorkshopEvidenceFile -RunId '../escape' -Evidence @{} -RepositoryRoot $TestDrive } | Should -Throw
+        { Export-WorkshopEvidenceFile -RunId 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa' `
+            -Evidence ([ordered]@{ samples=@(); trials=@() }) -RepositoryRoot $TestDrive `
+            -SemanticValidator { $true } } | Should -Throw '*run ID*'
         $link = Join-Path $TestDrive 'evidence/runs/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
         $target = Join-Path $TestDrive 'junction-target'
         New-Item -ItemType Directory -Path $target -Force | Out-Null
         New-Item -ItemType Junction -Path $link -Target $target -Force | Out-Null
-        { Export-WorkshopEvidenceFile -RunId 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa' -Evidence @{} -RepositoryRoot $TestDrive } |
+        { Export-WorkshopEvidenceFile -RunId 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa' `
+            -Evidence ([ordered]@{ runId='aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa' }) -RepositoryRoot $TestDrive } |
             Should -Throw '*reparse*'
     }
 
@@ -956,6 +1389,26 @@ Describe 'Task 12 stop and export safety' {
                 -RepositoryRoot $TestDrive -SemanticValidator { $true } } | Should -Throw '*Secret-shaped*'
     }
 
+    It 'exports a deterministic union of sample and trial columns' {
+        $run = 'dddddddd-dddd-dddd-dddd-dddddddddddd'
+        $evidence = [ordered]@{
+            runId = $run
+            samples = @([pscustomobject][ordered]@{ sequence=1; phase='Baseline'; grantedKb=800 })
+            trials = @([pscustomobject][ordered]@{ TrialSequence=1; Phase='Baseline'; DurationMs=10; ResultHash=('ab'*32) })
+        }
+        $result = Export-WorkshopEvidenceFile -RunId $run -Evidence $evidence -RepositoryRoot $TestDrive `
+            -SemanticValidator { $true }
+        $rows = @(Import-Csv -LiteralPath $result.CsvPath)
+
+        $rows.Count | Should -Be 2
+        $rows[0].recordType | Should -BeExactly 'Sample'
+        $rows[0].sequence | Should -Be '1'
+        $rows[0].grantedKb | Should -Be '800'
+        $rows[1].recordType | Should -BeExactly 'Trial'
+        $rows[1].DurationMs | Should -Be '10'
+        $rows[1].ResultHash | Should -BeExactly ('ab'*32)
+    }
+
     It 'declares strict entry bounds, ShouldProcess, and no insecure SQL fallback or Start-Sleep' {
         $start = Get-Content (Join-Path $PSScriptRoot '../../workload/Start-MemoryGrantLab.ps1') -Raw
         $stop = Get-Content (Join-Path $PSScriptRoot '../../workload/Stop-MemoryGrantLab.ps1') -Raw
@@ -964,7 +1417,7 @@ Describe 'Task 12 stop and export safety' {
         $start | Should -Match 'ValidateRange\(1,\s*4\)'
         $start | Should -Match 'ValidateRange\(60,\s*600\)'
         $start | Should -Match 'ValidateRange\(5,\s*30\)'
-        $start | Should -Match 'ValidateRange\(10,\s*60\)'
+        $start | Should -Match 'ValidateRange\(20,\s*60\)'
         $stop | Should -Match 'SupportsShouldProcess'
         $export | Should -Match 'SupportsShouldProcess'
         "$start`n$stop`n$export`n$module" | Should -Not -Match 'System\.Data\.SqlClient'
@@ -988,5 +1441,338 @@ Describe 'Task 12 stop and export safety' {
         $module | Should -Match 'EndInvoke'
         $module | Should -Match '\.Dispose\(\)'
         $module | Should -Not -Match 'AddWithValue'
+        $module | Should -Not -Match 'CommandTimeout\s*=\s*600'
+        $module | Should -Match 'param\([^)]*\[datetimeoffset\]\s*\$Deadline'
+        $module | Should -Match 'CommandTimeout\s*=\s*\[math\]::Max\(1,\s*\[int\]\[math\]::Ceiling\('
+        $module | Should -Match 'if\s*\(\[datetimeoffset\]::UtcNow\s*-ge\s*\$WorkerDeadline\)\s*\{\s*break\s*\}'
+    }
+
+    It 'signals worker readiness after production tagging and assigns the ramp clock only after StartWorker returns' {
+        $module = Get-Content (Join-Path $PSScriptRoot '../../workload/Workshop.Workload.psm1') -Raw
+        $module | Should -Match 'ManualResetEventSlim'
+        $module | Should -Match '\.Wait\('
+        $module | Should -Not -Match 'Start-Sleep'
+        $tagIndex = $module.IndexOf('[void] $tag.ExecuteNonQuery()')
+        $readyIndex = $module.IndexOf('$readySignal.Set()', $tagIndex)
+        $tagIndex | Should -BeGreaterOrEqual 0
+        $readyIndex | Should -BeGreaterThan $tagIndex
+        $startIndex = $module.IndexOf('$OperationSet.StartWorker $RunId ''Baseline'' 1')
+        $rampIndex = $module.IndexOf('$lastRamp = [datetimeoffset] (& $OperationSet.Clock)', $startIndex)
+        $startIndex | Should -BeGreaterOrEqual 0
+        $rampIndex | Should -BeGreaterThan $startIndex
+    }
+
+    It 'owns worker setup resources in a catch cleanup contract for every setup and readiness failure' {
+        $module = Get-Content (Join-Path $PSScriptRoot '../../workload/Workshop.Workload.psm1') -Raw
+        $workerRegion = $module.Substring($module.IndexOf('$startWorker = {'), $module.IndexOf('$sample = {') - $module.IndexOf('$startWorker = {'))
+        foreach ($operation in @('CreateRunspace','\.Open\(\)','\[powershell\]::Create','AddScript','BeginInvoke','\.Wait\(')) {
+            $workerRegion | Should -Match $operation
+        }
+        $workerRegion | Should -Match 'catch\s*\{[\s\S]*PowerShell\.Stop\(\)[\s\S]*PowerShell\.Dispose\(\)[\s\S]*Runspace\.Dispose\(\)[\s\S]*ReadySignal\.Dispose\(\)'
+    }
+}
+
+Describe 'Task 12 remaining blocker contracts' {
+    BeforeAll {
+        function Get-FakeTrialReader {
+            param([object[]] $ResultSets)
+            $reader = [pscustomobject]@{ Sets = $ResultSets; SetIndex = 0; RowIndex = -1; Disposed = $false }
+            $reader | Add-Member ScriptProperty FieldCount {
+                if ($this.SetIndex -ge $this.Sets.Count) { return 0 }
+                return @($this.Sets[$this.SetIndex].Names).Count
+            }
+            $reader | Add-Member ScriptMethod GetName { param($Index) [string] $this.Sets[$this.SetIndex].Names[$Index] }
+            $reader | Add-Member ScriptMethod Read {
+                $this.RowIndex++
+                return $this.RowIndex -lt @($this.Sets[$this.SetIndex].Rows).Count
+            }
+            $reader | Add-Member ScriptMethod IsDBNull { param($Index) $null -eq $this.Sets[$this.SetIndex].Rows[$this.RowIndex][$Index] }
+            $reader | Add-Member ScriptMethod GetValue { param($Index) $this.Sets[$this.SetIndex].Rows[$this.RowIndex][$Index] }
+            $reader | Add-Member ScriptMethod NextResult {
+                $this.SetIndex++
+                $this.RowIndex = -1
+                return $this.SetIndex -lt $this.Sets.Count
+            }
+            $reader | Add-Member ScriptMethod Dispose { $this.Disposed = $true }
+            return $reader
+        }
+
+        function Get-ValidTrialMetricName {
+            @('DurationMs','CpuMs','LogicalReads','GrantedKB','UsedKB','SpillKB','WaitMs',
+              'ResultRowCount','ResultHash','ExpectedRowCount','ActualRowCount','DifferenceCount',
+              'Correct','ValidationBatchID','StartedAtUtc','CompletedAtUtc')
+        }
+
+        function Get-ValidTrialMetricValue {
+                        $values = [object[]]@([int64]10,[int64]5,[int64]20,[int64]30,[int64]25,[int64]0,[int64]1,
+                            [int64]2,$null,[int64]2,[int64]2,[int64]0,$true,
+              [guid]'11111111-1111-1111-1111-111111111111',
+              [datetime]'2026-09-01T10:00:00Z',[datetime]'2026-09-01T10:00:01Z')
+                        $values[8] = [byte[]](1..32)
+                        Write-Output -InputObject $values -NoEnumerate
+        }
+
+                    function Get-ConcreteTestPreflight {
+                        [pscustomobject]@{
+                            MarkerValid=$true; SqlMajorVersion=16; SqlEdition='Enterprise Edition (64-bit)'
+                            SqlProductVersion='16.0.1135.2'; VmSku='Standard_E8s_v5'
+                            Region='indonesiacentral'; ImageVersion='16.0.2026.801'
+                            PhysicalMemoryMB=65536; QueryStoreActualState='READ_WRITE'
+                            ResourcePool='mcp_sql_workshop_pool'; PoolMinMemoryPercent=0; PoolMaxMemoryPercent=50
+                            WorkloadGroup='mcp_sql_workshop_group'; GroupRequestMaxMemoryGrantPercent=40
+                            GroupMaxDop=4; GroupMaxRequests=4; MaxServerMemoryMB=49152; MinServerMemoryMB=0
+                            RowModeMemoryGrantFeedbackDisabled=$true; BatchModeMemoryGrantFeedbackDisabled=$true
+                            ControllerSessionInWorkloadGroup=$true; PriorMemoryGrantFeedbackState='ON'
+                            ProceduresPresent=$true; WorkshopRunPresent=$true; WorkshopSamplePresent=$true
+                            WorkshopRequestSamplePresent=$true; WorkshopTrialPresent=$true
+                            ValidationBatchID='11111111-1111-1111-1111-111111111111'; ValidationPassed=$true
+                            ValidationValidatedAtUtc=[datetimeoffset]::UtcNow.AddMinutes(-5)
+                            ValidationBatchHash=('d'*64)
+                            DataHash=('a'*64); IndexStatisticsHash=('a'*64); ProcedureHash=('a'*64)
+                        }
+                    }
+    }
+
+    It 'drains procedure rows and later result sets and accepts exactly one exact trial metric schema' {
+        $reader = Get-FakeTrialReader @(
+            [pscustomobject]@{ Names = @('TerritoryID','CustomerID'); Rows = @(@(1,2),@(3,4)) },
+            [pscustomobject]@{ Names = @(); Rows = @() },
+            [pscustomobject]@{ Names = Get-ValidTrialMetricName; Rows = @(,(Get-ValidTrialMetricValue)) }
+        )
+        $result = ConvertFrom-WorkshopTrialReader -Reader $reader
+        $result.DurationMs | Should -Be 10
+        $result.ResultHash.Length | Should -Be 32
+        $reader.SetIndex | Should -Be 3
+    }
+
+    It 'rejects duplicate, missing, extra, nonfinite, negative, null, and multirow trial metric sets' {
+        $names = Get-ValidTrialMetricName
+        $values = Get-ValidTrialMetricValue
+        $badSets = @(
+            @([pscustomobject]@{ Names = $names; Rows = @(,$values) }, [pscustomobject]@{ Names = $names; Rows = @(,$values) }),
+            @([pscustomobject]@{ Names = $names[0..14]; Rows = @(,$values[0..14]) }),
+            @([pscustomobject]@{ Names = @($names + 'Extra'); Rows = @(,@($values + 1)) }),
+            @([pscustomobject]@{ Names = $names; Rows = @(,@([double]::NaN) + $values[1..15]) }),
+            @([pscustomobject]@{ Names = $names; Rows = @(,@(-1) + $values[1..15]) }),
+            @([pscustomobject]@{ Names = $names; Rows = @(,@($null) + $values[1..15]) }),
+            @([pscustomobject]@{ Names = $names; Rows = @($values,$values) })
+        )
+        foreach ($sets in $badSets) {
+            { ConvertFrom-WorkshopTrialReader -Reader (Get-FakeTrialReader $sets) } | Should -Throw
+        }
+    }
+
+    It 'pairs one A and one B by each of six parameter slots and fails exact rowcount or hash mismatches' {
+        $trials = for ($slot = 1; $slot -le 6; $slot++) {
+            foreach ($phase in @('Baseline','Optimized')) {
+                [pscustomobject]@{
+                    TrialSequence = (($slot - 1) * 2) + $(if ($phase -eq 'Baseline') { 1 } else { 2 })
+                    ParameterSlot = $slot; Phase = $phase; DurationMs = 10; CpuMs = 5
+                    LogicalReads = 20; GrantedKB = 30; UsedKB = 25; SpillKB = 0; WaitMs = 1
+                    ResultRowCount = 2; ResultHash = ('ab' * 32)
+                    ExpectedRowCount = 0; ActualRowCount = 0; DifferenceCount = 0
+                    Correct = $false; ValidationBatchID = '11111111-1111-1111-1111-111111111111'
+                    StartedAtUtc = '2026-09-01T10:00:00.0000000Z'; CompletedAtUtc = '2026-09-01T10:00:01.0000000Z'
+                }
+            }
+        }
+        $assessment = Get-WorkshopTrialAssessment -Trials $trials
+        $assessment.CorrectnessPassed | Should -BeTrue
+        @($assessment.Trials | Where-Object Correct -eq $false).Count | Should -Be 0
+        $assessment.Trials.ExpectedRowCount | Should -Be @(2,2,2,2,2,2,2,2,2,2,2,2)
+
+        $trials[3].ResultHash = ('cd' * 32)
+        $mismatch = Get-WorkshopTrialAssessment -Trials $trials
+        $mismatch.CorrectnessPassed | Should -BeFalse
+        @($mismatch.Trials | Where-Object ParameterSlot -eq 2).Correct | Should -Be @($false,$false)
+        @($mismatch.Trials | Where-Object ParameterSlot -eq 2).DifferenceCount | Should -Be @(1,1)
+    }
+
+    It 'uses the SQL comparison metric set and exact ten-percent material thresholds' {
+        $trials = for ($slot = 1; $slot -le 6; $slot++) {
+            foreach ($phase in @('Baseline','Optimized')) {
+                $optimized = $phase -eq 'Optimized'
+                [pscustomobject]@{
+                    TrialSequence = (($slot - 1) * 2) + $(if ($optimized) { 2 } else { 1 })
+                    ParameterSlot = $slot; Phase = $phase
+                    DurationMs = if ($optimized) { 90 } else { 100 }
+                    CpuMs = 100; LogicalReads = 100; GrantedKB = if ($optimized) { 1 } else { 100 }
+                    UsedKB = if ($optimized) { 1 } else { 100 }; SpillKB = 100; WaitMs = 100
+                    ResultRowCount = 2; ResultHash = ('ab' * 32)
+                    ExpectedRowCount = 0; ActualRowCount = 0; DifferenceCount = 0; Correct = $false
+                    ValidationBatchID = '11111111-1111-1111-1111-111111111111'
+                    StartedAtUtc = '2026-09-01T10:00:00.0000000Z'; CompletedAtUtc = '2026-09-01T10:00:01.0000000Z'
+                }
+            }
+        }
+
+        $material = Get-WorkshopTrialAssessment -Trials $trials
+        $material.AdditionalMetricImproved | Should -BeTrue
+        $material.MaterialRegression | Should -BeFalse
+
+        foreach ($trial in $trials | Where-Object Phase -eq 'Optimized') { $trial.DurationMs = 91 }
+        (Get-WorkshopTrialAssessment -Trials $trials).AdditionalMetricImproved | Should -BeFalse
+
+        foreach ($trial in $trials | Where-Object Phase -eq 'Optimized') { $trial.CpuMs = 111 }
+        (Get-WorkshopTrialAssessment -Trials $trials).MaterialRegression | Should -BeTrue
+    }
+
+    It 'derives and compares a canonical configuration fingerprint from every concrete preflight field' {
+        $snapshot = Get-ConcreteTestPreflight
+        Test-WorkshopPreflight $snapshot | Should -BeTrue
+        $snapshot.CanonicalConfigurationFingerprint | Should -Match '^[a-f0-9]{64}$'
+        foreach ($field in @('PoolMinMemoryPercent','PoolMaxMemoryPercent','GroupRequestMaxMemoryGrantPercent',
+            'GroupMaxDop','GroupMaxRequests','MaxServerMemoryMB','MinServerMemoryMB',
+            'RowModeMemoryGrantFeedbackDisabled','BatchModeMemoryGrantFeedbackDisabled',
+            'ControllerSessionInWorkloadGroup','QueryStoreActualState')) {
+            $copy = $snapshot.psobject.Copy()
+            $copy.$field = if ($copy.$field -is [bool]) { -not $copy.$field } else { "$($copy.$field)-drift" }
+            Test-WorkshopFingerprintMatch -Expected $snapshot -Actual $copy | Should -BeFalse
+        }
+    }
+
+    It 'contains production-shape typed trial capture, exact tags, transactional full persistence, and count verification' {
+        $module = Get-Content (Join-Path $PSScriptRoot '../../workload/Workshop.Workload.psm1') -Raw
+        $module | Should -Match 'CREATE TABLE #TrialResult'
+        $module | Should -Match 'INSERT\s+#TrialResult\s+EXEC\s+__PROCEDURE__'
+        $module | Should -Match 'HASHBYTES\(''SHA2_256'''
+        $module | Should -Not -Match '@Correct'
+        $module | Should -Match 'Get-WorkshopApplicationName\s+-RunId\s+\$RunId\s+-Phase\s+\$TrialPhase'
+        $module | Should -Match 'SET\s+CONTEXT_INFO\s+@RunBytes'
+        $module | Should -Match "WorkshopRunId"
+        $module | Should -Match "WorkshopPhase"
+        $module | Should -Match 'BEGIN TRANSACTION'
+        foreach ($table in @('WorkshopRun','WorkshopSample','WorkshopRequestSample','WorkshopTrial')) {
+            $module | Should -Match "INSERT\s+lab\.$table"
+        }
+        $module | Should -Match 'InsertedTrialCount'
+        $module | Should -Match 'ROLLBACK TRANSACTION'
+        $module | Should -Match 'CONVERT\(bigint,\s*1\)\s+AS\s+DifferenceCount'
+        $module | Should -Match 'CONVERT\(bit,\s*0\)\s+AS\s+Correct'
+        $module | Should -Not -Match 'CASE\s+WHEN\s+@ResultRowCount\s*>=\s*0'
+        $module | Should -Match 'Exact persisted workshop evidence does not match'
+        $module | Should -Match 'ExistingSampleCount'
+        $module | Should -Match 'ExistingRequestSampleCount'
+        $module | Should -Match 'ExistingTrialCount'
+        $module | Should -Match 'RETURN;'
+        $module | Should -Match 'BaselineRunID\s+IS\s+NULL'
+        $module | Should -Match 'OptimizedRunID\s+IS\s+NULL'
+        $module | Should -Match 'DATEADD\(hour,\s*-24,\s*SYSUTCDATETIME\(\)\)'
+        $module | Should -Match 'AS\s+ValidationBatchHash'
+        $module | Should -Match 'ValidationValidatedAtUtc'
+    }
+
+    It 'caches the production preflight snapshot used for trial validation linkage' {
+        $module = Get-Content (Join-Path $PSScriptRoot '../../workload/Workshop.Workload.psm1') -Raw
+        $module | Should -Match '\$preflightSnapshot\s*=\s*\[pscustomobject\]@\{\s*Value\s*=\s*\$null\s*\}'
+        $module | Should -Match 'if\s*\(\$null\s*-eq\s*\$preflightSnapshot\.Value\)\s*\{\s*\$preflightSnapshot\.Value\s*=\s*\$rows\[0\]\s*\}'
+        $module | Should -Match '\[guid\]\$preflightSnapshot\.Value\.ValidationBatchID'
+        $module | Should -Not -Match '\[guid\]\$preflight\.ValidationBatchID'
+    }
+
+    It 'emits exact ordered production rows before the trial metric result set' {
+        $module = Get-Content (Join-Path $PSScriptRoot '../../workload/Workshop.Workload.psm1') -Raw
+        $trialSqlStart = $module.IndexOf('CREATE TABLE #TrialResult')
+        $trialSqlEnd = $module.IndexOf("'@", $trialSqlStart)
+        $trialSql = $module.Substring($trialSqlStart, $trialSqlEnd - $trialSqlStart)
+        $insertIndex = $trialSql.IndexOf('INSERT #TrialResult EXEC __PROCEDURE__')
+        $rowsIndex = $trialSql.IndexOf('SELECT TerritoryID, CustomerID, ProductID, OrderCount, TotalQuantity, TotalSales, AverageUnitPrice, SalesRank', $insertIndex)
+        $metricIndex = $trialSql.IndexOf('AS DurationMs', $insertIndex)
+
+        $insertIndex | Should -BeGreaterOrEqual 0
+        $rowsIndex | Should -BeGreaterThan $insertIndex
+        $metricIndex | Should -BeGreaterThan $rowsIndex
+        $trialSql.Substring($rowsIndex, $metricIndex - $rowsIndex) | Should -Match 'ORDER BY SalesRank, CASE WHEN TerritoryID IS NULL THEN 0 ELSE 1 END, TerritoryID, CustomerID, ProductID'
+    }
+
+    It 'uses safe backup replacement and restores the completed destination when stage promotion fails' {
+        $run = 'cccccccc-cccc-cccc-cccc-cccccccccccc'
+        $destination = Join-Path $TestDrive "evidence/runs/$run"
+        New-Item -ItemType Directory -Path $destination -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $destination 'marker.txt') -Value old -NoNewline
+        Set-Content -LiteralPath (Join-Path $destination 'evidence.json') -Value "{`"runId`":`"$run`"}" -NoNewline
+        $moveState = [pscustomobject]@{ Count = 0 }
+        $ops = @{
+            MoveDirectory = {
+                param($Source,$Target)
+                $moveState.Count++
+                if ($moveState.Count -eq 2) { throw 'injected promotion failure' }
+                [IO.Directory]::Move($Source,$Target)
+            }.GetNewClosure()
+        }
+        { Export-WorkshopEvidenceFile -RunId $run -Evidence ([ordered]@{ runId=$run; samples=@(); trials=@() }) `
+                -RepositoryRoot $TestDrive -AllowReplaceCompletedRun -SemanticValidator { $true } `
+                -FileOperations $ops } | Should -Throw '*promotion failure*'
+        (Get-Content -LiteralPath (Join-Path $destination 'marker.txt') -Raw) | Should -BeExactly 'old'
+        (Get-Content -LiteralPath (Join-Path $destination 'evidence.json') -Raw) | Should -Match $run
+    }
+
+    It 'removes a first-time promoted destination when post-promotion validation fails' {
+        $run = 'abababab-abab-abab-abab-abababababab'
+        $destination = Join-Path $TestDrive "evidence/runs/$run"
+        $script:firstPromotionValidationCalls = 0
+        $validator = {
+            param($Path)
+            Write-Verbose $Path
+            $script:firstPromotionValidationCalls++
+            return $script:firstPromotionValidationCalls -eq 1
+        }
+
+        { Export-WorkshopEvidenceFile -RunId $run -Evidence ([ordered]@{ runId=$run; samples=@(); trials=@() }) `
+                -RepositoryRoot $TestDrive -SemanticValidator $validator } |
+            Should -Throw '*validation failed after promotion*'
+        Test-Path -LiteralPath $destination | Should -BeFalse
+    }
+
+
+    It 'restores old evidence when the destination-to-backup move completes and then throws' {
+        $run = 'eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee'
+        $destination = Join-Path $TestDrive "evidence/runs/$run"
+        New-Item -ItemType Directory -Path $destination -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $destination 'marker.txt') -Value old -NoNewline
+        Set-Content -LiteralPath (Join-Path $destination 'evidence.json') -Value "{`"runId`":`"$run`"}" -NoNewline
+        $script:movesAfterFirst = 0
+        $ops = @{ MoveDirectory = {
+            param($Source,$Target)
+            $script:movesAfterFirst++
+            [IO.Directory]::Move($Source,$Target)
+            if ($script:movesAfterFirst -eq 1) { throw 'injected after first move' }
+        } }
+        { Export-WorkshopEvidenceFile -RunId $run -Evidence ([ordered]@{ runId=$run; samples=@(); trials=@() }) `
+                -RepositoryRoot $TestDrive -AllowReplaceCompletedRun -SemanticValidator { $true } -FileOperations $ops } |
+            Should -Throw '*after first move*'
+        (Get-Content -LiteralPath (Join-Path $destination 'marker.txt') -Raw) | Should -BeExactly 'old'
+        (Get-Content -LiteralPath (Join-Path $destination 'evidence.json') -Raw) | Should -Match $run
+    }
+
+    It 'restores old evidence when stage promotion completes then throws or post-validation fails' -ForEach @(
+        @{ ThrowAfterMove = $true; ValidationFails = $false; Message = 'injected after second move' }
+        @{ ThrowAfterMove = $false; ValidationFails = $true; Message = 'validation failed after promotion' }
+    ) {
+        $run = [guid]::NewGuid().ToString('D')
+        $destination = Join-Path $TestDrive "evidence/runs/$run"
+        New-Item -ItemType Directory -Path $destination -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $destination 'marker.txt') -Value old -NoNewline
+        Set-Content -LiteralPath (Join-Path $destination 'evidence.json') -Value "{`"runId`":`"$run`"}" -NoNewline
+        $script:movesAfterSecond = 0
+        $script:validationCalls = 0
+        $ops = @{ MoveDirectory = {
+            param($Source,$Target)
+            $script:movesAfterSecond++
+            [IO.Directory]::Move($Source,$Target)
+            if ($ThrowAfterMove -and $script:movesAfterSecond -eq 2) { throw $Message }
+        }.GetNewClosure() }
+        $validator = {
+            param($Path)
+            Write-Verbose $Path
+            $script:validationCalls++
+            if ($ValidationFails -and $script:validationCalls -eq 2) { return $false }
+            return $true
+        }.GetNewClosure()
+        { Export-WorkshopEvidenceFile -RunId $run -Evidence ([ordered]@{ runId=$run; samples=@(); trials=@() }) `
+                -RepositoryRoot $TestDrive -AllowReplaceCompletedRun -SemanticValidator $validator -FileOperations $ops } |
+            Should -Throw
+        (Get-Content -LiteralPath (Join-Path $destination 'marker.txt') -Raw) | Should -BeExactly 'old'
+        (Get-Content -LiteralPath (Join-Path $destination 'evidence.json') -Raw) | Should -Match $run
     }
 }

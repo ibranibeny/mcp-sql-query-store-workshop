@@ -28,7 +28,7 @@ param(
     [int] $SampleIntervalSeconds = 5,
 
     [Parameter()]
-    [ValidateRange(10, 60)]
+    [ValidateRange(20, 60)]
     [int] $WorkerRampSeconds = 20,
 
     [Parameter(DontShow)]

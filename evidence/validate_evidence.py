@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from fractions import Fraction
+import hashlib
 import json
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -14,6 +16,8 @@ from jsonschema.exceptions import SchemaError
 
 
 _DOTNET_DECIMAL_MAX_COEFFICIENT = 79228162514264337593543950335
+_UTC_INSTANT_FORMAT = "%Y-%m-%dT%H:%M:%S"
+_UTC_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 
 
 class EvidenceValidationError(ValueError):
@@ -92,6 +96,24 @@ def _difference_at_least(left: Decimal, right: Decimal, threshold: int) -> bool:
     )
 
 
+def _utc_ticks(value: str, path: str) -> int:
+    """Parse a schema-valid RFC3339 UTC instant into exact 100 ns ticks."""
+
+    timestamp, separator, suffix = value.partition(".")
+    fraction = suffix[:-1] if separator else ""
+    if not separator:
+        timestamp = timestamp[:-1]
+    try:
+        parsed = datetime.strptime(timestamp, _UTC_INSTANT_FORMAT).replace(
+            tzinfo=timezone.utc
+        )
+    except (TypeError, ValueError):
+        raise EvidenceValidationError((f"{path} must be an RFC3339 UTC instant.",)) from None
+    seconds = int((parsed - _UTC_EPOCH).total_seconds())
+    ticks = int(fraction.ljust(7, "0")) if fraction else 0
+    return seconds * 10_000_000 + ticks
+
+
 def _expected_outcome(document: Mapping[str, Any]) -> str:
     termination = document["terminationEvidence"]
     if termination["manualStopRequested"]:
@@ -127,11 +149,75 @@ def _expected_outcome(document: Mapping[str, Any]) -> str:
     return "NoMaterialImprovement"
 
 
-def _validate_semantics(document: Mapping[str, Any]) -> list[str]:
-    if document["evidenceClassification"] != "LAB-MEASURED":
-        return []
+def _trial_assessment(trials: Sequence[Mapping[str, Any]]) -> tuple[bool, bool]:
+    baseline = [trial for trial in trials if trial["phase"] == "Baseline"]
+    optimized = [trial for trial in trials if trial["phase"] == "Optimized"]
+    material_regression = False
+    additional_improvement = False
+    for metric in ("durationMs", "cpuMs", "logicalReads", "spillKB", "waitMs"):
+        baseline_average = sum(
+            (_decimal(trial[metric], f"$.trials.{metric}") for trial in baseline),
+            Decimal(0),
+        ) / len(baseline)
+        optimized_average = sum(
+            (_decimal(trial[metric], f"$.trials.{metric}") for trial in optimized),
+            Decimal(0),
+        ) / len(optimized)
+        if baseline_average > 0 and optimized_average <= baseline_average * Decimal("0.90"):
+            additional_improvement = True
+        if (baseline_average == 0 and optimized_average > 0) or (
+            baseline_average > 0
+            and optimized_average > baseline_average * Decimal("1.10")
+        ):
+            material_regression = True
+    return material_regression, additional_improvement
 
+
+def _validation_hash(trials: Sequence[Mapping[str, Any]]) -> str:
+    linkage = [
+        {
+            "sequence": trial["trialSequence"],
+            "slot": trial["parameterSlot"],
+            "phase": trial["phase"],
+            "resultRowCount": trial["resultRowCount"],
+            "resultHash": trial["resultHash"].lower(),
+            "expectedRowCount": trial["expectedRowCount"],
+            "actualRowCount": trial["actualRowCount"],
+            "differenceCount": trial["differenceCount"],
+            "correct": trial["correct"],
+        }
+        for trial in trials
+    ]
+    canonical = json.dumps(linkage, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _validate_semantics(document: Mapping[str, Any]) -> list[str]:
     issues: list[str] = []
+    settings = document["frozenSettings"]
+    canonical_settings = json.dumps(
+        settings, ensure_ascii=False, separators=(",", ":"), sort_keys=True
+    )
+    try:
+        serialized_settings = json.loads(document["frozenSettingsJson"])
+    except (json.JSONDecodeError, TypeError):
+        serialized_settings = None
+    if serialized_settings != settings or document["frozenSettingsJson"] != canonical_settings:
+        issues.append("$.frozenSettingsJson must be the canonical frozenSettings serialization.")
+    if document["frozenSettingsHash"] != hashlib.sha256(
+        canonical_settings.encode("utf-8")
+    ).hexdigest():
+        issues.append("$.frozenSettingsHash must match the canonical frozen settings.")
+    schedule_json = json.dumps(
+        settings["parameterSchedule"], ensure_ascii=False, separators=(",", ":")
+    )
+    if settings["parameterScheduleHash"] != hashlib.sha256(
+        schedule_json.encode("utf-8")
+    ).hexdigest():
+        issues.append("$.frozenSettings.parameterScheduleHash must match the schedule.")
+    if document["evidenceClassification"] != "LAB-MEASURED":
+        return issues
+
     phase_values: dict[str, list[Decimal]] = {"Baseline": [], "Optimized": []}
     for index, sample in enumerate(document["samples"]):
         reported = _decimal(
@@ -161,7 +247,80 @@ def _validate_semantics(document: Mapping[str, Any]) -> list[str]:
                 f"$.measuredPeaks.{peak_name} must equal the exact maximum for its sample phase."
             )
 
-    if document["outcome"] != _expected_outcome(document):
+    trials = document.get("trials", [])
+    completed_comparison = (
+        document["phase"] == "Comparison" and document["status"] == "Completed"
+    )
+    if completed_comparison and len(trials) != 12:
+        issues.append("$.trials must contain exactly twelve completed comparison trials.")
+    for index, trial in enumerate(trials):
+        started = _utc_ticks(trial["startedAtUtc"], f"$.trials[{index}].startedAtUtc")
+        completed = _utc_ticks(
+            trial["completedAtUtc"], f"$.trials[{index}].completedAtUtc"
+        )
+        if completed < started:
+            issues.append(f"$.trials[{index}] has an invalid timestamp interval.")
+    if document["correctness"]["validationHash"] != _validation_hash(trials):
+        issues.append("$.correctness.validationHash must match canonical trial linkage.")
+    if len(trials) != 12:
+        if document["correctness"]["passed"]:
+            issues.append("$.correctness.passed must be false for an incomplete comparison.")
+        if document["correctness"]["materialRegression"]:
+            issues.append("$.correctness.materialRegression must be false for an incomplete comparison.")
+        if document["correctness"]["additionalMetricImproved"]:
+            issues.append("$.correctness.additionalMetricImproved must be false for an incomplete comparison.")
+    if len(trials) == 12:
+        expected_phases = (
+            "Baseline", "Optimized", "Optimized", "Baseline",
+            "Optimized", "Baseline", "Baseline", "Optimized",
+            "Baseline", "Optimized", "Optimized", "Baseline",
+        )
+        batch_ids = {trial["validationBatchId"] for trial in trials}
+        if len(batch_ids) != 1:
+            issues.append("$.trials must use one validation batch identifier.")
+        for index, trial in enumerate(trials):
+            if trial["trialSequence"] != index + 1:
+                issues.append("$.trials trialSequence values must be contiguous from one through twelve.")
+                break
+            if trial["parameterSlot"] != index // 2 + 1:
+                issues.append("$.trials parameterSlot values must form six adjacent A/B pairs.")
+                break
+            if trial["phase"] != expected_phases[index]:
+                issues.append("$.trials phase order must be ABBA BAAB ABBA.")
+                break
+        for slot in range(1, 7):
+            pair = [trial for trial in trials if trial["parameterSlot"] == slot]
+            baseline = [trial for trial in pair if trial["phase"] == "Baseline"]
+            optimized = [trial for trial in pair if trial["phase"] == "Optimized"]
+            if len(pair) != 2 or len(baseline) != 1 or len(optimized) != 1:
+                issues.append(f"$.trials parameter slot {slot} must contain one A and one B trial.")
+                continue
+            expected_count = baseline[0]["resultRowCount"]
+            actual_count = optimized[0]["resultRowCount"]
+            correct = (
+                expected_count == actual_count
+                and baseline[0]["resultHash"] == optimized[0]["resultHash"]
+            )
+            difference = 0 if correct else 1
+            for trial in pair:
+                if (
+                    trial["expectedRowCount"] != expected_count
+                    or trial["actualRowCount"] != actual_count
+                    or trial["differenceCount"] != difference
+                    or trial["correct"] is not correct
+                ):
+                    issues.append(f"$.trials parameter slot {slot} correctness linkage is invalid.")
+                    break
+        all_trials_correct = all(trial["correct"] for trial in trials)
+        if document["correctness"]["passed"] is not all_trials_correct:
+            issues.append("$.correctness.passed must equal aggregate trial correctness.")
+        material_regression, additional_improvement = _trial_assessment(trials)
+        if document["correctness"]["materialRegression"] is not material_regression:
+            issues.append("$.correctness.materialRegression must be derived from trial metrics.")
+        if document["correctness"]["additionalMetricImproved"] is not additional_improvement:
+            issues.append("$.correctness.additionalMetricImproved must be derived from trial metrics.")
+
+    if document["outcome"] != "Failed" and document["outcome"] != _expected_outcome(document):
         issues.append("$.outcome does not match the measured evidence outcome rules.")
     return issues
 

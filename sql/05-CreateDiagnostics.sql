@@ -40,6 +40,7 @@ IF CONVERT(int, DATABASEPROPERTYEX(DB_NAME(), N'IsTrustworthyOn')) <> 0
 IF (OBJECT_ID(N'lab.WorkshopRun') IS NOT NULL AND OBJECT_ID(N'lab.WorkshopRun', N'U') IS NULL)
    OR (OBJECT_ID(N'lab.WorkshopSample') IS NOT NULL AND OBJECT_ID(N'lab.WorkshopSample', N'U') IS NULL)
    OR (OBJECT_ID(N'lab.WorkshopRequestSample') IS NOT NULL AND OBJECT_ID(N'lab.WorkshopRequestSample', N'U') IS NULL)
+    OR (OBJECT_ID(N'lab.WorkshopTrial') IS NOT NULL AND OBJECT_ID(N'lab.WorkshopTrial', N'U') IS NULL)
    OR (OBJECT_ID(N'lab.ValidationRun') IS NOT NULL AND OBJECT_ID(N'lab.ValidationRun', N'U') IS NULL)
     THROW 51604, 'Existing evidence object is not a compatible table.', 1;
 
@@ -157,6 +158,48 @@ BEGIN
     );
 END;
 
+IF OBJECT_ID(N'lab.WorkshopTrial', N'U') IS NULL
+BEGIN
+    CREATE TABLE lab.WorkshopTrial
+    (
+        RunID uniqueidentifier NOT NULL,
+        TrialSequence int NOT NULL,
+        ParameterSlot int NOT NULL,
+        Phase varchar(16) NOT NULL,
+        DurationMs bigint NOT NULL,
+        CpuMs bigint NOT NULL,
+        LogicalReads bigint NOT NULL,
+        GrantedKB bigint NOT NULL,
+        UsedKB bigint NOT NULL,
+        SpillKB bigint NOT NULL,
+        WaitMs bigint NOT NULL,
+        ResultRowCount bigint NOT NULL,
+        ResultHash varbinary(32) NOT NULL,
+        ExpectedRowCount bigint NOT NULL,
+        ActualRowCount bigint NOT NULL,
+        DifferenceCount bigint NOT NULL,
+        Correct bit NOT NULL,
+        ValidationBatchID uniqueidentifier NOT NULL,
+        StartedAtUtc datetime2(3) NOT NULL,
+        CompletedAtUtc datetime2(3) NOT NULL,
+        CONSTRAINT PK_WorkshopTrial PRIMARY KEY (RunID, TrialSequence),
+        CONSTRAINT FK_WorkshopTrial_WorkshopRun FOREIGN KEY (RunID) REFERENCES lab.WorkshopRun (RunID),
+        CONSTRAINT CK_WorkshopTrial_Sequence CHECK (TrialSequence BETWEEN 1 AND 12),
+        CONSTRAINT CK_WorkshopTrial_ParameterSlot CHECK (ParameterSlot BETWEEN 1 AND 6),
+        CONSTRAINT CK_WorkshopTrial_Phase CHECK (Phase IN ('Baseline', 'Optimized')),
+        CONSTRAINT CK_WorkshopTrial_Metrics CHECK
+            (DurationMs >= 0 AND CpuMs >= 0 AND LogicalReads >= 0 AND GrantedKB >= 0
+             AND UsedKB >= 0 AND SpillKB >= 0 AND WaitMs >= 0 AND ResultRowCount >= 0),
+        CONSTRAINT CK_WorkshopTrial_Validation CHECK
+            (ExpectedRowCount >= 0 AND ActualRowCount >= 0 AND DifferenceCount >= 0
+             AND DATALENGTH(ResultHash) = 32
+             AND ((Correct = 1 AND DifferenceCount = 0) OR (Correct = 0 AND DifferenceCount > 0))),
+        CONSTRAINT CK_WorkshopTrial_Timestamps CHECK (CompletedAtUtc >= StartedAtUtc)
+    );
+    CREATE INDEX IX_WorkshopTrial_ValidationBatchID
+        ON lab.WorkshopTrial (ValidationBatchID, RunID);
+END;
+
 /* Task 9 owns the same exact contract. Create it only when absent, then compare metadata exactly. */
 IF OBJECT_ID(N'lab.ValidationRun', N'U') IS NULL
 BEGIN
@@ -254,6 +297,26 @@ VALUES
     (N'WorkshopRequestSample', 12, N'WaitTimeMs', N'bigint', 8, 19, 0, 0, 0),
     (N'WorkshopRequestSample', 13, N'QueryID', N'bigint', 8, 19, 0, 1, 0),
     (N'WorkshopRequestSample', 14, N'PlanID', N'bigint', 8, 19, 0, 1, 0),
+    (N'WorkshopTrial', 1, N'RunID', N'uniqueidentifier', 16, 0, 0, 0, 0),
+    (N'WorkshopTrial', 2, N'TrialSequence', N'int', 4, 10, 0, 0, 0),
+    (N'WorkshopTrial', 3, N'ParameterSlot', N'int', 4, 10, 0, 0, 0),
+    (N'WorkshopTrial', 4, N'Phase', N'varchar', 16, 0, 0, 0, 0),
+    (N'WorkshopTrial', 5, N'DurationMs', N'bigint', 8, 19, 0, 0, 0),
+    (N'WorkshopTrial', 6, N'CpuMs', N'bigint', 8, 19, 0, 0, 0),
+    (N'WorkshopTrial', 7, N'LogicalReads', N'bigint', 8, 19, 0, 0, 0),
+    (N'WorkshopTrial', 8, N'GrantedKB', N'bigint', 8, 19, 0, 0, 0),
+    (N'WorkshopTrial', 9, N'UsedKB', N'bigint', 8, 19, 0, 0, 0),
+    (N'WorkshopTrial', 10, N'SpillKB', N'bigint', 8, 19, 0, 0, 0),
+    (N'WorkshopTrial', 11, N'WaitMs', N'bigint', 8, 19, 0, 0, 0),
+    (N'WorkshopTrial', 12, N'ResultRowCount', N'bigint', 8, 19, 0, 0, 0),
+    (N'WorkshopTrial', 13, N'ResultHash', N'varbinary', 32, 0, 0, 0, 0),
+    (N'WorkshopTrial', 14, N'ExpectedRowCount', N'bigint', 8, 19, 0, 0, 0),
+    (N'WorkshopTrial', 15, N'ActualRowCount', N'bigint', 8, 19, 0, 0, 0),
+    (N'WorkshopTrial', 16, N'DifferenceCount', N'bigint', 8, 19, 0, 0, 0),
+    (N'WorkshopTrial', 17, N'Correct', N'bit', 1, 1, 0, 0, 0),
+    (N'WorkshopTrial', 18, N'ValidationBatchID', N'uniqueidentifier', 16, 0, 0, 0, 0),
+    (N'WorkshopTrial', 19, N'StartedAtUtc', N'datetime2', 7, 23, 3, 0, 0),
+    (N'WorkshopTrial', 20, N'CompletedAtUtc', N'datetime2', 7, 23, 3, 0, 0),
     (N'ValidationRun', 1, N'ValidationRunID', N'bigint', 8, 19, 0, 0, 1),
     (N'ValidationRun', 2, N'ValidationBatchID', N'uniqueidentifier', 16, 0, 0, 0, 0),
     (N'ValidationRun', 3, N'BaselineRunID', N'uniqueidentifier', 16, 0, 0, 1, 0),
@@ -279,7 +342,8 @@ IF EXISTS
            c.max_length, c.precision, c.scale, c.is_nullable, c.is_identity
     FROM sys.columns AS c
     WHERE c.object_id IN (OBJECT_ID(N'lab.WorkshopRun'), OBJECT_ID(N'lab.WorkshopSample'),
-                          OBJECT_ID(N'lab.WorkshopRequestSample'), OBJECT_ID(N'lab.ValidationRun'))
+                          OBJECT_ID(N'lab.WorkshopRequestSample'), OBJECT_ID(N'lab.WorkshopTrial'),
+                          OBJECT_ID(N'lab.ValidationRun'))
 )
 OR EXISTS
 (
@@ -287,7 +351,8 @@ OR EXISTS
            c.max_length, c.precision, c.scale, c.is_nullable, c.is_identity
     FROM sys.columns AS c
     WHERE c.object_id IN (OBJECT_ID(N'lab.WorkshopRun'), OBJECT_ID(N'lab.WorkshopSample'),
-                          OBJECT_ID(N'lab.WorkshopRequestSample'), OBJECT_ID(N'lab.ValidationRun'))
+                          OBJECT_ID(N'lab.WorkshopRequestSample'), OBJECT_ID(N'lab.WorkshopTrial'),
+                          OBJECT_ID(N'lab.ValidationRun'))
     EXCEPT
     SELECT table_name, column_id, column_name, type_name, max_length, precision, scale, is_nullable, is_identity
     FROM @ExpectedColumns
@@ -310,7 +375,8 @@ IF EXISTS
            CONVERT(decimal(38,0), identity_column.increment_value)
     FROM sys.identity_columns AS identity_column
     WHERE identity_column.object_id IN (OBJECT_ID(N'lab.WorkshopRun'), OBJECT_ID(N'lab.WorkshopSample'),
-                                        OBJECT_ID(N'lab.WorkshopRequestSample'), OBJECT_ID(N'lab.ValidationRun'))
+                                        OBJECT_ID(N'lab.WorkshopRequestSample'), OBJECT_ID(N'lab.WorkshopTrial'),
+                                        OBJECT_ID(N'lab.ValidationRun'))
 )
 OR EXISTS
 (
@@ -319,7 +385,8 @@ OR EXISTS
            CONVERT(decimal(38,0), identity_column.increment_value)
     FROM sys.identity_columns AS identity_column
     WHERE identity_column.object_id IN (OBJECT_ID(N'lab.WorkshopRun'), OBJECT_ID(N'lab.WorkshopSample'),
-                                        OBJECT_ID(N'lab.WorkshopRequestSample'), OBJECT_ID(N'lab.ValidationRun'))
+                                        OBJECT_ID(N'lab.WorkshopRequestSample'), OBJECT_ID(N'lab.WorkshopTrial'),
+                                        OBJECT_ID(N'lab.ValidationRun'))
     EXCEPT SELECT * FROM @ExpectedIdentityColumns
 )
     THROW 51604, 'Existing evidence table identity contract is incompatible.', 1;
@@ -337,6 +404,8 @@ INSERT @ExpectedPrimaryKeyColumns VALUES
     (N'PK_WorkshopRequestSample', N'WorkshopRequestSample', N'SampleSequence', 2),
     (N'PK_WorkshopRequestSample', N'WorkshopRequestSample', N'SessionID', 3),
     (N'PK_WorkshopRequestSample', N'WorkshopRequestSample', N'RequestID', 4),
+    (N'PK_WorkshopTrial', N'WorkshopTrial', N'RunID', 1),
+    (N'PK_WorkshopTrial', N'WorkshopTrial', N'TrialSequence', 2),
     (N'PK_ValidationRun', N'ValidationRun', N'ValidationRunID', 1);
 
 IF EXISTS
@@ -349,7 +418,8 @@ IF EXISTS
     INNER JOIN sys.columns AS c ON c.object_id = ic.object_id AND c.column_id = ic.column_id
     WHERE kc.type = N'PK' AND kc.parent_object_id IN
         (OBJECT_ID(N'lab.WorkshopRun'), OBJECT_ID(N'lab.WorkshopSample'),
-         OBJECT_ID(N'lab.WorkshopRequestSample'), OBJECT_ID(N'lab.ValidationRun'))
+         OBJECT_ID(N'lab.WorkshopRequestSample'), OBJECT_ID(N'lab.WorkshopTrial'),
+         OBJECT_ID(N'lab.ValidationRun'))
 )
 OR EXISTS
 (
@@ -359,7 +429,8 @@ OR EXISTS
     INNER JOIN sys.columns AS c ON c.object_id = ic.object_id AND c.column_id = ic.column_id
     WHERE kc.type = N'PK' AND kc.parent_object_id IN
         (OBJECT_ID(N'lab.WorkshopRun'), OBJECT_ID(N'lab.WorkshopSample'),
-         OBJECT_ID(N'lab.WorkshopRequestSample'), OBJECT_ID(N'lab.ValidationRun'))
+         OBJECT_ID(N'lab.WorkshopRequestSample'), OBJECT_ID(N'lab.WorkshopTrial'),
+         OBJECT_ID(N'lab.ValidationRun'))
     EXCEPT
     SELECT constraint_name, table_name, column_name, key_ordinal FROM @ExpectedPrimaryKeyColumns
 )
@@ -368,22 +439,25 @@ OR EXISTS
 DECLARE @ExpectedForeignKeyColumns table
 (
     constraint_name sysname NOT NULL, parent_table sysname NOT NULL, parent_column sysname NOT NULL,
-    referenced_table sysname NOT NULL, referenced_column sysname NOT NULL, constraint_column_id int NOT NULL,
+    referenced_schema sysname NOT NULL, referenced_table sysname NOT NULL,
+    referenced_column sysname NOT NULL, constraint_column_id int NOT NULL,
     delete_referential_action_desc nvarchar(60) NOT NULL, update_referential_action_desc nvarchar(60) NOT NULL,
     is_disabled bit NOT NULL, is_not_trusted bit NOT NULL, is_not_for_replication bit NOT NULL
 );
 INSERT @ExpectedForeignKeyColumns VALUES
-    (N'FK_WorkshopSample_WorkshopRun', N'WorkshopSample', N'RunID', N'WorkshopRun', N'RunID', 1, N'NO_ACTION', N'NO_ACTION', 0, 0, 0),
-    (N'FK_WorkshopRequestSample_WorkshopSample', N'WorkshopRequestSample', N'RunID', N'WorkshopSample', N'RunID', 1, N'NO_ACTION', N'NO_ACTION', 0, 0, 0),
-    (N'FK_WorkshopRequestSample_WorkshopSample', N'WorkshopRequestSample', N'SampleSequence', N'WorkshopSample', N'SampleSequence', 2, N'NO_ACTION', N'NO_ACTION', 0, 0, 0),
-    (N'FK_ValidationRun_BaselineWorkshopRun', N'ValidationRun', N'BaselineRunID', N'WorkshopRun', N'RunID', 1, N'NO_ACTION', N'NO_ACTION', 0, 0, 0),
-    (N'FK_ValidationRun_OptimizedWorkshopRun', N'ValidationRun', N'OptimizedRunID', N'WorkshopRun', N'RunID', 1, N'NO_ACTION', N'NO_ACTION', 0, 0, 0);
+    (N'FK_WorkshopSample_WorkshopRun', N'WorkshopSample', N'RunID', N'lab', N'WorkshopRun', N'RunID', 1, N'NO_ACTION', N'NO_ACTION', 0, 0, 0),
+    (N'FK_WorkshopRequestSample_WorkshopSample', N'WorkshopRequestSample', N'RunID', N'lab', N'WorkshopSample', N'RunID', 1, N'NO_ACTION', N'NO_ACTION', 0, 0, 0),
+    (N'FK_WorkshopRequestSample_WorkshopSample', N'WorkshopRequestSample', N'SampleSequence', N'lab', N'WorkshopSample', N'SampleSequence', 2, N'NO_ACTION', N'NO_ACTION', 0, 0, 0),
+    (N'FK_WorkshopTrial_WorkshopRun', N'WorkshopTrial', N'RunID', N'lab', N'WorkshopRun', N'RunID', 1, N'NO_ACTION', N'NO_ACTION', 0, 0, 0),
+    (N'FK_ValidationRun_BaselineWorkshopRun', N'ValidationRun', N'BaselineRunID', N'lab', N'WorkshopRun', N'RunID', 1, N'NO_ACTION', N'NO_ACTION', 0, 0, 0),
+    (N'FK_ValidationRun_OptimizedWorkshopRun', N'ValidationRun', N'OptimizedRunID', N'lab', N'WorkshopRun', N'RunID', 1, N'NO_ACTION', N'NO_ACTION', 0, 0, 0);
 
 IF EXISTS
 (
     SELECT * FROM @ExpectedForeignKeyColumns
     EXCEPT
-    SELECT fk.name, OBJECT_NAME(fk.parent_object_id), pc.name, OBJECT_NAME(fk.referenced_object_id), rc.name,
+        SELECT fk.name, OBJECT_NAME(fk.parent_object_id), pc.name, OBJECT_SCHEMA_NAME(fk.referenced_object_id),
+            OBJECT_NAME(fk.referenced_object_id), rc.name,
             fkc.constraint_column_id, fk.delete_referential_action_desc, fk.update_referential_action_desc,
             fk.is_disabled, fk.is_not_trusted, fk.is_not_for_replication
     FROM sys.foreign_keys AS fk
@@ -391,11 +465,13 @@ IF EXISTS
     INNER JOIN sys.columns AS pc ON pc.object_id = fkc.parent_object_id AND pc.column_id = fkc.parent_column_id
     INNER JOIN sys.columns AS rc ON rc.object_id = fkc.referenced_object_id AND rc.column_id = fkc.referenced_column_id
     WHERE fk.parent_object_id IN (OBJECT_ID(N'lab.WorkshopRun'), OBJECT_ID(N'lab.WorkshopSample'),
-                                  OBJECT_ID(N'lab.WorkshopRequestSample'), OBJECT_ID(N'lab.ValidationRun'))
+                                  OBJECT_ID(N'lab.WorkshopRequestSample'), OBJECT_ID(N'lab.WorkshopTrial'),
+                                  OBJECT_ID(N'lab.ValidationRun'))
 )
 OR EXISTS
 (
-    SELECT fk.name, OBJECT_NAME(fk.parent_object_id), pc.name, OBJECT_NAME(fk.referenced_object_id), rc.name,
+        SELECT fk.name, OBJECT_NAME(fk.parent_object_id), pc.name, OBJECT_SCHEMA_NAME(fk.referenced_object_id),
+            OBJECT_NAME(fk.referenced_object_id), rc.name,
             fkc.constraint_column_id, fk.delete_referential_action_desc, fk.update_referential_action_desc,
             fk.is_disabled, fk.is_not_trusted, fk.is_not_for_replication
     FROM sys.foreign_keys AS fk
@@ -403,7 +479,8 @@ OR EXISTS
     INNER JOIN sys.columns AS pc ON pc.object_id = fkc.parent_object_id AND pc.column_id = fkc.parent_column_id
     INNER JOIN sys.columns AS rc ON rc.object_id = fkc.referenced_object_id AND rc.column_id = fkc.referenced_column_id
     WHERE fk.parent_object_id IN (OBJECT_ID(N'lab.WorkshopRun'), OBJECT_ID(N'lab.WorkshopSample'),
-                                  OBJECT_ID(N'lab.WorkshopRequestSample'), OBJECT_ID(N'lab.ValidationRun'))
+                                  OBJECT_ID(N'lab.WorkshopRequestSample'), OBJECT_ID(N'lab.WorkshopTrial'),
+                                  OBJECT_ID(N'lab.ValidationRun'))
     EXCEPT SELECT * FROM @ExpectedForeignKeyColumns
 )
     THROW 51604, 'Existing evidence table foreign-key contract is incompatible.', 1;
@@ -423,6 +500,8 @@ INSERT @ExpectedUniqueIndexColumns VALUES
     (N'PK_WorkshopRequestSample', N'WorkshopRequestSample', N'CLUSTERED', 1, 0, N'SampleSequence', 2, 0, NULL, 0, 0),
     (N'PK_WorkshopRequestSample', N'WorkshopRequestSample', N'CLUSTERED', 1, 0, N'SessionID', 3, 0, NULL, 0, 0),
     (N'PK_WorkshopRequestSample', N'WorkshopRequestSample', N'CLUSTERED', 1, 0, N'RequestID', 4, 0, NULL, 0, 0),
+    (N'PK_WorkshopTrial', N'WorkshopTrial', N'CLUSTERED', 1, 0, N'RunID', 1, 0, NULL, 0, 0),
+    (N'PK_WorkshopTrial', N'WorkshopTrial', N'CLUSTERED', 1, 0, N'TrialSequence', 2, 0, NULL, 0, 0),
     (N'PK_ValidationRun', N'ValidationRun', N'CLUSTERED', 1, 0, N'ValidationRunID', 1, 0, NULL, 0, 0),
     (N'UQ_ValidationRun_BatchCase', N'ValidationRun', N'NONCLUSTERED', 0, 1, N'ValidationBatchID', 1, 0, NULL, 0, 0),
     (N'UQ_ValidationRun_BatchCase', N'ValidationRun', N'NONCLUSTERED', 0, 1, N'ValidationCaseName', 2, 0, NULL, 0, 0);
@@ -438,7 +517,8 @@ IF EXISTS
     INNER JOIN sys.index_columns AS ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id AND ic.key_ordinal > 0
     INNER JOIN sys.columns AS c ON c.object_id = ic.object_id AND c.column_id = ic.column_id
     WHERE i.is_unique = 1 AND i.object_id IN (OBJECT_ID(N'lab.WorkshopRun'), OBJECT_ID(N'lab.WorkshopSample'),
-                                              OBJECT_ID(N'lab.WorkshopRequestSample'), OBJECT_ID(N'lab.ValidationRun'))
+                                              OBJECT_ID(N'lab.WorkshopRequestSample'), OBJECT_ID(N'lab.WorkshopTrial'),
+                                              OBJECT_ID(N'lab.ValidationRun'))
 )
 OR EXISTS
 (
@@ -449,10 +529,95 @@ OR EXISTS
     INNER JOIN sys.index_columns AS ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id AND ic.key_ordinal > 0
     INNER JOIN sys.columns AS c ON c.object_id = ic.object_id AND c.column_id = ic.column_id
     WHERE i.is_unique = 1 AND i.object_id IN (OBJECT_ID(N'lab.WorkshopRun'), OBJECT_ID(N'lab.WorkshopSample'),
-                                              OBJECT_ID(N'lab.WorkshopRequestSample'), OBJECT_ID(N'lab.ValidationRun'))
+                                              OBJECT_ID(N'lab.WorkshopRequestSample'), OBJECT_ID(N'lab.WorkshopTrial'),
+                                              OBJECT_ID(N'lab.ValidationRun'))
     EXCEPT SELECT * FROM @ExpectedUniqueIndexColumns
 )
     THROW 51604, 'Existing evidence table unique-index contract is incompatible.', 1;
+
+DECLARE @ExpectedNonUniqueIndexColumns table
+(
+    index_name sysname NOT NULL, table_name sysname NOT NULL, type_desc nvarchar(60) NOT NULL,
+    column_name sysname NOT NULL, key_ordinal tinyint NOT NULL, is_descending_key bit NOT NULL,
+    filter_definition nvarchar(4000) NULL, is_disabled bit NOT NULL, is_hypothetical bit NOT NULL
+);
+INSERT @ExpectedNonUniqueIndexColumns VALUES
+    (N'IX_WorkshopTrial_ValidationBatchID', N'WorkshopTrial', N'NONCLUSTERED',
+     N'ValidationBatchID', 1, 0, NULL, 0, 0),
+    (N'IX_WorkshopTrial_ValidationBatchID', N'WorkshopTrial', N'NONCLUSTERED',
+     N'RunID', 2, 0, NULL, 0, 0);
+
+IF EXISTS
+(
+    SELECT * FROM @ExpectedNonUniqueIndexColumns
+    EXCEPT
+    SELECT i.name, OBJECT_NAME(i.object_id), i.type_desc, c.name,
+           CONVERT(tinyint, ic.key_ordinal), ic.is_descending_key, i.filter_definition,
+           i.is_disabled, i.is_hypothetical
+    FROM sys.indexes AS i
+    INNER JOIN sys.index_columns AS ic
+        ON ic.object_id = i.object_id AND ic.index_id = i.index_id AND ic.key_ordinal > 0
+    INNER JOIN sys.columns AS c ON c.object_id = ic.object_id AND c.column_id = ic.column_id
+    WHERE i.is_unique = 0 AND i.index_id > 0
+      AND i.object_id = OBJECT_ID(N'lab.WorkshopTrial')
+)
+OR EXISTS
+(
+    SELECT i.name, OBJECT_NAME(i.object_id), i.type_desc, c.name,
+           CONVERT(tinyint, ic.key_ordinal), ic.is_descending_key, i.filter_definition,
+           i.is_disabled, i.is_hypothetical
+    FROM sys.indexes AS i
+    INNER JOIN sys.index_columns AS ic
+        ON ic.object_id = i.object_id AND ic.index_id = i.index_id AND ic.key_ordinal > 0
+    INNER JOIN sys.columns AS c ON c.object_id = ic.object_id AND c.column_id = ic.column_id
+    WHERE i.is_unique = 0 AND i.index_id > 0
+      AND i.object_id = OBJECT_ID(N'lab.WorkshopTrial')
+    EXCEPT SELECT * FROM @ExpectedNonUniqueIndexColumns
+)
+    THROW 51604, 'Existing evidence table nonunique-index contract is incompatible.', 1;
+
+DECLARE @ExpectedWorkshopTrialIndexColumns table
+(
+    index_name sysname NOT NULL, type_desc nvarchar(60) NOT NULL,
+    is_unique bit NOT NULL, is_primary_key bit NOT NULL, is_unique_constraint bit NOT NULL,
+    column_name sysname NOT NULL, index_column_id int NOT NULL, key_ordinal tinyint NOT NULL,
+    is_descending_key bit NOT NULL, is_included_column bit NOT NULL,
+    filter_definition nvarchar(4000) NULL, is_disabled bit NOT NULL, is_hypothetical bit NOT NULL
+);
+INSERT @ExpectedWorkshopTrialIndexColumns VALUES
+    (N'PK_WorkshopTrial', N'CLUSTERED', 1, 1, 0, N'RunID', 1, 1, 0, 0, NULL, 0, 0),
+    (N'PK_WorkshopTrial', N'CLUSTERED', 1, 1, 0, N'TrialSequence', 2, 2, 0, 0, NULL, 0, 0),
+    (N'IX_WorkshopTrial_ValidationBatchID', N'NONCLUSTERED', 0, 0, 0,
+     N'ValidationBatchID', 1, 1, 0, 0, NULL, 0, 0),
+    (N'IX_WorkshopTrial_ValidationBatchID', N'NONCLUSTERED', 0, 0, 0,
+     N'RunID', 2, 2, 0, 0, NULL, 0, 0);
+
+IF EXISTS
+(
+    SELECT * FROM @ExpectedWorkshopTrialIndexColumns
+    EXCEPT
+    SELECT i.name, i.type_desc, i.is_unique, i.is_primary_key, i.is_unique_constraint,
+           c.name, ic.index_column_id, CONVERT(tinyint, ic.key_ordinal),
+           ic.is_descending_key, ic.is_included_column, i.filter_definition,
+           i.is_disabled, i.is_hypothetical
+    FROM sys.indexes AS i
+    INNER JOIN sys.index_columns AS ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id
+    INNER JOIN sys.columns AS c ON c.object_id = ic.object_id AND c.column_id = ic.column_id
+    WHERE i.index_id > 0 AND i.object_id = OBJECT_ID(N'lab.WorkshopTrial')
+)
+OR EXISTS
+(
+    SELECT i.name, i.type_desc, i.is_unique, i.is_primary_key, i.is_unique_constraint,
+           c.name, ic.index_column_id, CONVERT(tinyint, ic.key_ordinal),
+           ic.is_descending_key, ic.is_included_column, i.filter_definition,
+           i.is_disabled, i.is_hypothetical
+    FROM sys.indexes AS i
+    INNER JOIN sys.index_columns AS ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id
+    INNER JOIN sys.columns AS c ON c.object_id = ic.object_id AND c.column_id = ic.column_id
+    WHERE i.index_id > 0 AND i.object_id = OBJECT_ID(N'lab.WorkshopTrial')
+    EXCEPT SELECT * FROM @ExpectedWorkshopTrialIndexColumns
+)
+    THROW 51604, 'Existing WorkshopTrial index contract is incompatible.', 1;
 
 DECLARE @ExpectedDefaults table
 (
@@ -467,7 +632,8 @@ IF EXISTS (SELECT * FROM @ExpectedDefaults)
        FROM sys.default_constraints AS dc
        INNER JOIN sys.columns AS c ON c.object_id = dc.parent_object_id AND c.column_id = dc.parent_column_id
        WHERE dc.parent_object_id IN (OBJECT_ID(N'lab.WorkshopRun'), OBJECT_ID(N'lab.WorkshopSample'),
-                                     OBJECT_ID(N'lab.WorkshopRequestSample'), OBJECT_ID(N'lab.ValidationRun'))
+                                     OBJECT_ID(N'lab.WorkshopRequestSample'), OBJECT_ID(N'lab.WorkshopTrial'),
+                                     OBJECT_ID(N'lab.ValidationRun'))
        EXCEPT SELECT * FROM @ExpectedDefaults
    )
     THROW 51604, 'Existing evidence table default contract is incompatible.', 1;
@@ -499,6 +665,12 @@ INSERT @ExpectedChecks VALUES
     (N'WorkshopRequestSample', N'CK_WorkshopRequestSample_Memory', 0, 0, 0),
     (N'WorkshopRequestSample', N'CK_WorkshopRequestSample_Wait', 0, 0, 0),
     (N'WorkshopRequestSample', N'CK_WorkshopRequestSample_QueryIdentifiers', 0, 0, 0),
+    (N'WorkshopTrial', N'CK_WorkshopTrial_Sequence', 0, 0, 0),
+    (N'WorkshopTrial', N'CK_WorkshopTrial_ParameterSlot', 0, 0, 0),
+    (N'WorkshopTrial', N'CK_WorkshopTrial_Phase', 0, 0, 0),
+    (N'WorkshopTrial', N'CK_WorkshopTrial_Metrics', 0, 0, 0),
+    (N'WorkshopTrial', N'CK_WorkshopTrial_Validation', 0, 0, 0),
+    (N'WorkshopTrial', N'CK_WorkshopTrial_Timestamps', 0, 0, 0),
     (N'ValidationRun', N'CK_ValidationRun_Linkage', 0, 0, 0);
 
 DECLARE @ExpectedCheckColumns table
@@ -532,12 +704,27 @@ INSERT @ExpectedCheckColumns VALUES
     (N'CK_WorkshopRequestSample_Memory', N'UsedMemoryKB'), (N'CK_WorkshopRequestSample_Memory', N'MaxUsedMemoryKB'),
     (N'CK_WorkshopRequestSample_Wait', N'WaitOrder'), (N'CK_WorkshopRequestSample_Wait', N'WaitTimeMs'),
     (N'CK_WorkshopRequestSample_QueryIdentifiers', N'QueryID'), (N'CK_WorkshopRequestSample_QueryIdentifiers', N'PlanID'),
+    (N'CK_WorkshopTrial_Sequence', N'TrialSequence'),
+    (N'CK_WorkshopTrial_ParameterSlot', N'ParameterSlot'),
+    (N'CK_WorkshopTrial_Phase', N'Phase'),
+    (N'CK_WorkshopTrial_Metrics', N'DurationMs'), (N'CK_WorkshopTrial_Metrics', N'CpuMs'),
+    (N'CK_WorkshopTrial_Metrics', N'LogicalReads'), (N'CK_WorkshopTrial_Metrics', N'GrantedKB'),
+    (N'CK_WorkshopTrial_Metrics', N'UsedKB'), (N'CK_WorkshopTrial_Metrics', N'SpillKB'),
+    (N'CK_WorkshopTrial_Metrics', N'WaitMs'), (N'CK_WorkshopTrial_Metrics', N'ResultRowCount'),
+    (N'CK_WorkshopTrial_Validation', N'ResultHash'),
+    (N'CK_WorkshopTrial_Validation', N'ExpectedRowCount'),
+    (N'CK_WorkshopTrial_Validation', N'ActualRowCount'),
+    (N'CK_WorkshopTrial_Validation', N'DifferenceCount'),
+    (N'CK_WorkshopTrial_Validation', N'Correct'),
+    (N'CK_WorkshopTrial_Timestamps', N'StartedAtUtc'),
+    (N'CK_WorkshopTrial_Timestamps', N'CompletedAtUtc'),
     (N'CK_ValidationRun_Linkage', N'BaselineRunID'), (N'CK_ValidationRun_Linkage', N'OptimizedRunID');
 
 BEGIN TRY
     DROP TABLE IF EXISTS #ExpectedWorkshopRunCheckShape;
     DROP TABLE IF EXISTS #ExpectedWorkshopSampleCheckShape;
     DROP TABLE IF EXISTS #ExpectedWorkshopRequestSampleCheckShape;
+    DROP TABLE IF EXISTS #ExpectedWorkshopTrialCheckShape;
     DROP TABLE IF EXISTS #ExpectedValidationRunCheckShape;
 
     CREATE TABLE #ExpectedWorkshopRunCheckShape
@@ -632,6 +819,39 @@ BEGIN TRY
             ((QueryID IS NULL AND PlanID IS NULL) OR (QueryID > 0 AND PlanID > 0))
     );
 
+    CREATE TABLE #ExpectedWorkshopTrialCheckShape
+    (
+        TrialSequence int NOT NULL,
+        ParameterSlot int NOT NULL,
+        Phase varchar(16) NOT NULL,
+        DurationMs bigint NOT NULL,
+        CpuMs bigint NOT NULL,
+        LogicalReads bigint NOT NULL,
+        GrantedKB bigint NOT NULL,
+        UsedKB bigint NOT NULL,
+        SpillKB bigint NOT NULL,
+        WaitMs bigint NOT NULL,
+        ResultRowCount bigint NOT NULL,
+        ResultHash varbinary(32) NOT NULL,
+        ExpectedRowCount bigint NOT NULL,
+        ActualRowCount bigint NOT NULL,
+        DifferenceCount bigint NOT NULL,
+        Correct bit NOT NULL,
+        StartedAtUtc datetime2(3) NOT NULL,
+        CompletedAtUtc datetime2(3) NOT NULL,
+        CONSTRAINT CK_WorkshopTrial_Sequence CHECK (TrialSequence BETWEEN 1 AND 12),
+        CONSTRAINT CK_WorkshopTrial_ParameterSlot CHECK (ParameterSlot BETWEEN 1 AND 6),
+        CONSTRAINT CK_WorkshopTrial_Phase CHECK (Phase IN ('Baseline', 'Optimized')),
+        CONSTRAINT CK_WorkshopTrial_Metrics CHECK
+            (DurationMs >= 0 AND CpuMs >= 0 AND LogicalReads >= 0 AND GrantedKB >= 0
+             AND UsedKB >= 0 AND SpillKB >= 0 AND WaitMs >= 0 AND ResultRowCount >= 0),
+        CONSTRAINT CK_WorkshopTrial_Validation CHECK
+            (ExpectedRowCount >= 0 AND ActualRowCount >= 0 AND DifferenceCount >= 0
+             AND DATALENGTH(ResultHash) = 32
+             AND ((Correct = 1 AND DifferenceCount = 0) OR (Correct = 0 AND DifferenceCount > 0))),
+        CONSTRAINT CK_WorkshopTrial_Timestamps CHECK (CompletedAtUtc >= StartedAtUtc)
+    );
+
     CREATE TABLE #ExpectedValidationRunCheckShape
     (
         BaselineRunID uniqueidentifier NULL,
@@ -657,6 +877,7 @@ BEGIN TRY
             (N'WorkshopRun', OBJECT_ID(N'tempdb..#ExpectedWorkshopRunCheckShape')),
             (N'WorkshopSample', OBJECT_ID(N'tempdb..#ExpectedWorkshopSampleCheckShape')),
             (N'WorkshopRequestSample', OBJECT_ID(N'tempdb..#ExpectedWorkshopRequestSampleCheckShape')),
+            (N'WorkshopTrial', OBJECT_ID(N'tempdb..#ExpectedWorkshopTrialCheckShape')),
             (N'ValidationRun', OBJECT_ID(N'tempdb..#ExpectedValidationRunCheckShape'))
     ) AS expected(table_name, object_id)
     INNER JOIN tempdb.sys.check_constraints AS cc ON cc.parent_object_id = expected.object_id
@@ -677,14 +898,16 @@ IF EXISTS
     SELECT OBJECT_NAME(cc.parent_object_id), cc.name, cc.is_disabled, cc.is_not_trusted, cc.is_not_for_replication
     FROM sys.check_constraints AS cc
     WHERE cc.parent_object_id IN (OBJECT_ID(N'lab.WorkshopRun'), OBJECT_ID(N'lab.WorkshopSample'),
-                                  OBJECT_ID(N'lab.WorkshopRequestSample'), OBJECT_ID(N'lab.ValidationRun'))
+                                  OBJECT_ID(N'lab.WorkshopRequestSample'), OBJECT_ID(N'lab.WorkshopTrial'),
+                                  OBJECT_ID(N'lab.ValidationRun'))
 )
 OR EXISTS
 (
     SELECT OBJECT_NAME(cc.parent_object_id), cc.name, cc.is_disabled, cc.is_not_trusted, cc.is_not_for_replication
     FROM sys.check_constraints AS cc
     WHERE cc.parent_object_id IN (OBJECT_ID(N'lab.WorkshopRun'), OBJECT_ID(N'lab.WorkshopSample'),
-                                  OBJECT_ID(N'lab.WorkshopRequestSample'), OBJECT_ID(N'lab.ValidationRun'))
+                                  OBJECT_ID(N'lab.WorkshopRequestSample'), OBJECT_ID(N'lab.WorkshopTrial'),
+                                  OBJECT_ID(N'lab.ValidationRun'))
     EXCEPT
     SELECT table_name, constraint_name, is_disabled, is_not_trusted, is_not_for_replication FROM @ExpectedChecks
 )
@@ -698,7 +921,8 @@ OR EXISTS
     INNER JOIN sys.columns AS c
         ON c.object_id = dependency.referenced_id AND c.column_id = dependency.referenced_minor_id
     WHERE cc.parent_object_id IN (OBJECT_ID(N'lab.WorkshopRun'), OBJECT_ID(N'lab.WorkshopSample'),
-                                  OBJECT_ID(N'lab.WorkshopRequestSample'), OBJECT_ID(N'lab.ValidationRun'))
+                                  OBJECT_ID(N'lab.WorkshopRequestSample'), OBJECT_ID(N'lab.WorkshopTrial'),
+                                  OBJECT_ID(N'lab.ValidationRun'))
 )
 OR EXISTS
 (
@@ -708,7 +932,8 @@ OR EXISTS
     INNER JOIN sys.columns AS c
         ON c.object_id = dependency.referenced_id AND c.column_id = dependency.referenced_minor_id
     WHERE cc.parent_object_id IN (OBJECT_ID(N'lab.WorkshopRun'), OBJECT_ID(N'lab.WorkshopSample'),
-                                  OBJECT_ID(N'lab.WorkshopRequestSample'), OBJECT_ID(N'lab.ValidationRun'))
+                                  OBJECT_ID(N'lab.WorkshopRequestSample'), OBJECT_ID(N'lab.WorkshopTrial'),
+                                  OBJECT_ID(N'lab.ValidationRun'))
     EXCEPT SELECT constraint_name, column_name FROM @ExpectedCheckColumns
 )
 OR EXISTS
@@ -728,7 +953,8 @@ OR EXISTS
         )
     ) AS actual(actual_definition_hash)
     WHERE cc.parent_object_id IN (OBJECT_ID(N'lab.WorkshopRun'), OBJECT_ID(N'lab.WorkshopSample'),
-                                  OBJECT_ID(N'lab.WorkshopRequestSample'), OBJECT_ID(N'lab.ValidationRun'))
+                                  OBJECT_ID(N'lab.WorkshopRequestSample'), OBJECT_ID(N'lab.WorkshopTrial'),
+                                  OBJECT_ID(N'lab.ValidationRun'))
 )
 OR EXISTS
 (
@@ -744,7 +970,8 @@ OR EXISTS
         )
     ) AS actual(actual_definition_hash)
     WHERE cc.parent_object_id IN (OBJECT_ID(N'lab.WorkshopRun'), OBJECT_ID(N'lab.WorkshopSample'),
-                                  OBJECT_ID(N'lab.WorkshopRequestSample'), OBJECT_ID(N'lab.ValidationRun'))
+                                  OBJECT_ID(N'lab.WorkshopRequestSample'), OBJECT_ID(N'lab.WorkshopTrial'),
+                                  OBJECT_ID(N'lab.ValidationRun'))
     EXCEPT
     SELECT table_name, constraint_name, expected_definition_hash
     FROM @ExpectedCheckDefinitions
@@ -753,19 +980,56 @@ OR EXISTS
         DROP TABLE IF EXISTS #ExpectedWorkshopRunCheckShape;
         DROP TABLE IF EXISTS #ExpectedWorkshopSampleCheckShape;
         DROP TABLE IF EXISTS #ExpectedWorkshopRequestSampleCheckShape;
+        DROP TABLE IF EXISTS #ExpectedWorkshopTrialCheckShape;
         DROP TABLE IF EXISTS #ExpectedValidationRunCheckShape;
         THROW 51604, 'Existing evidence table CHECK contract is incompatible.', 1;
     END;
 
+    DECLARE @ExpectedWorkshopTrialCheckDefinitions table
+    (
+        constraint_name sysname NOT NULL,
+        exact_definition_hash varbinary(32) NOT NULL,
+        PRIMARY KEY (constraint_name)
+    );
+    INSERT @ExpectedWorkshopTrialCheckDefinitions (constraint_name, exact_definition_hash)
+    SELECT cc.name,
+           HASHBYTES(N'SHA2_256', CONVERT(varbinary(max),
+               cc.definition COLLATE Latin1_General_100_BIN2))
+    FROM tempdb.sys.check_constraints AS cc
+    WHERE cc.parent_object_id = OBJECT_ID(N'tempdb..#ExpectedWorkshopTrialCheckShape');
+
+    IF EXISTS
+    (
+        SELECT * FROM @ExpectedWorkshopTrialCheckDefinitions
+        EXCEPT
+        SELECT cc.name,
+               HASHBYTES(N'SHA2_256', CONVERT(varbinary(max),
+                   cc.definition COLLATE Latin1_General_100_BIN2))
+        FROM sys.check_constraints AS cc
+        WHERE cc.parent_object_id = OBJECT_ID(N'lab.WorkshopTrial')
+    )
+    OR EXISTS
+    (
+        SELECT cc.name,
+               HASHBYTES(N'SHA2_256', CONVERT(varbinary(max),
+                   cc.definition COLLATE Latin1_General_100_BIN2))
+        FROM sys.check_constraints AS cc
+        WHERE cc.parent_object_id = OBJECT_ID(N'lab.WorkshopTrial')
+        EXCEPT SELECT * FROM @ExpectedWorkshopTrialCheckDefinitions
+    )
+        THROW 51604, 'Existing WorkshopTrial CHECK definition contract is incompatible.', 1;
+
     DROP TABLE IF EXISTS #ExpectedWorkshopRunCheckShape;
     DROP TABLE IF EXISTS #ExpectedWorkshopSampleCheckShape;
     DROP TABLE IF EXISTS #ExpectedWorkshopRequestSampleCheckShape;
+    DROP TABLE IF EXISTS #ExpectedWorkshopTrialCheckShape;
     DROP TABLE IF EXISTS #ExpectedValidationRunCheckShape;
 END TRY
 BEGIN CATCH
     DROP TABLE IF EXISTS #ExpectedWorkshopRunCheckShape;
     DROP TABLE IF EXISTS #ExpectedWorkshopSampleCheckShape;
     DROP TABLE IF EXISTS #ExpectedWorkshopRequestSampleCheckShape;
+    DROP TABLE IF EXISTS #ExpectedWorkshopTrialCheckShape;
     DROP TABLE IF EXISTS #ExpectedValidationRunCheckShape;
     THROW;
 END CATCH;
@@ -816,113 +1080,6 @@ SELECT
     SystemLowMemorySignal,
     ProcessLowMemorySignal
 FROM lab.WorkshopSample;
-GO
-
-CREATE OR ALTER PROCEDURE lab.usp_LinkValidationBatch
-    @ValidationBatchID uniqueidentifier,
-    @BaselineRunID uniqueidentifier,
-    @OptimizedRunID uniqueidentifier
-WITH EXECUTE AS OWNER
-AS
-BEGIN
-    SET NOCOUNT ON;
-    SET XACT_ABORT ON;
-
-    IF @@TRANCOUNT <> 0
-        THROW 51684, 'Validation linkage cannot run inside an active transaction.', 1;
-    IF @ValidationBatchID IS NULL OR @BaselineRunID IS NULL OR @OptimizedRunID IS NULL
-       OR @BaselineRunID = @OptimizedRunID
-        THROW 51685, 'Validation batch and distinct baseline and optimized run IDs are required.', 1;
-    IF NOT EXISTS
-       (
-           SELECT 1 FROM lab.WorkshopRun
-           WHERE RunID = @BaselineRunID AND Phase = 'Baseline' AND RunStatus = 'Completed'
-       )
-       OR NOT EXISTS
-       (
-           SELECT 1 FROM lab.WorkshopRun
-           WHERE RunID = @OptimizedRunID AND Phase = 'Optimized' AND RunStatus = 'Completed'
-       )
-        THROW 51686, 'Validation linkage requires completed baseline and optimized workload runs.', 1;
-
-    BEGIN TRY
-        BEGIN TRANSACTION;
-
-        /* Lock the whole batch so concurrent controllers cannot assign conflicting runs. */
-        IF NOT EXISTS
-           (
-               SELECT 1
-               FROM lab.ValidationRun WITH (UPDLOCK, HOLDLOCK)
-               WHERE ValidationBatchID = @ValidationBatchID
-           )
-            THROW 51687, 'The validation batch does not exist.', 1;
-
-        ;WITH RequiredValidationCases AS
-        (
-            SELECT required.ValidationCaseName
-            FROM (VALUES
-                (N'NARROW-NULL-TERRITORY'), (N'BROAD-NULL-TERRITORY'),
-                (N'LOW-TERRITORY'), (N'MEDIUM-TERRITORY'), (N'HIGH-TERRITORY'),
-                (N'TOP-MINIMUM'), (N'TOP-MAXIMUM'), (N'NO-MATCH'),
-                (N'DATE-BOUNDARY'), (N'LEAP-BOUNDARY'), (N'REPEATED-EXECUTION')
-            ) AS required(ValidationCaseName)
-        )
-        SELECT ValidationCaseName INTO #RequiredValidationCases
-        FROM RequiredValidationCases;
-
-        IF EXISTS
-           (
-               SELECT 1
-               FROM #RequiredValidationCases AS required
-               WHERE NOT EXISTS
-               (
-                   SELECT 1 FROM lab.ValidationRun AS validation
-                   WHERE validation.ValidationBatchID = @ValidationBatchID
-                     AND validation.ValidationCaseName = required.ValidationCaseName
-                     AND validation.Passed = 1
-               )
-           )
-           OR EXISTS
-           (
-               SELECT 1 FROM lab.ValidationRun
-               WHERE ValidationBatchID = @ValidationBatchID AND Passed = 0
-           )
-           OR (SELECT COUNT_BIG(*) FROM lab.ValidationRun
-               WHERE ValidationBatchID = @ValidationBatchID) <> 11
-            THROW 51688, 'Every required validation case must exist and pass exactly once.', 1;
-
-        IF EXISTS
-        (
-            SELECT 1 FROM lab.ValidationRun
-            WHERE ValidationBatchID = @ValidationBatchID
-              AND (BaselineRunID IS NOT NULL OR OptimizedRunID IS NOT NULL)
-              AND (BaselineRunID <> @BaselineRunID OR OptimizedRunID <> @OptimizedRunID
-                   OR BaselineRunID IS NULL OR OptimizedRunID IS NULL)
-        )
-            THROW 51689, 'The validation batch is already linked to different workload runs.', 1;
-
-        UPDATE lab.ValidationRun
-        SET BaselineRunID = @BaselineRunID,
-            OptimizedRunID = @OptimizedRunID
-        WHERE ValidationBatchID = @ValidationBatchID
-          AND BaselineRunID IS NULL
-          AND OptimizedRunID IS NULL;
-
-        IF (SELECT COUNT_BIG(*) FROM lab.ValidationRun
-            WHERE ValidationBatchID = @ValidationBatchID
-              AND BaselineRunID = @BaselineRunID
-              AND OptimizedRunID = @OptimizedRunID
-              AND Passed = 1) <> 11
-            THROW 51690, 'The validation batch linkage could not be verified.', 1;
-
-        COMMIT TRANSACTION;
-    END TRY
-    BEGIN CATCH
-        IF XACT_STATE() <> 0
-            ROLLBACK TRANSACTION;
-        THROW;
-    END CATCH;
-END;
 GO
 
 CREATE OR ALTER PROCEDURE lab.usp_GetMemorySnapshot
@@ -1180,138 +1337,101 @@ END;
 GO
 
 CREATE OR ALTER PROCEDURE lab.usp_CompareWorkshopRuns
-    @BaselineRunID uniqueidentifier = NULL,
-    @OptimizedRunID uniqueidentifier = NULL,
-    @ValidationBatchID uniqueidentifier = NULL,
-    @ParentComparisonID uniqueidentifier = NULL
+    @RunID uniqueidentifier,
+    @ValidationBatchID uniqueidentifier = NULL
 WITH EXECUTE AS OWNER
 AS
 BEGIN
     SET NOCOUNT ON;
 
-    IF @ParentComparisonID IS NULL AND (@BaselineRunID IS NULL OR @OptimizedRunID IS NULL)
-        THROW 51660, 'Supply two run IDs or one parent comparison ID.', 1;
-    IF @ParentComparisonID IS NOT NULL AND (@BaselineRunID IS NOT NULL OR @OptimizedRunID IS NOT NULL)
-        THROW 51661, 'Parent comparison mode cannot be combined with explicit run IDs.', 1;
-    IF @ValidationBatchID IS NULL
-        THROW 51666, 'ValidationBatchID is required.', 1;
-
-    IF @ParentComparisonID IS NOT NULL
-    BEGIN
-        IF (SELECT COUNT(*) FROM lab.WorkshopRun WHERE ParentComparisonID = @ParentComparisonID AND Phase = 'Baseline') <> 1
-           OR (SELECT COUNT(*) FROM lab.WorkshopRun WHERE ParentComparisonID = @ParentComparisonID AND Phase = 'Optimized') <> 1
-            THROW 51663, 'A comparison must contain exactly one baseline and one optimized run.', 1;
-        SELECT @BaselineRunID = MIN(CASE WHEN Phase = 'Baseline' THEN RunID END),
-               @OptimizedRunID = MIN(CASE WHEN Phase = 'Optimized' THEN RunID END)
-        FROM lab.WorkshopRun
-        WHERE ParentComparisonID = @ParentComparisonID;
-    END;
-
-    IF NOT EXISTS (SELECT 1 FROM lab.WorkshopRun WHERE RunID = @BaselineRunID AND Phase = 'Baseline' AND RunStatus = 'Completed')
-       OR NOT EXISTS (SELECT 1 FROM lab.WorkshopRun WHERE RunID = @OptimizedRunID AND Phase = 'Optimized' AND RunStatus = 'Completed')
-        THROW 51662, 'The selected baseline and optimized runs do not exist with the required phases.', 1;
-    IF EXISTS
+    IF @RunID IS NULL OR @ValidationBatchID IS NULL
+        THROW 51660, 'RunID and ValidationBatchID are required.', 1;
+    IF NOT EXISTS
     (
-        SELECT 1
-        FROM lab.WorkshopRun AS baseline
-        INNER JOIN lab.WorkshopRun AS optimized ON optimized.RunID = @OptimizedRunID
-        WHERE baseline.RunID = @BaselineRunID
-          AND (baseline.FrozenSettingsHash <> optimized.FrozenSettingsHash
-               OR baseline.DurationMs IS NULL OR optimized.DurationMs IS NULL
-               OR baseline.CpuMs IS NULL OR optimized.CpuMs IS NULL
-               OR baseline.LogicalReads IS NULL OR optimized.LogicalReads IS NULL
-               OR baseline.Spills IS NULL OR optimized.Spills IS NULL
-               OR baseline.WaitTimeMs IS NULL OR optimized.WaitTimeMs IS NULL)
+        SELECT 1 FROM lab.WorkshopRun
+        WHERE RunID = @RunID AND Phase = 'Comparison' AND RunStatus = 'Completed'
+          AND FrozenSettingsHash IS NOT NULL
     )
-        THROW 51664, 'Completed runs require identical frozen settings and complete measurements.', 1;
-    IF NOT EXISTS (SELECT 1 FROM lab.WorkshopSample WHERE RunID = @BaselineRunID)
-       OR NOT EXISTS (SELECT 1 FROM lab.WorkshopSample WHERE RunID = @OptimizedRunID)
-        THROW 51665, 'No memory samples are available for one or both runs.', 1;
+        THROW 51662, 'The selected completed comparison run does not exist.', 1;
+    IF NOT EXISTS (SELECT 1 FROM lab.WorkshopSample WHERE RunID = @RunID AND Phase = 'Baseline')
+       OR NOT EXISTS (SELECT 1 FROM lab.WorkshopSample WHERE RunID = @RunID AND Phase = 'Optimized')
+        THROW 51665, 'No memory samples are available for one or both phases.', 1;
+    IF (SELECT COUNT_BIG(*) FROM lab.WorkshopTrial AS trial
+        WHERE trial.RunID = @RunID AND trial.ValidationBatchID = @ValidationBatchID) <> 12
+       OR EXISTS
+       (
+           SELECT 1 FROM lab.WorkshopTrial AS trial
+           WHERE trial.RunID = @RunID
+             AND (trial.ValidationBatchID <> @ValidationBatchID OR trial.Correct <> 1)
+       )
+       OR EXISTS
+       (
+           SELECT trial.ParameterSlot
+           FROM lab.WorkshopTrial AS trial
+           WHERE trial.RunID = @RunID
+           GROUP BY trial.ParameterSlot
+           HAVING COUNT_BIG(*) <> 2
+              OR SUM(CASE WHEN trial.Phase = 'Baseline' THEN 1 ELSE 0 END) <> 1
+              OR SUM(CASE WHEN trial.Phase = 'Optimized' THEN 1 ELSE 0 END) <> 1
+       )
+        THROW 51666, 'Exactly twelve correct paired trials must use the requested validation batch.', 1;
 
-    ;WITH RequiredValidationCases AS
-    (
-        SELECT required.ValidationCaseName
-        FROM (VALUES
-            (N'NARROW-NULL-TERRITORY'),
-            (N'BROAD-NULL-TERRITORY'),
-            (N'LOW-TERRITORY'),
-            (N'MEDIUM-TERRITORY'),
-            (N'HIGH-TERRITORY'),
-            (N'TOP-MINIMUM'),
-            (N'TOP-MAXIMUM'),
-            (N'NO-MATCH'),
-            (N'DATE-BOUNDARY'),
-            (N'LEAP-BOUNDARY'),
-            (N'REPEATED-EXECUTION')
-        ) AS required(ValidationCaseName)
-    ), RankedSamples AS
+    ;WITH RankedSamples AS
     (
         SELECT
-            s.RunID,
+            s.Phase,
             s.GrantUtilizationPercent,
-            ROW_NUMBER() OVER (PARTITION BY s.RunID ORDER BY s.GrantUtilizationPercent, s.SampleSequence) AS ValueRowNumber,
-            COUNT_BIG(*) OVER (PARTITION BY s.RunID) AS ValueCount
+            ROW_NUMBER() OVER (PARTITION BY s.Phase ORDER BY s.GrantUtilizationPercent, s.SampleSequence) AS ValueRowNumber,
+            COUNT_BIG(*) OVER (PARTITION BY s.Phase) AS ValueCount
         FROM lab.WorkshopSample AS s
-        WHERE s.RunID IN (@BaselineRunID, @OptimizedRunID)
+        WHERE s.RunID = @RunID
     ), SampleMetrics AS
     (
         SELECT
-            RunID,
+            Phase,
             MAX(GrantUtilizationPercent) AS PeakGrantUtilizationPercent,
             CAST(AVG(CASE WHEN ValueRowNumber IN ((ValueCount + 1) / 2, (ValueCount + 2) / 2)
                 THEN GrantUtilizationPercent END) AS decimal(6,2)) AS MedianGrantUtilizationPercent
         FROM RankedSamples
-        GROUP BY RunID
+        GROUP BY Phase
+    ), TrialMetrics AS
+    (
+        SELECT
+            trial.Phase,
+            AVG(CONVERT(decimal(38,4), trial.DurationMs)) AS DurationMs,
+            AVG(CONVERT(decimal(38,4), trial.CpuMs)) AS CpuMs,
+            AVG(CONVERT(decimal(38,4), trial.LogicalReads)) AS LogicalReads,
+            AVG(CONVERT(decimal(38,4), trial.SpillKB)) AS Spills,
+            AVG(CONVERT(decimal(38,4), trial.WaitMs)) AS WaitTimeMs
+        FROM lab.WorkshopTrial AS trial
+        WHERE trial.RunID = @RunID
+          AND trial.ValidationBatchID = @ValidationBatchID
+          AND trial.Correct = 1
+        GROUP BY trial.Phase
     ), Comparison AS
     (
         SELECT
-            baseline.RunID AS BaselineRunID,
-            optimized.RunID AS OptimizedRunID,
+            @RunID AS RunID,
             baselineSample.PeakGrantUtilizationPercent AS BaselinePeakGrantUtilizationPercent,
             optimizedSample.PeakGrantUtilizationPercent AS OptimizedPeakGrantUtilizationPercent,
             baselineSample.MedianGrantUtilizationPercent AS BaselineMedianGrantUtilizationPercent,
             optimizedSample.MedianGrantUtilizationPercent AS OptimizedMedianGrantUtilizationPercent,
-            baseline.DurationMs AS BaselineDurationMs,
-            optimized.DurationMs AS OptimizedDurationMs,
-            baseline.CpuMs AS BaselineCpuMs,
-            optimized.CpuMs AS OptimizedCpuMs,
-            baseline.LogicalReads AS BaselineLogicalReads,
-            optimized.LogicalReads AS OptimizedLogicalReads,
-            baseline.Spills AS BaselineSpills,
-            optimized.Spills AS OptimizedSpills,
-            baseline.WaitTimeMs AS BaselineWaitTimeMs,
-            optimized.WaitTimeMs AS OptimizedWaitTimeMs,
-            CONVERT(bit, CASE
-                                WHEN NOT EXISTS
-                (
-                                        SELECT 1
-                                        FROM RequiredValidationCases AS required
-                                        WHERE NOT EXISTS
-                                        (
-                                                SELECT 1
-                                                FROM lab.ValidationRun AS validation
-                                                WHERE validation.ValidationBatchID = @ValidationBatchID
-                                                    AND validation.ValidationCaseName = required.ValidationCaseName
-                                                    AND validation.BaselineRunID = @BaselineRunID
-                                                    AND validation.OptimizedRunID = @OptimizedRunID
-                                                    AND validation.Passed = 1
-                                        )
-                )
-                 AND NOT EXISTS
-                (
-                    SELECT 1 FROM lab.ValidationRun AS validation
-                                        WHERE validation.ValidationBatchID = @ValidationBatchID
-                                            AND (validation.BaselineRunID <> @BaselineRunID
-                                                     OR validation.OptimizedRunID <> @OptimizedRunID
-                                                     OR validation.BaselineRunID IS NULL
-                                                     OR validation.OptimizedRunID IS NULL
-                                                     OR validation.Passed = 0)
-                ) THEN 1 ELSE 0 END) AS CorrectnessPassed
-        FROM lab.WorkshopRun AS baseline
-        INNER JOIN lab.WorkshopRun AS optimized ON optimized.RunID = @OptimizedRunID
-        LEFT JOIN SampleMetrics AS baselineSample ON baselineSample.RunID = baseline.RunID
-        LEFT JOIN SampleMetrics AS optimizedSample ON optimizedSample.RunID = optimized.RunID
-        WHERE baseline.RunID = @BaselineRunID
+            baselineTrial.DurationMs AS BaselineDurationMs,
+            optimizedTrial.DurationMs AS OptimizedDurationMs,
+            baselineTrial.CpuMs AS BaselineCpuMs,
+            optimizedTrial.CpuMs AS OptimizedCpuMs,
+            baselineTrial.LogicalReads AS BaselineLogicalReads,
+            optimizedTrial.LogicalReads AS OptimizedLogicalReads,
+            baselineTrial.Spills AS BaselineSpills,
+            optimizedTrial.Spills AS OptimizedSpills,
+            baselineTrial.WaitTimeMs AS BaselineWaitTimeMs,
+            optimizedTrial.WaitTimeMs AS OptimizedWaitTimeMs,
+            CONVERT(bit, 1) AS CorrectnessPassed
+        FROM SampleMetrics AS baselineSample
+        INNER JOIN SampleMetrics AS optimizedSample ON optimizedSample.Phase = 'Optimized'
+        INNER JOIN TrialMetrics AS baselineTrial ON baselineTrial.Phase = 'Baseline'
+        INNER JOIN TrialMetrics AS optimizedTrial ON optimizedTrial.Phase = 'Optimized'
+        WHERE baselineSample.Phase = 'Baseline'
     ), MetricEvaluation AS
     (
         SELECT *, CONVERT(bit, CASE
@@ -1342,22 +1462,21 @@ BEGIN
                 FROM MetricEvaluation
     )
     SELECT
-        BaselineRunID,
-        OptimizedRunID,
+        RunID,
         BaselinePeakGrantUtilizationPercent,
         OptimizedPeakGrantUtilizationPercent,
         BaselineMedianGrantUtilizationPercent,
         OptimizedMedianGrantUtilizationPercent,
-        BaselineDurationMs,
-        OptimizedDurationMs,
-        BaselineCpuMs,
-        OptimizedCpuMs,
-        BaselineLogicalReads,
-        OptimizedLogicalReads,
-        BaselineSpills,
-        OptimizedSpills,
-        BaselineWaitTimeMs,
-        OptimizedWaitTimeMs,
+        CONVERT(bigint, BaselineDurationMs) AS BaselineDurationMs,
+        CONVERT(bigint, OptimizedDurationMs) AS OptimizedDurationMs,
+        CONVERT(bigint, BaselineCpuMs) AS BaselineCpuMs,
+        CONVERT(bigint, OptimizedCpuMs) AS OptimizedCpuMs,
+        CONVERT(bigint, BaselineLogicalReads) AS BaselineLogicalReads,
+        CONVERT(bigint, OptimizedLogicalReads) AS OptimizedLogicalReads,
+        CONVERT(bigint, BaselineSpills) AS BaselineSpills,
+        CONVERT(bigint, OptimizedSpills) AS OptimizedSpills,
+        CONVERT(bigint, BaselineWaitTimeMs) AS BaselineWaitTimeMs,
+        CONVERT(bigint, OptimizedWaitTimeMs) AS OptimizedWaitTimeMs,
         CorrectnessPassed,
         HasMaterialRegression,
         HasAdditionalMetricImprovement,
@@ -1672,6 +1791,11 @@ DENY UPDATE ON OBJECT::lab.WorkshopRequestSample TO [mcp_workshop_reader];
 DENY DELETE ON OBJECT::lab.WorkshopRequestSample TO [mcp_workshop_reader];
 DENY ALTER ON OBJECT::lab.WorkshopRequestSample TO [mcp_workshop_reader];
 DENY CONTROL ON OBJECT::lab.WorkshopRequestSample TO [mcp_workshop_reader];
+DENY INSERT ON OBJECT::lab.WorkshopTrial TO [mcp_workshop_reader];
+DENY UPDATE ON OBJECT::lab.WorkshopTrial TO [mcp_workshop_reader];
+DENY DELETE ON OBJECT::lab.WorkshopTrial TO [mcp_workshop_reader];
+DENY ALTER ON OBJECT::lab.WorkshopTrial TO [mcp_workshop_reader];
+DENY CONTROL ON OBJECT::lab.WorkshopTrial TO [mcp_workshop_reader];
 DENY INSERT ON OBJECT::lab.ValidationRun TO [mcp_workshop_reader];
 DENY UPDATE ON OBJECT::lab.ValidationRun TO [mcp_workshop_reader];
 DENY DELETE ON OBJECT::lab.ValidationRun TO [mcp_workshop_reader];
@@ -1712,6 +1836,11 @@ INSERT @ExpectedReaderPermissions VALUES
     (1, OBJECT_ID(N'lab.WorkshopRequestSample'), 0, N'DELETE', N'D'),
     (1, OBJECT_ID(N'lab.WorkshopRequestSample'), 0, N'ALTER', N'D'),
     (1, OBJECT_ID(N'lab.WorkshopRequestSample'), 0, N'CONTROL', N'D'),
+    (1, OBJECT_ID(N'lab.WorkshopTrial'), 0, N'INSERT', N'D'),
+    (1, OBJECT_ID(N'lab.WorkshopTrial'), 0, N'UPDATE', N'D'),
+    (1, OBJECT_ID(N'lab.WorkshopTrial'), 0, N'DELETE', N'D'),
+    (1, OBJECT_ID(N'lab.WorkshopTrial'), 0, N'ALTER', N'D'),
+    (1, OBJECT_ID(N'lab.WorkshopTrial'), 0, N'CONTROL', N'D'),
     (1, OBJECT_ID(N'lab.ValidationRun'), 0, N'INSERT', N'D'),
     (1, OBJECT_ID(N'lab.ValidationRun'), 0, N'UPDATE', N'D'),
     (1, OBJECT_ID(N'lab.ValidationRun'), 0, N'DELETE', N'D'),
@@ -1831,6 +1960,11 @@ BEGIN TRY
        OR HAS_PERMS_BY_NAME(N'lab.WorkshopRequestSample', N'OBJECT', N'DELETE') <> 0
     OR HAS_PERMS_BY_NAME(N'lab.WorkshopRequestSample', N'OBJECT', N'ALTER') <> 0
     OR HAS_PERMS_BY_NAME(N'lab.WorkshopRequestSample', N'OBJECT', N'CONTROL') <> 0
+         OR HAS_PERMS_BY_NAME(N'lab.WorkshopTrial', N'OBJECT', N'INSERT') <> 0
+         OR HAS_PERMS_BY_NAME(N'lab.WorkshopTrial', N'OBJECT', N'UPDATE') <> 0
+         OR HAS_PERMS_BY_NAME(N'lab.WorkshopTrial', N'OBJECT', N'DELETE') <> 0
+     OR HAS_PERMS_BY_NAME(N'lab.WorkshopTrial', N'OBJECT', N'ALTER') <> 0
+     OR HAS_PERMS_BY_NAME(N'lab.WorkshopTrial', N'OBJECT', N'CONTROL') <> 0
        OR HAS_PERMS_BY_NAME(N'lab.ValidationRun', N'OBJECT', N'INSERT') <> 0
        OR HAS_PERMS_BY_NAME(N'lab.ValidationRun', N'OBJECT', N'UPDATE') <> 0
        OR HAS_PERMS_BY_NAME(N'lab.ValidationRun', N'OBJECT', N'DELETE') <> 0
