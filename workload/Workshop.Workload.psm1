@@ -465,6 +465,7 @@ function Assert-EnvironmentFingerprint {
         $names += $markerNames
     }
     if ('captureStatus' -in $actualNames) { $names += 'captureStatus' }
+    if ('runIsolation' -in $actualNames) { $names += 'runIsolation' }
     Assert-ExactProperty -InputObject $Environment -RequiredNames $names -Context 'Environment fingerprint'
     Assert-NoSecretField -InputObject $Environment
     foreach ($name in @('sqlVersion', 'sqlEdition')) {
@@ -477,6 +478,11 @@ function Assert-EnvironmentFingerprint {
         (Get-ObjectValue $Environment physicalMemoryMB -Required) 'physicalMemoryMB'
     if ($memory -lt 1 -or $memory -ne [decimal]::Truncate($memory) -or $memory -gt 4294967296) {
         throw "Environment field 'physicalMemoryMB' must be a positive integer no greater than 4 PB."
+    }
+    if ('runIsolation' -in $names) {
+        [void](Resolve-CanonicalEnum (Get-ObjectValue $Environment runIsolation -Required) `
+            @('ExclusiveDatabaseApplicationLock','ExclusiveDatabaseApplicationLockRejected','Unavailable') `
+            'run isolation')
     }
     if ('sqlClientProvider' -in $names) {
         [void](Resolve-CanonicalEnum (Get-ObjectValue $Environment sqlClientProvider -Required) `
@@ -949,10 +955,15 @@ function ConvertTo-TerminationEvidence {
             safetyStopTriggered = $false
             safetyReasons = @()
             timeout = $false
+            finalizationOverrunMs = 0
+            warnings = @()
         }
     }
 
     $terminationNames = @('manualStopRequested', 'safetyStopTriggered', 'safetyReasons', 'timeout')
+    foreach ($optionalName in @('finalizationOverrunMs','warnings')) {
+        if ($null -ne (Get-ObjectValue $TerminationEvidence $optionalName)) { $terminationNames += $optionalName }
+    }
     $failure = Get-ObjectValue $TerminationEvidence failure
     if ($null -ne $failure) { $terminationNames += 'failure' }
     Assert-ExactProperty -InputObject $TerminationEvidence -RequiredNames $terminationNames -Context 'Termination evidence'
@@ -973,6 +984,18 @@ function ConvertTo-TerminationEvidence {
             throw 'safetyReasons entries must be nonempty strings.'
         }
     }
+
+    $warningValue = Get-ObjectValue $TerminationEvidence warnings
+    $warnings = [string[]]@()
+    if ($null -ne $warningValue) { $warnings = [string[]]@($warningValue) }
+    foreach ($warning in $warnings) {
+        if ($warning -isnot [string] -or [string]::IsNullOrWhiteSpace($warning) -or $warning.Length -gt 256) {
+            throw 'Termination warnings must be bounded nonempty strings.'
+        }
+    }
+    $finalizationOverrunMs = Get-ObjectValue $TerminationEvidence finalizationOverrunMs
+    if ($null -eq $finalizationOverrunMs) { $finalizationOverrunMs = 0 }
+    $finalizationOverrunMs = ConvertTo-NonnegativeInt64 $finalizationOverrunMs 'finalizationOverrunMs'
 
     $manual = Get-ObjectValue $TerminationEvidence manualStopRequested -Required
     $safety = Get-ObjectValue $TerminationEvidence safetyStopTriggered -Required
@@ -1009,6 +1032,8 @@ function ConvertTo-TerminationEvidence {
         safetyStopTriggered = $safety
         safetyReasons = $reasons
         timeout = Get-ObjectValue $TerminationEvidence timeout -Required
+        finalizationOverrunMs = $finalizationOverrunMs
+        warnings = $warnings
     }
     if ($null -ne $failure) { $result.failure = ConvertTo-CanonicalValue $failure }
     return $result
@@ -1473,6 +1498,8 @@ function Get-WorkshopComparisonBudget {
         [pscustomobject]@{ Name = 'FinalFingerprint'; Count = 1; SecondsEach = 1 }
         [pscustomobject]@{ Name = 'CorrectnessLinkage'; Count = 1; SecondsEach = 1 }
         [pscustomobject]@{ Name = 'Persistence'; Count = 1; SecondsEach = 1 }
+        [pscustomobject]@{ Name = 'Export'; Count = 1; SecondsEach = 1 }
+        [pscustomobject]@{ Name = 'RunLockRelease'; Count = 1; SecondsEach = 1 }
     )
     $ancillarySeconds = [int](($ancillary | ForEach-Object {
         $_.Count * $_.SecondsEach
@@ -1480,7 +1507,7 @@ function Get-WorkshopComparisonBudget {
     $minimumBaselineObservationSeconds = 3 + (2 * $SampleIntervalSeconds)
     $optimizedPreparationAndObservationSeconds = $MaximumWorkers + 3 + (2 * $SampleIntervalSeconds)
     $postBaselineMinimumSeconds = $MaximumWorkers + 1 + 1 + $optimizedPreparationAndObservationSeconds
-    $preComparisonMinimumSeconds = 3 + $minimumBaselineObservationSeconds + $postBaselineMinimumSeconds
+    $preComparisonMinimumSeconds = 4 + $minimumBaselineObservationSeconds + $postBaselineMinimumSeconds
     $availableForTrials = $MaximumDurationSeconds - $preComparisonMinimumSeconds - `
         $ancillarySeconds - $cleanupMarginSeconds
     $trialSeconds = [math]::Min(
@@ -1714,7 +1741,7 @@ function Test-WorkshopPreflight {
 function Assert-WorkshopOperationSet {
     param([Parameter(Mandatory)][System.Collections.IDictionary] $OperationSet)
 
-    $required = @('OpenConnection', 'CaptureEnvironment', 'InitializePersistence', 'StartWorker', 'TestWorkerHealth', 'Sample', 'StopWorker', 'KillTagged', 'Persist', 'Delay', 'Clock', 'Export')
+    $required = @('AcquireRunLock', 'ReleaseRunLock', 'OpenConnection', 'CaptureEnvironment', 'InitializePersistence', 'StartWorker', 'TestWorkerHealth', 'Sample', 'StopWorker', 'KillTagged', 'Persist', 'Delay', 'Clock', 'Export')
     $missing = @($required | Where-Object { -not $OperationSet.Contains($_) -or $OperationSet[$_] -isnot [scriptblock] })
     if ($missing.Count -gt 0) {
         throw "OperationSet is missing scriptblock operations: $($missing -join ', ')."
@@ -1855,6 +1882,7 @@ function Build-WorkshopExperimentResult {
         markerSetupHash = [string]$Preflight.SetupHash
         serverMarkerId = [string]$Preflight.ServerMarkerId
         configurationFingerprint = [string]$Preflight.CanonicalConfigurationFingerprint
+        runIsolation = 'ExclusiveDatabaseApplicationLock'
     }
     if ($Preflight.psobject.Properties['SqlClientProvider'] -or
         $Preflight.psobject.Properties['EnvironmentWarnings']) {
@@ -1923,6 +1951,8 @@ function Build-WorkshopExperimentResult {
         safetyStopTriggered = $SafetyStopTriggered
         safetyReasons = @($SafetyReasons | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
         timeout = $Timeout
+        finalizationOverrunMs = 0
+        warnings = @()
     }
     if ($null -ne $Failure) { $termination.failure = $Failure }
     $evidenceValidation = if ($Samples.Count -eq 0 -and $null -ne $Failure -and
@@ -2008,6 +2038,8 @@ function Invoke-WorkshopExperiment {
     $timeout = $false
     $failure = $null
     $result = $null
+    $runLockHeld = $false
+    $emergencyFinalizationBudgetSeconds = 5
     $operationState = [pscustomobject]@{ Stage = 'OpenConnection' }
     $sampleClockState = [pscustomobject]@{ Last = $start.AddTicks(-1) }
     $workerCountStarted = 0
@@ -2020,7 +2052,7 @@ function Invoke-WorkshopExperiment {
     $getRemainingSeconds = {
         $remaining = ($runtimeState.Deadline - [datetimeoffset] (& $OperationSet.Clock)).TotalSeconds
         if ($remaining -le 0) { return 0 }
-        return [math]::Max(1, [int][math]::Ceiling($remaining))
+        return [math]::Max(0, [int][math]::Floor($remaining))
     }.GetNewClosure()
     $testActiveWorkers = {
         if ($workers.Count -eq 0) { return $true }
@@ -2117,7 +2149,9 @@ function Invoke-WorkshopExperiment {
                 -StartedAtUtc $start -CompletedAtUtc $start -MaximumWorkers $MaximumWorkers `
                 -MaximumDurationSeconds $MaximumDurationSeconds `
                 -SampleIntervalSeconds $SampleIntervalSeconds -WorkerRampSeconds $WorkerRampSeconds
-            & $OperationSet.Export $result 5
+            $startupExportBudget = [math]::Min(1, (& $getRemainingSeconds))
+            if ($startupExportBudget -lt 1) { $startupExportBudget = $emergencyFinalizationBudgetSeconds }
+            & $OperationSet.Export $result $startupExportBudget
             return $result
         }
         $comparisonReserveSeconds = $comparisonBudget.TotalReservedSeconds
@@ -2125,6 +2159,18 @@ function Invoke-WorkshopExperiment {
         $baselineFractionDeadline = $start.AddSeconds([math]::Floor($MaximumDurationSeconds * $BaselineCalibrationFraction))
         $baselineReserveDeadline = $optimizedObservationDeadline.AddSeconds(-$comparisonBudget.PostBaselineMinimumSeconds)
         $baselineDeadline = @($baselineFractionDeadline, $baselineReserveDeadline | Sort-Object)[0]
+        $operationState.Stage = 'RunLockAcquisition'
+        try {
+            $lockResult = [int](& $OperationSet.AcquireRunLock ([math]::Min($CommandTimeoutSeconds, (& $getRemainingSeconds))))
+        }
+        catch {
+            throw [InvalidOperationException]::new('Exclusive workshop run lock could not be acquired.')
+        }
+        if ($lockResult -lt 0) {
+            $operationState.Stage = 'ConcurrentRunRejected'
+            throw [InvalidOperationException]::new('Another workshop experiment is already active.')
+        }
+        $runLockHeld = $true
         $operationState.Stage = 'OpenConnection'
         [void](& $OperationSet.OpenConnection 'Preflight' ([math]::Min($CommandTimeoutSeconds, (& $getRemainingSeconds))))
         $operationState.Stage = 'CaptureEnvironment'
@@ -2235,8 +2281,12 @@ function Invoke-WorkshopExperiment {
                 -SafetyReasons $safetyReasons -Timeout $timeout -Workers $workerCountStarted -Schedule $schedule `
                 -MaximumDurationSeconds $MaximumDurationSeconds -SampleIntervalSeconds $SampleIntervalSeconds `
                 -WorkerRampSeconds $WorkerRampSeconds
-            & $OperationSet.Persist $result
-            & $OperationSet.Export $result
+            $persistenceBudget = [math]::Min(1, (& $getRemainingSeconds))
+            if ($persistenceBudget -lt 1) { throw 'The global deadline elapsed before SQL persistence.' }
+            & $OperationSet.Persist $result $persistenceBudget
+            $exportBudget = [math]::Min(1, (& $getRemainingSeconds))
+            if ($exportBudget -lt 1) { throw 'The global deadline elapsed before local evidence export.' }
+            & $OperationSet.Export $result $exportBudget
             return $result
         }
 
@@ -2255,8 +2305,12 @@ function Invoke-WorkshopExperiment {
                 -Timeout $timeout -Workers $workerCountStarted -Schedule $schedule `
                 -MaximumDurationSeconds $MaximumDurationSeconds -SampleIntervalSeconds $SampleIntervalSeconds `
                 -WorkerRampSeconds $WorkerRampSeconds
-            & $OperationSet.Persist $result
-            & $OperationSet.Export $result
+            $persistenceBudget = [math]::Min(1, (& $getRemainingSeconds))
+            if ($persistenceBudget -lt 1) { throw 'The global deadline elapsed before SQL persistence.' }
+            & $OperationSet.Persist $result $persistenceBudget
+            $exportBudget = [math]::Min(1, (& $getRemainingSeconds))
+            if ($exportBudget -lt 1) { throw 'The global deadline elapsed before local evidence export.' }
+            & $OperationSet.Export $result $exportBudget
             return $result
         }
 
@@ -2354,6 +2408,8 @@ function Invoke-WorkshopExperiment {
             $comparisonOperations.Add([pscustomobject]@{ Name = 'FinalFingerprint'; Seconds = 1 })
             $comparisonOperations.Add([pscustomobject]@{ Name = 'CorrectnessLinkage'; Seconds = 1 })
             $comparisonOperations.Add([pscustomobject]@{ Name = 'Persistence'; Seconds = 1 })
+            $comparisonOperations.Add([pscustomobject]@{ Name = 'Export'; Seconds = 1 })
+            $comparisonOperations.Add([pscustomobject]@{ Name = 'RunLockRelease'; Seconds = 1 })
         }
         $comparisonState = [pscustomobject]@{
             Index = 0
@@ -2540,23 +2596,42 @@ function Invoke-WorkshopExperiment {
             }
         }
         else {
-            & $OperationSet.Persist $result 5
+            $persistenceBudget = [math]::Min(1, (& $getRemainingSeconds))
+            if ($persistenceBudget -lt 1) { throw 'The global deadline elapsed before SQL persistence.' }
+            & $OperationSet.Persist $result $persistenceBudget
         }
-        & $OperationSet.Export $result 5
+        if ($comparisonState.Index -lt $comparisonOperations.Count -and
+            $comparisonOperations[$comparisonState.Index].Name -ceq 'Export') {
+            $exportBudget = & $beginComparisonOperation 'Export'
+            & $OperationSet.Export $result $exportBudget
+            & $completeComparisonOperation 'Export'
+        }
+        else {
+            $exportBudget = [math]::Min(1, (& $getRemainingSeconds))
+            if ($exportBudget -lt 1) { throw 'The global deadline elapsed before local evidence export.' }
+            & $OperationSet.Export $result $exportBudget
+        }
         return $result
     }
     catch {
         $originalError = $_
+        $caughtStage = [string]$operationState.Stage
         $originalText = ConvertTo-SanitizedFailureMessage $originalError.Exception.Message
         $killError = $null
-        try { [void](& $OperationSet.KillTagged $RunId) } catch { $killError = $_ }
+        $killBudget = if ((& $getRemainingSeconds) -gt 0) { [math]::Min(1, (& $getRemainingSeconds)) }
+            else { $emergencyFinalizationBudgetSeconds }
+        if ($caughtStage -ne 'ConcurrentRunRejected') {
+            try { [void](& $OperationSet.KillTagged $RunId $killBudget) } catch { $killError = $_ }
+        }
 
         if ($null -eq $result) {
             try {
                 $completedAt = [datetimeoffset] (& $OperationSet.Clock)
                 if ($completedAt -lt $start) { $completedAt = $start }
                 if ($completedAt -lt $sampleClockState.Last) { $completedAt = $sampleClockState.Last }
-                $failureCode = switch ($operationState.Stage) {
+                $failureCode = switch ($caughtStage) {
+                    'RunLockAcquisition' { 'RUN_LOCK_ACQUISITION_FAILED' }
+                    'ConcurrentRunRejected' { 'CONCURRENT_RUN_REJECTED' }
                     'OpenConnection' { 'CONNECTION_OPEN_FAILED' }
                     'CaptureEnvironment' { 'ENVIRONMENT_CAPTURE_FAILED' }
                     'Preflight' { 'PREFLIGHT_FAILED' }
@@ -2567,17 +2642,18 @@ function Invoke-WorkshopExperiment {
                     'PhaseDeadline' { 'GLOBAL_DEADLINE_BEFORE_COMPARISON_COMPLETE' }
                     default { 'WORKSHOP_OPERATION_FAILED' }
                 }
-                $failureStage = if ($operationState.Stage -in @('ComparisonDeadline','PhaseDeadline')) {
+                $failureStage = if ($caughtStage -in @('ComparisonDeadline','PhaseDeadline')) {
                     'GlobalDeadlineBeforeComparisonComplete'
                 }
+                elseif ($caughtStage -eq 'ConcurrentRunRejected') { 'ConcurrentRunRejected' }
                 else {
-                    $operationState.Stage
+                    $caughtStage
                 }
                 $failure = ConvertTo-WorkshopFailureEvidence -Code $failureCode `
                     -Stage $failureStage -Message $originalText `
                     -StartupFailure ($samples.Count -eq 0)
                 if ($null -eq $preflight -or
-                    ($samples.Count -eq 0 -and $operationState.Stage -in @('OpenConnection','CaptureEnvironment','Preflight','InitializePersistence'))) {
+                    ($samples.Count -eq 0 -and $caughtStage -in @('RunLockAcquisition','ConcurrentRunRejected','OpenConnection','CaptureEnvironment','Preflight','InitializePersistence'))) {
                     $result = Build-WorkshopStartupFailureResult -RunId $RunId -Failure $failure `
                         -StartedAtUtc $start -CompletedAtUtc $completedAt -MaximumWorkers $MaximumWorkers `
                         -MaximumDurationSeconds $MaximumDurationSeconds -SampleIntervalSeconds $SampleIntervalSeconds `
@@ -2589,7 +2665,7 @@ function Invoke-WorkshopExperiment {
                         -Samples $samples.ToArray() -RequestSamples $requestSamples.ToArray() -Trials $trials.ToArray() `
                         -StartedAtUtc $start -CompletedAtUtc $completedAt `
                         -ManualStopRequested $false -SafetyStopTriggered $false -SafetyReasons @() `
-                        -Timeout ($operationState.Stage -in @('ComparisonDeadline','PhaseDeadline')) `
+                        -Timeout ($caughtStage -in @('ComparisonDeadline','PhaseDeadline')) `
                         -Workers $workerCountStarted -Schedule $schedule `
                         -MaximumDurationSeconds $MaximumDurationSeconds -SampleIntervalSeconds $SampleIntervalSeconds `
                         -WorkerRampSeconds $WorkerRampSeconds -Failure $failure
@@ -2610,23 +2686,41 @@ function Invoke-WorkshopExperiment {
 
         if ($null -ne $result) {
             $persistenceError = $null
-            try {
-                $operationState.Stage = 'Persistence'
-                [void](& $OperationSet.Persist $result)
-            }
-            catch {
-                $persistenceError = $_
-                $persistenceFailure = ConvertTo-WorkshopFailureEvidence -Code 'PERSISTENCE_FAILED' `
-                    -Stage 'Persistence' -Message $_.Exception.Message `
-                    -StartupFailure ($samples.Count -eq 0)
-                if ($samples.Count -gt 0) {
-                    Copy-WorkshopFailureEvidence $result.TerminationEvidence $persistenceFailure
-                    Copy-WorkshopFailureEvidence $result.Evidence.terminationEvidence $persistenceFailure
+            $emergencyStarted = [datetimeoffset](& $OperationSet.Clock)
+            $normalPersistenceRemaining = & $getRemainingSeconds
+            if ($caughtStage -ne 'ConcurrentRunRejected' -and $normalPersistenceRemaining -gt 0) {
+                try {
+                    $operationState.Stage = 'Persistence'
+                    $persistenceBudget = [math]::Min(1, $normalPersistenceRemaining)
+                    [void](& $OperationSet.Persist $result $persistenceBudget)
+                }
+                catch {
+                    $persistenceError = $_
+                    $persistenceFailure = ConvertTo-WorkshopFailureEvidence -Code 'PERSISTENCE_FAILED' `
+                        -Stage 'Persistence' -Message $_.Exception.Message `
+                        -StartupFailure ($samples.Count -eq 0)
+                    if ($samples.Count -gt 0) {
+                        Copy-WorkshopFailureEvidence $result.TerminationEvidence $persistenceFailure
+                        Copy-WorkshopFailureEvidence $result.Evidence.terminationEvidence $persistenceFailure
+                    }
                 }
             }
             try {
                 $operationState.Stage = 'Export'
-                [void](& $OperationSet.Export $result)
+                $normalRemaining = & $getRemainingSeconds
+                $emergencyElapsed = ([datetimeoffset](& $OperationSet.Clock) - $emergencyStarted).TotalSeconds
+                $exportBudget = if ($normalRemaining -gt 0) { [math]::Min(1, $normalRemaining) }
+                    else { [math]::Max(1, [int][math]::Ceiling($emergencyFinalizationBudgetSeconds - $emergencyElapsed)) }
+                $overrunMs = [math]::Max(0L, [int64][math]::Ceiling(
+                    (([datetimeoffset](& $OperationSet.Clock) - $deadline).TotalMilliseconds)))
+                if ($overrunMs -gt 0) {
+                    $warning = 'Emergency finalization exceeded the workload wall-clock deadline.'
+                    $result.TerminationEvidence.finalizationOverrunMs = $overrunMs
+                    $result.TerminationEvidence.warnings = @($warning)
+                    $result.Evidence.terminationEvidence.finalizationOverrunMs = $overrunMs
+                    $result.Evidence.terminationEvidence.warnings = @($warning)
+                }
+                [void](& $OperationSet.Export $result $exportBudget)
             }
             catch {
                 $finalizationText = ConvertTo-SanitizedFailureMessage $_.Exception.Message
@@ -2655,7 +2749,22 @@ function Invoke-WorkshopExperiment {
         foreach ($worker in @($workers)) {
             try { & $OperationSet.StopWorker $worker 1 } catch { Write-Verbose 'Worker stop failed during cleanup.' }
         }
-        if ($workers.Count -gt 0) { [void] (& $OperationSet.KillTagged $RunId 5) }
+        if ($workers.Count -gt 0) {
+            $cleanupBudget = if ((& $getRemainingSeconds) -gt 0) { [math]::Min(1, (& $getRemainingSeconds)) }
+                else { $emergencyFinalizationBudgetSeconds }
+            [void] (& $OperationSet.KillTagged $RunId $cleanupBudget)
+        }
+        if ($runLockHeld) {
+            try {
+                $releaseBudget = if ((& $getRemainingSeconds) -gt 0) {
+                    [math]::Min(1, (& $getRemainingSeconds))
+                }
+                else { $emergencyFinalizationBudgetSeconds }
+                & $OperationSet.ReleaseRunLock $releaseBudget
+                $runLockHeld = $false
+            }
+            catch { Write-Verbose 'Exclusive workshop run lock release failed after connection cleanup.' }
+        }
     }
 }
 
@@ -2695,6 +2804,10 @@ function Build-WorkshopStartupFailureResult {
         sqlEdition = 'Unavailable before SQL environment capture'
         physicalMemoryMB = 1
         captureStatus = 'Unavailable'
+        runIsolation = if ($Failure.stage -eq 'ConcurrentRunRejected') {
+            'ExclusiveDatabaseApplicationLockRejected'
+        }
+        else { 'Unavailable' }
     }
     $runRecord = New-WorkshopRunRecord -RunId $RunId -Phase Baseline -Status Failed `
         -EvidenceClassification LAB-MEASURED -FrozenSettings $settings `
@@ -2707,6 +2820,8 @@ function Build-WorkshopStartupFailureResult {
         safetyStopTriggered = $false
         safetyReasons = @()
         timeout = $false
+        finalizationOverrunMs = 0
+        warnings = @()
         failure = $Failure
     }
     $evidence = ConvertTo-WorkshopEvidence -RunRecord $runRecord -Samples @() -RequestSamples @() `
@@ -3199,6 +3314,7 @@ function Get-WorkshopSqlOperationSet {
         throw 'System.Data.SqlClient cannot apply a HostNameInCertificate override; the server connection name must match the certificate DNS name.'
     }
     $preflightSnapshot = [pscustomobject]@{ Value = $null }
+    $runLockState = [pscustomobject]@{ Connection = $null; Held = $false }
     Write-Verbose "Preparing SQL operations for database '$Database' and credential user '$($Credential.UserName)'."
 
     $invokeTable = {
@@ -4094,11 +4210,94 @@ END CATCH;
         }
     }.GetNewClosure()
 
+    $acquireRunLock = {
+        param([int]$RemainingSeconds = 1)
+        $builder = Get-WorkshopSqlConnectionBuilder -Provider $provider -Server $Server -Database $Database `
+            -ApplicationName 'MCP-SQL-Workshop-Controller-Lock' -UserName $Credential.UserName `
+            -HostNameInCertificate $HostNameInCertificate
+        $bstr = [IntPtr]::Zero
+        $connection = $null
+        $command = $null
+        $cancellation = $null
+        try {
+            $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($Credential.Password)
+            $builder.Password = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
+            $connection = Get-WorkshopSqlConnection -ConnectionType $provider.ConnectionType `
+                -ConnectionString $builder.ConnectionString
+            $cancellation = [Threading.CancellationTokenSource]::new(
+                [TimeSpan]::FromSeconds([math]::Max(1, $RemainingSeconds)))
+            $connection.OpenAsync($cancellation.Token).GetAwaiter().GetResult()
+            $command = $connection.CreateCommand()
+            $command.CommandText = @'
+DECLARE @LockResult int;
+EXEC @LockResult = sys.sp_getapplock
+    @Resource = N'MCP-SQL-Workshop-Exclusive-Run',
+    @LockMode = N'Exclusive',
+    @LockOwner = N'Session',
+    @LockTimeout = 0,
+    @DbPrincipal = N'public';
+SELECT @LockResult;
+'@
+            $command.CommandTimeout = [math]::Max(1, $RemainingSeconds)
+            $lockResult = [int]$command.ExecuteScalarAsync($cancellation.Token).GetAwaiter().GetResult()
+            if ($lockResult -ge 0) {
+                $runLockState.Connection = $connection
+                $runLockState.Held = $true
+                $connection = $null
+            }
+            return $lockResult
+        }
+        catch {
+            throw [InvalidOperationException]::new('Exclusive workshop run lock could not be acquired.')
+        }
+        finally {
+            $builder.Password = [string]::Empty
+            if ($bstr -ne [IntPtr]::Zero) { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr) }
+            if ($null -ne $command) { $command.Dispose() }
+            if ($null -ne $connection) { $connection.Dispose() }
+            if ($null -ne $cancellation) { $cancellation.Dispose() }
+        }
+    }.GetNewClosure()
+
+    $releaseRunLock = {
+        param([int]$RemainingSeconds = 1)
+        $connection = $runLockState.Connection
+        $command = $null
+        $cancellation = $null
+        try {
+            if ($null -eq $connection) { return }
+            $cancellation = [Threading.CancellationTokenSource]::new(
+                [TimeSpan]::FromSeconds([math]::Max(1, $RemainingSeconds)))
+            $command = $connection.CreateCommand()
+            $command.CommandText = @'
+DECLARE @ReleaseResult int;
+EXEC @ReleaseResult = sys.sp_releaseapplock
+    @Resource = N'MCP-SQL-Workshop-Exclusive-Run',
+    @LockOwner = N'Session',
+    @DbPrincipal = N'public';
+SELECT @ReleaseResult;
+'@
+            $command.CommandTimeout = [math]::Max(1, $RemainingSeconds)
+            $releaseResult = [int]$command.ExecuteScalarAsync($cancellation.Token).GetAwaiter().GetResult()
+            if ($releaseResult -lt 0) { throw 'Exclusive workshop run lock release failed.' }
+        }
+        finally {
+            $runLockState.Held = $false
+            $runLockState.Connection = $null
+            if ($null -ne $command) { $command.Dispose() }
+            if ($null -ne $connection) { $connection.Dispose() }
+            if ($null -ne $cancellation) { $cancellation.Dispose() }
+        }
+    }.GetNewClosure()
+
     return @{
         Readiness = [pscustomobject][ordered]@{
             SqlClientProvider = $provider.Name
             Warnings = [string[]]$provider.Warnings
+            RunIsolation = 'ExclusiveDatabaseApplicationLock'
         }
+        AcquireRunLock = $acquireRunLock
+        ReleaseRunLock = $releaseRunLock
         OpenConnection = {
             param($Purpose, [int]$RemainingSeconds = 60)
             Write-Verbose "Opening $Purpose controller connection."

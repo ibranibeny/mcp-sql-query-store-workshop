@@ -654,7 +654,7 @@ Describe 'ConvertTo-WorkshopEvidence' {
         $first.frozenSettings.procedureHash | Should -BeExactly ('c' * 64)
         $first.targetBands.baseline.minimum | Should -Be 75
         $first.terminationEvidence | ConvertTo-Json -Compress | Should -Be `
-            '{"manualStopRequested":false,"safetyStopTriggered":false,"safetyReasons":[],"timeout":false}'
+            '{"manualStopRequested":false,"safetyStopTriggered":false,"safetyReasons":[],"timeout":false,"finalizationOverrunMs":0,"warnings":[]}'
     }
 
     It 'canonicalizes lowercase record, sample, classification, and outcome values' {
@@ -1061,6 +1061,11 @@ Describe 'Task 12 workload orchestration' {
             Write-Verbose "Creating fixture with $($Baseline.Count) baseline and $($Optimized.Count) optimized samples."
             $state = [pscustomobject]@{
                 Now = [datetimeoffset]'2026-09-01T10:00:00Z'
+                LockResult = 0
+                LockHeld = $false
+                LockAcquisitions = 0
+                LockReleases = 0
+                OperationOrder = [System.Collections.Generic.List[string]]::new()
                 BaselineIndex = 0
                 OptimizedIndex = 0
                 Starts = [System.Collections.Generic.List[object]]::new()
@@ -1075,8 +1080,23 @@ Describe 'Task 12 workload orchestration' {
                 HealthChecks = 0
             }
             $operations = @{
-                OpenConnection = { param($Purpose) Write-Verbose $Purpose; $true }
-                CaptureEnvironment = { $state.Preflight }
+                AcquireRunLock = {
+                    param([int]$RemainingSeconds)
+                    Write-Verbose $RemainingSeconds
+                    $state.OperationOrder.Add('AcquireRunLock')
+                    $state.LockAcquisitions++
+                    if ($state.LockResult -ge 0) { $state.LockHeld = $true }
+                    $state.LockResult
+                }
+                ReleaseRunLock = {
+                    param([int]$RemainingSeconds)
+                    Write-Verbose $RemainingSeconds
+                    $state.OperationOrder.Add('ReleaseRunLock')
+                    $state.LockHeld = $false
+                    $state.LockReleases++
+                }
+                OpenConnection = { param($Purpose) $state.OperationOrder.Add('OpenConnection'); Write-Verbose $Purpose; $true }
+                CaptureEnvironment = { $state.OperationOrder.Add('CaptureEnvironment'); $state.Preflight }
                 InitializePersistence = { $true }
                 StartWorker = {
                     param($RunId, $Phase, $Worker, $ApplicationName, $Schedule, $Deadline)
@@ -1122,10 +1142,10 @@ Describe 'Task 12 workload orchestration' {
                     if ($Handle.psobject.Methods['Dispose']) { $Handle.Dispose() }
                 }
                 KillTagged = { param($RunId) Write-Verbose $RunId; $state.KillCalls++; @() }
-                Persist = { param($Record) $state.Persisted.Add($Record) }
+                Persist = { param($Record,$RemainingSeconds) Write-Verbose $RemainingSeconds; $state.OperationOrder.Add('Persist'); $state.Persisted.Add($Record) }
                 Delay = { param([int] $Seconds) $state.Now = $state.Now.AddSeconds($Seconds) }
                 Clock = { $state.Now }
-                Export = { param($Result) Write-Verbose $Result.Outcome; $state.Exported = $true; $state.ExportedResult = $Result }
+                Export = { param($Result,$RemainingSeconds) Write-Verbose "$($Result.Outcome) $RemainingSeconds"; $state.OperationOrder.Add('Export'); $state.Exported = $true; $state.ExportedResult = $Result }
             }
             foreach ($name in @($operations.Keys)) {
                 $operations[$name] = $operations[$name].GetNewClosure()
@@ -1145,6 +1165,99 @@ Describe 'Task 12 workload orchestration' {
         foreach ($entry in $schedule) {
             $entry.psobject.Properties.Name | Should -Be @('StartDate', 'EndDateExclusive', 'TerritoryID', 'TopCount')
         }
+    }
+
+    It 'acquires one exclusive run lock before preflight and releases it after final export' {
+        $fixture = Get-TestOperationSet
+
+        $result = Invoke-WorkshopExperiment -RunId ([guid]::NewGuid()) -OperationSet $fixture.Operations `
+            -MaximumDurationSeconds 120 -WorkerRampSeconds 20
+
+        $result.Outcome | Should -BeExactly 'TargetMet'
+        $fixture.State.LockAcquisitions | Should -BeExactly 1
+        $fixture.State.LockReleases | Should -BeExactly 1
+        $fixture.State.LockHeld | Should -BeFalse
+        $fixture.State.OperationOrder.IndexOf('AcquireRunLock') |
+            Should -BeLessThan $fixture.State.OperationOrder.IndexOf('CaptureEnvironment')
+        $fixture.State.OperationOrder.IndexOf('ReleaseRunLock') |
+            Should -BeGreaterThan $fixture.State.OperationOrder.IndexOf('Export')
+        $result.Evidence.environment.runIsolation | Should -BeExactly 'ExclusiveDatabaseApplicationLock'
+    }
+
+    It 'rejects a concurrent run before preflight or workers and exports schema-valid Failed evidence' {
+        $fixture = Get-TestOperationSet
+        $fixture.State.LockResult = -1
+        $runId = [guid]::NewGuid()
+        $fixture.Operations.Export = {
+            param($Result,$RemainingSeconds)
+            Write-Verbose $RemainingSeconds
+            Export-WorkshopEvidenceFile -RunId $Result.RunId.ToString('D') -Evidence $Result.Evidence `
+                -RepositoryRoot $TestDrive -SemanticValidator { $true }
+            $fixture.State.Exported = $true
+        }.GetNewClosure()
+        $fixture.Operations.ReleaseRunLock = {
+            param($RemainingSeconds)
+            $fixture.State.OperationOrder.Add('ReleaseRunLock')
+            $fixture.State.Now = $fixture.State.Now.AddSeconds($RemainingSeconds)
+            $fixture.State.LockHeld = $false
+            $fixture.State.LockReleases++
+        }.GetNewClosure()
+
+        $result = Invoke-WorkshopExperiment -RunId $runId -OperationSet $fixture.Operations `
+            -MaximumDurationSeconds 120 -WorkerRampSeconds 20
+
+        $result.Outcome | Should -BeExactly 'Failed'
+        $result.Evidence.terminationEvidence.failure.code | Should -BeExactly 'CONCURRENT_RUN_REJECTED'
+        $result.Evidence.terminationEvidence.failure.stage | Should -BeExactly 'ConcurrentRunRejected'
+        $result.Evidence.terminationEvidence.failure.startupFailure | Should -BeTrue
+        $fixture.State.Starts.Count | Should -Be 0
+        $fixture.State.OperationOrder | Should -Not -Contain 'CaptureEnvironment'
+        $fixture.State.KillCalls | Should -Be 0
+        $fixture.State.Persisted.Count | Should -Be 0
+        $fixture.State.LockReleases | Should -Be 0
+        $fixture.State.Exported | Should -BeTrue
+        $jsonPath = Join-Path $TestDrive "evidence/runs/$($runId.ToString('D'))/evidence.json"
+        $python = Join-Path $PSScriptRoot '../../.venv/Scripts/python.exe'
+        $validator = Join-Path $PSScriptRoot '../../evidence/validate_evidence.py'
+        $schema = Join-Path $PSScriptRoot '../../evidence/evidence-schema.json'
+        & $python $validator --schema $schema $jsonPath | Out-Null
+        $LASTEXITCODE | Should -Be 0
+    }
+
+    It 'releases an owned run lock on startup, workload, and finalization failures' -ForEach @(
+        @{ FailurePoint = 'CaptureEnvironment' }
+        @{ FailurePoint = 'Sample' }
+        @{ FailurePoint = 'Persist' }
+        @{ FailurePoint = 'Export' }
+    ) {
+        $fixture = Get-TestOperationSet
+        $fixture.Operations[$FailurePoint] = { throw "injected $FailurePoint failure" }.GetNewClosure()
+
+        try {
+            [void](Invoke-WorkshopExperiment -RunId ([guid]::NewGuid()) -OperationSet $fixture.Operations `
+                -MaximumDurationSeconds 120 -WorkerRampSeconds 20)
+        }
+        catch { Write-Verbose $_ }
+
+        $fixture.State.LockAcquisitions | Should -BeExactly 1
+        $fixture.State.LockReleases | Should -BeExactly 1
+        $fixture.State.LockHeld | Should -BeFalse
+    }
+
+    It 'never copies connection details from lock errors into evidence' {
+        $fixture = Get-TestOperationSet
+        $fixture.Operations.AcquireRunLock = {
+            throw 'tcp:private.example AdventureWorks2022 operator canary'
+        }
+
+        $result = Invoke-WorkshopExperiment -RunId ([guid]::NewGuid()) -OperationSet $fixture.Operations `
+            -MaximumDurationSeconds 120 -WorkerRampSeconds 20
+
+        $result.Outcome | Should -BeExactly 'Failed'
+        ($result.Evidence | ConvertTo-Json -Depth 30) |
+            Should -Not -Match 'private\.example|AdventureWorks2022|operator|canary'
+        $result.Evidence.terminationEvidence.failure.stage | Should -BeExactly 'RunLockAcquisition'
+        $result.Evidence.terminationEvidence.failure.code | Should -BeExactly 'RUN_LOCK_ACQUISITION_FAILED'
     }
 
     It 'rejects a worker ramp interval below twenty seconds' {
@@ -1293,7 +1406,7 @@ Describe 'Task 12 workload orchestration' {
             Select-Object -ExpandProperty Deadline -Unique)
         $baselineDeadlines | Should -Be @([datetimeoffset]'2026-09-01T10:06:00Z')
         $optimizedDeadlines.Count | Should -Be 1
-        $optimizedDeadlines[0] | Should -BeExactly ([datetimeoffset]'2026-09-01T10:09:14Z')
+        $optimizedDeadlines[0] | Should -BeExactly ([datetimeoffset]'2026-09-01T10:09:12Z')
         $optimizedDeadlines[0] | Should -BeGreaterThan $baselineDeadlines[0]
         $optimizedDeadlines[0] | Should -BeLessThan ([datetimeoffset]'2026-09-01T10:10:00Z')
 
@@ -1332,9 +1445,36 @@ Describe 'Task 12 workload orchestration' {
         $budget.AncillaryOperations.Name | Should -Contain 'FinalFingerprint'
         $budget.AncillaryOperations.Name | Should -Contain 'CorrectnessLinkage'
         $budget.AncillaryOperations.Name | Should -Contain 'Persistence'
+        $budget.AncillaryOperations.Name | Should -Contain 'Export'
+        $budget.AncillaryOperations.Name | Should -Contain 'RunLockRelease'
         $budget.CleanupMarginSeconds | Should -BeGreaterOrEqual 1
         ($budget.PreComparisonMinimumSeconds + $budget.TotalReservedSeconds) |
             Should -BeLessOrEqual 600
+    }
+
+    It 'keeps normal persistence and export inside the global duration when both consume their budgets' {
+        $fixture = Get-TestOperationSet
+        $fixture.Operations.Persist = {
+            param($Record,$RemainingSeconds)
+            $fixture.State.OperationOrder.Add('Persist')
+            $fixture.State.Now = $fixture.State.Now.AddSeconds($RemainingSeconds)
+            $fixture.State.Persisted.Add($Record)
+        }.GetNewClosure()
+        $fixture.Operations.Export = {
+            param($Result,$RemainingSeconds)
+            Write-Verbose $Result.Outcome
+            $fixture.State.OperationOrder.Add('Export')
+            $fixture.State.Now = $fixture.State.Now.AddSeconds($RemainingSeconds)
+            $fixture.State.Exported = $true
+        }.GetNewClosure()
+
+        $result = Invoke-WorkshopExperiment -RunId ([guid]::NewGuid()) -OperationSet $fixture.Operations `
+            -MaximumDurationSeconds 120 -WorkerRampSeconds 20
+
+        $result.Outcome | Should -BeExactly 'TargetMet'
+        $fixture.State.Now | Should -BeLessOrEqual ([datetimeoffset]'2026-09-01T10:02:00Z')
+        $result.Evidence.terminationEvidence.finalizationOverrunMs | Should -BeExactly 0
+        $result.Evidence.terminationEvidence.warnings | Should -BeNullOrEmpty
     }
 
     It 'shrinks comparison budgets for shorter durations and rejects sixty seconds before workload starts' {
@@ -1540,6 +1680,9 @@ Describe 'Task 12 workload orchestration' {
 
         $result.Outcome | Should -BeExactly 'Failed'
         $result.TerminationEvidence.Timeout | Should -BeTrue
+        $result.Evidence.terminationEvidence.finalizationOverrunMs | Should -BeGreaterThan 0
+        $result.Evidence.terminationEvidence.warnings | Should -Contain `
+            'Emergency finalization exceeded the workload wall-clock deadline.'
         $result.Trials.Count | Should -Be 0
         $result.Validation.Passed | Should -BeFalse
         $fixture.State.KillCalls | Should -BeGreaterOrEqual 1
@@ -2400,6 +2543,12 @@ Describe 'Task 12 remaining blocker contracts' {
         $module | Should -Match 'sys\.dm_db_stats_properties'
         $module | Should -Match 'OBJECT_DEFINITION'
         $module | Should -Match 'FrozenSettingsJson=@FrozenSettingsJson'
+        $module | Should -Match 'sys\.sp_getapplock'
+        $module | Should -Match "@LockMode\s*=\s*N'Exclusive'"
+        $module | Should -Match "@LockOwner\s*=\s*N'Session'"
+        $module | Should -Match '@LockTimeout\s*=\s*0'
+        $module | Should -Match 'sys\.sp_releaseapplock'
+        $module | Should -Match "@DbPrincipal\s*=\s*N'public'"
     }
 
     It 'caches the production preflight snapshot used for trial validation linkage' {
