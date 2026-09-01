@@ -22,6 +22,7 @@
     "requestSamples",
     "measuredPeaks",
     "correctness",
+    "terminationEvidence",
     "outcome"
   ],
   "properties": {
@@ -67,6 +68,7 @@
         { "type": "null" }
       ]
     },
+    "terminationEvidence": { "$ref": "#/$defs/terminationEvidence" },
     "outcome": {
       "oneOf": [
         { "$ref": "#/$defs/outcome" },
@@ -97,6 +99,14 @@
             }
           },
           "correctness": { "type": "null" },
+          "terminationEvidence": {
+            "properties": {
+              "manualStopRequested": { "const": false },
+              "safetyStopTriggered": { "const": false },
+              "safetyReasons": { "maxItems": 0 },
+              "timeout": { "const": false }
+            }
+          },
           "outcome": { "type": "null" }
         }
       }
@@ -130,33 +140,80 @@
           {
             "properties": {
               "status": { "const": "Completed" },
-              "outcome": {
-                "enum": ["TargetMet", "ImprovedOutsideTarget", "NoMaterialImprovement"]
+              "terminationEvidence": {
+                "properties": {
+                  "manualStopRequested": { "const": false },
+                  "safetyStopTriggered": { "const": false },
+                  "safetyReasons": { "maxItems": 0 }
+                }
+              }
+            },
+            "oneOf": [
+              {
+                "properties": {
+                  "outcome": { "enum": ["TargetMet", "ImprovedOutsideTarget"] },
+                  "terminationEvidence": {
+                    "properties": { "timeout": { "const": false } }
+                  }
+                }
+              },
+              {
+                "properties": {
+                  "outcome": { "const": "NoMaterialImprovement" }
+                }
+              }
+            ]
+          },
+          {
+            "properties": {
+              "status": { "const": "BaselineTargetNotReached" },
+              "outcome": { "const": "BaselineTargetNotReached" },
+              "terminationEvidence": {
+                "properties": {
+                  "manualStopRequested": { "const": false },
+                  "safetyStopTriggered": { "const": false },
+                  "safetyReasons": { "maxItems": 0 }
+                }
               }
             }
           },
           {
             "properties": {
-              "status": { "const": "BaselineTargetNotReached" },
-              "outcome": { "const": "BaselineTargetNotReached" }
-            }
-          },
-          {
-            "properties": {
               "status": { "const": "SafetyStop" },
-              "outcome": { "const": "SafetyStop" }
+              "outcome": { "const": "SafetyStop" },
+              "terminationEvidence": {
+                "properties": {
+                  "manualStopRequested": { "const": false },
+                  "safetyStopTriggered": { "const": true },
+                  "safetyReasons": { "minItems": 1 }
+                }
+              }
             }
           },
           {
             "properties": {
               "status": { "const": "ManualStop" },
-              "outcome": { "const": "ManualStop" }
+              "outcome": { "const": "ManualStop" },
+              "terminationEvidence": {
+                "properties": {
+                  "manualStopRequested": { "const": true },
+                  "safetyStopTriggered": { "const": false },
+                  "safetyReasons": { "maxItems": 0 }
+                }
+              }
             }
           },
           {
             "properties": {
               "status": { "const": "Failed" },
-              "outcome": { "const": "Failed" }
+              "outcome": { "const": "Failed" },
+              "terminationEvidence": {
+                "properties": {
+                  "manualStopRequested": { "const": false },
+                  "safetyStopTriggered": { "const": false },
+                  "safetyReasons": { "maxItems": 0 }
+                }
+              }
             }
           }
         ]
@@ -322,6 +379,27 @@
         "materialRegression": { "type": "boolean" },
         "additionalMetricImproved": { "type": "boolean" },
         "validationHash": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "terminationEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["manualStopRequested", "safetyStopTriggered", "safetyReasons", "timeout"],
+      "properties": {
+        "manualStopRequested": { "type": "boolean" },
+        "safetyStopTriggered": { "type": "boolean" },
+        "safetyReasons": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "timeout": { "type": "boolean" }
+      },
+      "not": {
+        "properties": {
+          "manualStopRequested": { "const": true },
+          "safetyStopTriggered": { "const": true }
+        },
+        "required": ["manualStopRequested", "safetyStopTriggered"]
       }
     },
     "outcome": {

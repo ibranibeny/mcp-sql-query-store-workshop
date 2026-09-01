@@ -46,6 +46,12 @@ def test_target_example_is_valid_and_truthfully_unmeasured(
     assert target["requestSamples"] == []
     assert target["measuredPeaks"] == {"baseline": None, "optimized": None}
     assert target["correctness"] is None
+    assert target["terminationEvidence"] == {
+        "manualStopRequested": False,
+        "safetyStopTriggered": False,
+        "safetyReasons": [],
+        "timeout": False,
+    }
     assert target["outcome"] is None
     assert target["targetBands"] == {
         "baseline": {"minimum": 75, "maximum": 85},
@@ -185,6 +191,76 @@ def test_lab_measured_requires_samples_end_outcome_and_correctness(
 
     measured["status"] = "SafetyStop"
     assert_invalid(validator, measured)
+
+
+def test_schema_requires_independent_consistent_termination_evidence(
+    validator: Draft202012Validator, target: dict
+) -> None:
+    assert "terminationEvidence" in target
+
+    contradictory = copy.deepcopy(target)
+    contradictory["terminationEvidence"].update(
+        manualStopRequested=True,
+        safetyStopTriggered=True,
+        safetyReasons=["pressure"],
+    )
+    assert_invalid(validator, contradictory)
+
+    false_target_stop = copy.deepcopy(target)
+    false_target_stop["terminationEvidence"]["manualStopRequested"] = True
+    assert_invalid(validator, false_target_stop)
+
+    safety = copy.deepcopy(target)
+    safety.update(
+        evidenceClassification="LAB-MEASURED",
+        disclaimer="LAB-MEASURED evidence captured from the identified workshop environment.",
+        phase="Comparison",
+        status="SafetyStop",
+        endUtc="2026-09-01T10:01:00.0000000Z",
+        samples=[
+            {
+                "sequence": 1,
+                "timestampUtc": "2026-09-01T10:00:05.0000000Z",
+                "phase": "Baseline",
+                "grantedKb": 800,
+                "totalKb": 1000,
+                "grantUtilizationPercent": 80,
+                "hostUsedPercent": 88,
+                "hostAvailableMB": 12000,
+                "processPhysicalLow": False,
+                "processVirtualLow": False,
+            }
+        ],
+        measuredPeaks={"baseline": 80, "optimized": None},
+        correctness={
+            "passed": False,
+            "materialRegression": False,
+            "additionalMetricImproved": False,
+            "validationHash": "c" * 64,
+        },
+        terminationEvidence={
+            "manualStopRequested": False,
+            "safetyStopTriggered": True,
+            "safetyReasons": ["Host memory utilization exceeded 87.5 percent."],
+            "timeout": False,
+        },
+        outcome="SafetyStop",
+    )
+    validator.validate(safety)
+
+    safety["terminationEvidence"]["safetyStopTriggered"] = False
+    assert_invalid(validator, safety)
+
+    healthy_timeout = copy.deepcopy(safety)
+    healthy_timeout["status"] = "Completed"
+    healthy_timeout["outcome"] = "TargetMet"
+    healthy_timeout["terminationEvidence"] = {
+        "manualStopRequested": False,
+        "safetyStopTriggered": False,
+        "safetyReasons": [],
+        "timeout": True,
+    }
+    assert_invalid(validator, healthy_timeout)
 
 
 def test_metric_ranges_and_outcome_enum_are_enforced(

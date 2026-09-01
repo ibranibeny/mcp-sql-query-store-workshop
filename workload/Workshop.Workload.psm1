@@ -11,6 +11,25 @@ $script:OutcomeValues = @(
 )
 $script:SecretNamePattern = '(?i)(password|passwd|pwd|secret|token|credential|connection.?string|private.?key)'
 
+function Resolve-CanonicalEnum {
+    param(
+        [Parameter(Mandatory)]
+        [string] $Value,
+
+        [Parameter(Mandatory)]
+        [string[]] $AllowedValues,
+
+        [Parameter(Mandatory)]
+        [string] $Name
+    )
+
+    $match = @($AllowedValues | Where-Object { $_ -ieq $Value })
+    if ($match.Count -ne 1) {
+        throw "Unknown $Name '$Value'."
+    }
+    return $match[0]
+}
+
 function ConvertTo-FiniteDecimal {
     param(
         [Parameter(Mandatory)]
@@ -522,7 +541,8 @@ function Get-WorkshopOutcome {
         [bool] $MaterialRegression,
 
         [Parameter()]
-        [bool] $AdditionalMetricImproved = $false,
+        [AllowNull()]
+        [Nullable[bool]] $AdditionalMetricImproved = $null,
 
         [Parameter()]
         [bool] $SafetyStopped = $false,
@@ -557,7 +577,8 @@ function Get-WorkshopOutcome {
     if (-not $CorrectnessPassed -or $null -eq $optimized) {
         return 'Failed'
     }
-    if ($MaterialRegression -or -not $AdditionalMetricImproved) {
+    if ($MaterialRegression -or
+        ($null -ne $AdditionalMetricImproved -and -not [bool] $AdditionalMetricImproved)) {
         return 'NoMaterialImprovement'
     }
     if (Test-TargetBand $optimized Optimized) {
@@ -606,6 +627,13 @@ function New-WorkshopRunRecord {
     Assert-TargetBand -TargetBands $TargetBands
     Assert-NoSecretField -InputObject $FrozenSettings
     Assert-NoSecretField -InputObject $EnvironmentFingerprint
+
+    $Phase = Resolve-CanonicalEnum $Phase @('Baseline', 'Optimized', 'Comparison', 'Target') 'phase'
+    $Status = Resolve-CanonicalEnum $Status @(
+        'Planned', 'Completed', 'BaselineTargetNotReached', 'SafetyStop', 'ManualStop', 'Failed'
+    ) 'status'
+    $EvidenceClassification = Resolve-CanonicalEnum `
+        $EvidenceClassification @('TARGET', 'LAB-MEASURED') 'evidence classification'
 
     $normalizedEndUtc = if ($null -eq $EndUtc) { $null } else { [datetimeoffset] $EndUtc }
     if ($null -ne $normalizedEndUtc -and $normalizedEndUtc -lt $StartUtc) {
@@ -681,10 +709,8 @@ function Assert-SampleCollection {
         }
         $previousTimestamp = $timestamp
 
-        $phase = Get-ObjectValue $sample phase -Required
-        if ($phase -notin @('Baseline', 'Optimized')) {
-            throw "Unknown sample phase '$phase'."
-        }
+        [void] (Resolve-CanonicalEnum `
+            (Get-ObjectValue $sample phase -Required) @('Baseline', 'Optimized') 'sample phase')
 
         if ($Request) {
             foreach ($name in @('durationMs', 'cpuMs', 'logicalReads', 'spillsMb', 'waitMs')) {
@@ -720,6 +746,78 @@ function Assert-SampleCollection {
     }
 }
 
+function ConvertTo-CanonicalSampleCollection {
+    param(
+        [Parameter(Mandatory)]
+        [AllowEmptyCollection()]
+        [object[]] $Samples
+    )
+
+    return @($Samples | ForEach-Object {
+        $canonical = ConvertTo-CanonicalValue $_
+        $canonical.phase = Resolve-CanonicalEnum `
+            (Get-ObjectValue $_ phase -Required) @('Baseline', 'Optimized') 'sample phase'
+        $canonical
+    })
+}
+
+function ConvertTo-TerminationEvidence {
+    param(
+        [Parameter()]
+        [AllowNull()]
+        [object] $TerminationEvidence
+    )
+
+    if ($null -eq $TerminationEvidence) {
+        return [ordered]@{
+            manualStopRequested = $false
+            safetyStopTriggered = $false
+            safetyReasons = @()
+            timeout = $false
+        }
+    }
+
+    Assert-ExactProperty -InputObject $TerminationEvidence -RequiredNames @(
+        'manualStopRequested', 'safetyStopTriggered', 'safetyReasons', 'timeout'
+    ) -Context 'Termination evidence'
+    Assert-NoSecretField $TerminationEvidence
+    foreach ($name in @('manualStopRequested', 'safetyStopTriggered', 'timeout')) {
+        if ((Get-ObjectValue $TerminationEvidence $name -Required) -isnot [bool]) {
+            throw "Termination evidence field '$name' must be Boolean."
+        }
+    }
+
+    $reasonValue = Get-ObjectValue $TerminationEvidence safetyReasons -Required
+    if ($reasonValue -is [string] -or $reasonValue -isnot [System.Collections.IEnumerable]) {
+        throw 'safetyReasons must be an array of strings.'
+    }
+    $reasons = @($reasonValue)
+    foreach ($reason in $reasons) {
+        if ($reason -isnot [string] -or [string]::IsNullOrWhiteSpace($reason)) {
+            throw 'safetyReasons entries must be nonempty strings.'
+        }
+    }
+
+    $manual = Get-ObjectValue $TerminationEvidence manualStopRequested -Required
+    $safety = Get-ObjectValue $TerminationEvidence safetyStopTriggered -Required
+    if ($manual -and $safety) {
+        throw 'Manual and safety stop flags cannot both be set.'
+    }
+    if ($safety -and $reasons.Count -eq 0) {
+        throw 'A safety stop requires at least one safety reason.'
+    }
+    if (-not $safety -and $reasons.Count -ne 0) {
+        throw 'Safety reasons require the safety stop flag.'
+    }
+
+    return [ordered]@{
+        manualStopRequested = $manual
+        safetyStopTriggered = $safety
+        safetyReasons = $reasons
+        timeout = Get-ObjectValue $TerminationEvidence timeout -Required
+    }
+}
+
 function ConvertTo-WorkshopEvidence {
     [CmdletBinding()]
     param(
@@ -740,16 +838,22 @@ function ConvertTo-WorkshopEvidence {
 
         [Parameter()]
         [AllowNull()]
-        [string] $Outcome
+        [string] $Outcome,
+
+        [Parameter()]
+        [AllowNull()]
+        [object] $TerminationEvidence
     )
 
     Assert-NoSecretField -InputObject $RunRecord
-    $classification = Get-ObjectValue $RunRecord EvidenceClassification -Required
-    if ($classification -notin @('TARGET', 'LAB-MEASURED')) {
-        throw 'EvidenceClassification must be TARGET or LAB-MEASURED.'
-    }
-    $phase = Get-ObjectValue $RunRecord Phase -Required
-    $status = Get-ObjectValue $RunRecord Status -Required
+    $classification = Resolve-CanonicalEnum `
+        (Get-ObjectValue $RunRecord EvidenceClassification -Required) `
+        @('TARGET', 'LAB-MEASURED') 'evidence classification'
+    $phase = Resolve-CanonicalEnum (Get-ObjectValue $RunRecord Phase -Required) `
+        @('Baseline', 'Optimized', 'Comparison', 'Target') 'phase'
+    $status = Resolve-CanonicalEnum (Get-ObjectValue $RunRecord Status -Required) @(
+        'Planned', 'Completed', 'BaselineTargetNotReached', 'SafetyStop', 'ManualStop', 'Failed'
+    ) 'status'
     if ($classification -eq 'TARGET') {
         if ($phase -notin @('Target', 'Baseline') -or $status -ne 'Planned') {
             throw 'TARGET evidence requires Target or Baseline phase and Planned status.'
@@ -783,8 +887,11 @@ function ConvertTo-WorkshopEvidence {
     $targetBands = Get-ObjectValue $RunRecord TargetBands -Required
     Assert-EnvironmentFingerprint $environment
     Assert-TargetBand $targetBands
+    $Samples = @(ConvertTo-CanonicalSampleCollection $Samples)
+    $RequestSamples = @(ConvertTo-CanonicalSampleCollection $RequestSamples)
     Assert-SampleCollection -Samples $Samples -StartUtc $start -EndUtc $end
     Assert-SampleCollection -Samples $RequestSamples -StartUtc $start -EndUtc $end -Request
+    $termination = ConvertTo-TerminationEvidence $TerminationEvidence
 
     $baselinePeak = $null
     $optimizedPeak = $null
@@ -809,6 +916,10 @@ function ConvertTo-WorkshopEvidence {
         $baselinePeak = $null
         $optimizedPeak = $null
         $Outcome = $null
+        if ($termination.manualStopRequested -or $termination.safetyStopTriggered -or
+            $termination.safetyReasons.Count -ne 0 -or $termination.timeout) {
+            throw 'TARGET evidence cannot contain termination claims.'
+        }
     }
     else {
         if ($Samples.Count -eq 0 -or $null -eq $Validation -or $null -eq $end -or
@@ -827,14 +938,29 @@ function ConvertTo-WorkshopEvidence {
         if ((Get-ObjectValue $Validation validationHash -Required) -cnotmatch '^[a-f0-9]{64}$') {
             throw 'validationHash must be a SHA-256 hash.'
         }
-        if ($Outcome -notin $script:OutcomeValues) { throw "Unknown outcome '$Outcome'." }
+        $Outcome = Resolve-CanonicalEnum $Outcome $script:OutcomeValues 'outcome'
+        if ($termination.manualStopRequested -and $Outcome -cne 'ManualStop') {
+            throw 'A manual stop flag requires the ManualStop outcome.'
+        }
+        if ($termination.safetyStopTriggered -and $Outcome -cne 'SafetyStop') {
+            throw 'A safety stop flag requires the SafetyStop outcome.'
+        }
+        if ($Outcome -ceq 'ManualStop' -and -not $termination.manualStopRequested) {
+            throw 'ManualStop requires an independent manual stop flag.'
+        }
+        if ($Outcome -ceq 'SafetyStop' -and -not $termination.safetyStopTriggered) {
+            throw 'SafetyStop requires an independent safety stop flag.'
+        }
+        if ($Outcome -in @('TargetMet', 'ImprovedOutsideTarget') -and $termination.timeout) {
+            throw "Outcome '$Outcome' cannot claim a timeout."
+        }
         $expectedOutcome = Get-WorkshopOutcome -BaselinePeak $baselinePeak `
             -OptimizedPeak $optimizedPeak `
             -CorrectnessPassed (Get-ObjectValue $Validation passed -Required) `
             -MaterialRegression (Get-ObjectValue $Validation materialRegression -Required) `
             -AdditionalMetricImproved (Get-ObjectValue $Validation additionalMetricImproved -Required) `
-            -SafetyStopped ($Outcome -eq 'SafetyStop') `
-            -ManualStopped ($Outcome -eq 'ManualStop')
+            -SafetyStopped $termination.safetyStopTriggered `
+            -ManualStopped $termination.manualStopRequested
         if ($Outcome -cne $expectedOutcome) {
             throw "Outcome '$Outcome' does not match the measured evidence outcome '$expectedOutcome'."
         }
@@ -873,6 +999,7 @@ function ConvertTo-WorkshopEvidence {
         requestSamples = @($RequestSamples | ForEach-Object { ConvertTo-CanonicalValue $_ })
         measuredPeaks = [ordered]@{ baseline = $baselinePeak; optimized = $optimizedPeak }
         correctness = $correctness
+        terminationEvidence = $termination
         outcome = $Outcome
     }
 }

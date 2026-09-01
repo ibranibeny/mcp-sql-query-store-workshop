@@ -217,6 +217,22 @@ Describe 'Test-WorkshopSafetySample' {
 }
 
 Describe 'Get-WorkshopOutcome' {
+    It 'uses the prescribed calls without requiring an additional metric argument' -ForEach @(
+        @{ Baseline = 80; Optimized = 40; Expected = 'TargetMet' }
+        @{ Baseline = 80; Optimized = 51; Expected = 'ImprovedOutsideTarget' }
+    ) {
+        Get-WorkshopOutcome -BaselinePeak $Baseline -OptimizedPeak $Optimized `
+            -CorrectnessPassed $true -MaterialRegression $false |
+            Should -Be $Expected
+    }
+
+    It 'treats an explicitly false additional metric result as no material improvement' {
+        Get-WorkshopOutcome -BaselinePeak 80 -OptimizedPeak 40 `
+            -CorrectnessPassed $true -MaterialRegression $false `
+            -AdditionalMetricImproved $false |
+            Should -Be 'NoMaterialImprovement'
+    }
+
     It 'returns every exact evidence outcome according to precedence and gates' -ForEach @(
         @{ Expected = 'ManualStop'; Baseline = 80; Optimized = 40; Correct = $true; Regression = $false; Extra = $true; Safety = $true; Manual = $true }
         @{ Expected = 'SafetyStop'; Baseline = 80; Optimized = 40; Correct = $true; Regression = $false; Extra = $true; Safety = $true; Manual = $false }
@@ -262,6 +278,16 @@ Describe 'Get-WorkshopOutcome' {
 }
 
 Describe 'New-WorkshopRunRecord' {
+    It 'canonicalizes case-insensitive enum inputs to schema casing' {
+        $record = New-WorkshopRunRecord -Phase baseline -Status planned `
+            -EvidenceClassification target -FrozenSettings (Get-TestSetting) `
+            -EnvironmentFingerprint (Get-TestEnvironment) -TargetBands (Get-TestTargetBand)
+
+        $record.Phase | Should -BeExactly 'Baseline'
+        $record.Status | Should -BeExactly 'Planned'
+        $record.EvidenceClassification | Should -BeExactly 'TARGET'
+    }
+
     It 'creates UTC identity metadata and deterministic immutable settings' {
         $settingsA = Get-TestSetting
         $settingsB = [ordered]@{}
@@ -350,13 +376,111 @@ Describe 'ConvertTo-WorkshopEvidence' {
             'schemaVersion', 'evidenceClassification', 'disclaimer', 'runId', 'phase', 'status',
             'startUtc', 'endUtc', 'environment', 'frozenSettings', 'frozenSettingsJson',
             'frozenSettingsHash', 'targetBands', 'samples', 'requestSamples', 'measuredPeaks',
-            'correctness', 'outcome'
+            'correctness', 'terminationEvidence', 'outcome'
         )
         ($first | ConvertTo-Json -Depth 20 -Compress) | Should -Be `
             ($second | ConvertTo-Json -Depth 20 -Compress)
         $first.measuredPeaks.baseline | Should -Be 80
         $first.measuredPeaks.optimized | Should -Be 40
         $first.targetBands.baseline.minimum | Should -Be 75
+        $first.terminationEvidence | ConvertTo-Json -Compress | Should -Be `
+            '{"manualStopRequested":false,"safetyStopTriggered":false,"safetyReasons":[],"timeout":false}'
+    }
+
+    It 'canonicalizes lowercase record, sample, classification, and outcome values' {
+        $run = Get-MeasuredRun
+        $run.Phase = 'comparison'
+        $run.Status = 'completed'
+        $run.EvidenceClassification = 'lab-measured'
+        $samples = Get-ValidSample
+        $samples[0].phase = 'baseline'
+        $samples[1].phase = 'optimized'
+        $requests = Get-ValidRequestSample
+        $requests[0].phase = 'baseline'
+        $requests[1].phase = 'optimized'
+
+        $result = ConvertTo-WorkshopEvidence -RunRecord $run -Samples $samples `
+            -RequestSamples $requests -Validation (Get-ValidValidation) -Outcome targetmet
+
+        $result.evidenceClassification | Should -BeExactly 'LAB-MEASURED'
+        $result.phase | Should -BeExactly 'Comparison'
+        $result.status | Should -BeExactly 'Completed'
+        $result.samples.phase | Should -BeExactly @('Baseline', 'Optimized')
+        $result.requestSamples.phase | Should -BeExactly @('Baseline', 'Optimized')
+        $result.outcome | Should -BeExactly 'TargetMet'
+    }
+
+    It 'requires independent safety termination evidence for SafetyStop' {
+        $run = Get-MeasuredRun
+        $run.Status = 'SafetyStop'
+        $termination = [ordered]@{
+            manualStopRequested = $false
+            safetyStopTriggered = $true
+            safetyReasons = @('Host memory utilization exceeded 87.5 percent.')
+            timeout = $false
+        }
+
+        $result = ConvertTo-WorkshopEvidence -RunRecord $run -Samples (Get-ValidSample) `
+            -RequestSamples (Get-ValidRequestSample) -Validation (Get-ValidValidation) `
+            -TerminationEvidence $termination -Outcome safetystop
+        $result.outcome | Should -BeExactly 'SafetyStop'
+        $result.terminationEvidence.safetyStopTriggered | Should -BeTrue
+
+        $termination.safetyStopTriggered = $false
+        { ConvertTo-WorkshopEvidence -RunRecord $run -Samples (Get-ValidSample) `
+                -RequestSamples (Get-ValidRequestSample) -Validation (Get-ValidValidation) `
+                -TerminationEvidence $termination -Outcome SafetyStop } | Should -Throw
+    }
+
+    It 'requires independent manual termination evidence for ManualStop' {
+        $run = Get-MeasuredRun
+        $run.Status = 'ManualStop'
+        $termination = [ordered]@{
+            manualStopRequested = $true
+            safetyStopTriggered = $false
+            safetyReasons = @()
+            timeout = $false
+        }
+
+        { ConvertTo-WorkshopEvidence -RunRecord $run -Samples (Get-ValidSample) `
+                -RequestSamples (Get-ValidRequestSample) -Validation (Get-ValidValidation) `
+                -TerminationEvidence $termination -Outcome ManualStop } | Should -Not -Throw
+
+        $termination.manualStopRequested = $false
+        { ConvertTo-WorkshopEvidence -RunRecord $run -Samples (Get-ValidSample) `
+                -RequestSamples (Get-ValidRequestSample) -Validation (Get-ValidValidation) `
+                -TerminationEvidence $termination -Outcome ManualStop } | Should -Throw
+    }
+
+    It 'rejects contradictory or false stop claims in termination evidence' {
+        $run = Get-MeasuredRun
+        $bothStops = [ordered]@{
+            manualStopRequested = $true
+            safetyStopTriggered = $true
+            safetyReasons = @('pressure')
+            timeout = $false
+        }
+        { ConvertTo-WorkshopEvidence -RunRecord $run -Samples (Get-ValidSample) `
+                -RequestSamples (Get-ValidRequestSample) -Validation (Get-ValidValidation) `
+                -TerminationEvidence $bothStops -Outcome TargetMet } | Should -Throw
+
+        $falseStop = [ordered]@{
+            manualStopRequested = $true
+            safetyStopTriggered = $false
+            safetyReasons = @()
+            timeout = $false
+        }
+        { ConvertTo-WorkshopEvidence -RunRecord $run -Samples (Get-ValidSample) `
+                -RequestSamples (Get-ValidRequestSample) -Validation (Get-ValidValidation) `
+                -TerminationEvidence $falseStop -Outcome TargetMet } | Should -Throw
+    }
+
+    It 'still requires independently measured metric improvement for measured success' {
+        $validation = Get-ValidValidation
+        $validation.additionalMetricImproved = $false
+        { ConvertTo-WorkshopEvidence -RunRecord (Get-MeasuredRun) -Samples (Get-ValidSample) `
+                -RequestSamples (Get-ValidRequestSample) -Validation $validation `
+                -Outcome TargetMet } | Should -Throw
     }
 
     It 'emits target evidence with no measured claims' {

@@ -48,5 +48,11 @@
     "optimized": null
   },
   "correctness": null,
+  "terminationEvidence": {
+    "manualStopRequested": false,
+    "safetyStopTriggered": false,
+    "safetyReasons": [],
+    "timeout": false
+  },
   "outcome": null
 }
