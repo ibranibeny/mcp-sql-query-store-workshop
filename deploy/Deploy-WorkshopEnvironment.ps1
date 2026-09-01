@@ -239,6 +239,7 @@ if (-not $PSCmdlet.ShouldProcess($config.ResourceGroupName, 'Create the approved
     }
 }
 
+$deploymentId = [guid]::NewGuid().ToString('D')
 $config.Tags.expiresOn = ([datetime] $ExpiresOn).Date.ToString(
     'yyyy-MM-dd',
     [System.Globalization.CultureInfo]::InvariantCulture
@@ -323,6 +324,7 @@ try {
         McpReaderPassword = $McpReaderPassword
         RepositoryUrl = $RepositoryUrl
         RepositoryCommit = $RepositoryCommit
+        DeploymentId = $deploymentId
     }
     if ($Operations.ContainsKey('BootstrapOperations')) {
         $sqlBootstrapParameters.Operations = $Operations.BootstrapOperations
@@ -337,7 +339,9 @@ try {
         McpReaderPassword = $McpReaderPassword
         RepositoryUrl = $RepositoryUrl
         RepositoryCommit = $RepositoryCommit
+        DeploymentId = $deploymentId
         InteractiveUserName = $Credential.UserName
+        WindowsClientLicenseAttested = $WindowsClientLicenseAttested.IsPresent
         SqlReadiness = $sqlBootstrap.Readiness
     }
     if ($Operations.ContainsKey('BootstrapOperations')) {

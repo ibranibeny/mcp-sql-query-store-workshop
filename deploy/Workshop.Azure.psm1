@@ -3239,6 +3239,7 @@ function Initialize-WorkshopSqlVm {
         [Parameter(Mandatory)][Security.SecureString] $McpReaderPassword,
         [Parameter(Mandatory)][ValidatePattern('^https://github\.com/[^/]+/[^/]+(?:\.git)?$')][string] $RepositoryUrl,
         [Parameter(Mandatory)][ValidatePattern('^[0-9a-f]{40}$')][string] $RepositoryCommit,
+        [Parameter(Mandatory)][ValidatePattern('^[0-9a-fA-F-]{36}$')][string] $DeploymentId,
         [hashtable] $Operations
     )
 
@@ -3261,6 +3262,7 @@ function Initialize-WorkshopSqlVm {
             LogDiskGiB = [int] $Config.SqlVm.LogDiskGiB
             RepositoryRoot = 'C:\McpSqlWorkshop\repo'
             RepositoryCommit = $RepositoryCommit
+            DeploymentId = $DeploymentId
             DatabaseMasterKeySecret = $masterKeySecret
             McpReaderSecret = $readerSecret
         }
@@ -3285,7 +3287,9 @@ function Initialize-WorkshopAdminVm {
         [Parameter(Mandatory)][Security.SecureString] $McpReaderPassword,
         [Parameter(Mandatory)][ValidatePattern('^https://github\.com/[^/]+/[^/]+(?:\.git)?$')][string] $RepositoryUrl,
         [Parameter(Mandatory)][ValidatePattern('^[0-9a-f]{40}$')][string] $RepositoryCommit,
+        [Parameter(Mandatory)][ValidatePattern('^[0-9a-fA-F-]{36}$')][string] $DeploymentId,
         [Parameter(Mandatory)][ValidateNotNullOrEmpty()][string] $InteractiveUserName,
+        [Parameter(Mandatory)][bool] $WindowsClientLicenseAttested,
         [Parameter(Mandatory)][psobject] $SqlReadiness,
         [string] $NugetPackagesPath,
         [string] $NugetConfigPath,
@@ -3311,10 +3315,13 @@ function Initialize-WorkshopAdminVm {
             RepositoryRoot = 'C:\McpSqlWorkshop\workspace'
             RepositoryUrl = $RepositoryUrl
             RepositoryCommit = $RepositoryCommit
+            DeploymentId = $DeploymentId
             InteractiveUserName = $InteractiveUserName
+            WindowsClientLicenseAttested = $WindowsClientLicenseAttested
             McpReaderSecret = $readerSecret
             PublicCertificateBase64 = [string] $publicCertificate
-            CertificateFingerprint = [string] $SqlReadiness.Certificate.PublicCertificateSha256
+            PublicCertificateSha256 = [string] $SqlReadiness.Certificate.PublicCertificateSha256
+            CertificateThumbprint = [string] $SqlReadiness.Certificate.Thumbprint
             NugetPackagesPath = $NugetPackagesPath
             NugetConfigPath = $NugetConfigPath
         }
@@ -3339,27 +3346,92 @@ function Test-WorkshopReadiness {
     )
 
     $checks = [System.Collections.Generic.List[object]]::new()
+    function Get-ReadinessValue {
+        param([AllowNull()][object] $Record, [Parameter(Mandatory)][string] $Path)
+        $value = $Record
+        foreach ($segment in $Path.Split('.')) {
+            if ($null -eq $value) { return $null }
+            $property = $value.PSObject.Properties[$segment]
+            if ($null -eq $property) { return $null }
+            $value = $property.Value
+        }
+        $value
+    }
+    function Test-ExactSet {
+        param([AllowNull()][object[]] $Actual, [Parameter(Mandatory)][string[]] $Expected)
+        $actualSet = @($Actual | ForEach-Object { [string]$_ } | Sort-Object -Unique)
+        ($actualSet | ConvertTo-Json -Compress) -ceq (($Expected | Sort-Object) | ConvertTo-Json -Compress)
+    }
     $expectedTools = @(
         'aggregate_records', 'compare_workshop_runs', 'describe_entities', 'execute_entity',
         'get_active_workshop_grants', 'get_memory_snapshot', 'get_procedure_plan_summary',
         'get_query_store_top_queries', 'get_query_store_waits', 'read_records'
     )
-    $actualTools = @($AdminReadiness.Mcp.ToolNames | Sort-Object -Unique)
-    $exactToolAllowlist = ($actualTools | ConvertTo-Json -Compress) -ceq
-        (($expectedTools | Sort-Object) | ConvertTo-Json -Compress)
+    $expectedPackages = @('Microsoft.VisualStudioCode', 'Microsoft.SQLServerManagementStudio', 'Microsoft.DotNet.SDK.9', 'Git.Git', 'GitHub.cli')
+    $expectedExtensions = @('ms-mssql.mssql', 'GitHub.copilot', 'GitHub.copilot-chat', 'ms-vscode.powershell')
+    $actualTools = @(Get-ReadinessValue $AdminReadiness 'Mcp.ToolNames')
+    $exactToolAllowlist = Test-ExactSet -Actual $actualTools -Expected $expectedTools
+    $packageRecords = @(Get-ReadinessValue $AdminReadiness 'Tools.WingetPackages')
+    $packageIds = @($packageRecords | ForEach-Object { Get-ReadinessValue $_ 'Id' })
+    $packageVersionsObserved = $packageRecords.Count -eq $expectedPackages.Count -and
+        @($packageRecords | Where-Object { [string]::IsNullOrWhiteSpace([string](Get-ReadinessValue $_ 'VersionReadback')) }).Count -eq 0
+    $extensionRecords = @(Get-ReadinessValue $AdminReadiness 'Tools.Extensions')
+    $extensionIds = @($extensionRecords | ForEach-Object { ([string]$_ -split '@')[0] })
+    $disks = @(Get-ReadinessValue $SqlReadiness 'Disks')
+    $dataDisk = @($disks | Where-Object { (Get-ReadinessValue $_ 'Lun') -eq 0 })
+    $logDisk = @($disks | Where-Object { (Get-ReadinessValue $_ 'Lun') -eq 1 })
+    $tempDbFiles = @(Get-ReadinessValue $SqlReadiness 'TempDb.Files')
+    $tempDbRoot = [string](Get-ReadinessValue $SqlReadiness 'TempDb.ApprovedRoot')
+    $tempDbPrefix = if ([string]::IsNullOrWhiteSpace($tempDbRoot)) { '' } else { $tempDbRoot.TrimEnd('\') + '\' }
+    $tempDbPathsValid = $tempDbFiles.Count -ge 2 -and -not [string]::IsNullOrWhiteSpace($tempDbPrefix) -and
+        @($tempDbFiles | Where-Object { -not ([string](Get-ReadinessValue $_ 'PhysicalName')).StartsWith($tempDbPrefix, [StringComparison]::OrdinalIgnoreCase) }).Count -eq 0
+    $thumbprint = [string](Get-ReadinessValue $SqlReadiness 'Certificate.Thumbprint')
+    $publicHash = [string](Get-ReadinessValue $SqlReadiness 'Certificate.PublicCertificateSha256')
+    $sqlCommit = [string](Get-ReadinessValue $SqlReadiness 'Repository.Commit')
+    $adminCommit = [string](Get-ReadinessValue $AdminReadiness 'Repository.Commit')
+    $deploymentId = [string](Get-ReadinessValue $SqlReadiness 'DeploymentId')
+    $adminDeploymentId = [string](Get-ReadinessValue $AdminReadiness 'DeploymentId')
+    $authStatus = [string](Get-ReadinessValue $AdminReadiness 'Auth.GitHubCliAuthStatus')
+    $activation = [string](Get-ReadinessValue $AdminReadiness 'Vm.Activation')
+    [guid]$parsedDeploymentId = [guid]::Empty
+    $deploymentIdValid = [guid]::TryParseExact($deploymentId, 'D', [ref]$parsedDeploymentId) -and
+        $parsedDeploymentId.ToString('D') -ceq $deploymentId
+    [version]$parsedDabVersion = [version]'0.0'
+    $dabVersionValid = [version]::TryParse(
+        [regex]::Match([string](Get-ReadinessValue $AdminReadiness 'Tools.DAB'), '\d+\.\d+\.\d+').Value,
+        [ref]$parsedDabVersion
+    ) -and $parsedDabVersion -ge [version]'2.0.9'
     foreach ($check in @(
-        @{ Name = 'SQL readiness completed'; Passed = $SqlReadiness.Completed -eq $true }
-        @{ Name = 'SQL private boundary'; Passed = $SqlReadiness.Vm.PublicIp -eq $false }
-        @{ Name = 'SQL encryption forced'; Passed = $SqlReadiness.Sql.Encryption -ceq 'Forced' -and $SqlReadiness.Sql.EncryptOption -ceq 'TRUE' }
-        @{ Name = 'SQL backup verified'; Passed = $SqlReadiness.Backup.VerifyOnly -eq $true }
-        @{ Name = 'Administration readiness completed'; Passed = $AdminReadiness.Completed -eq $true }
-        @{ Name = 'Administration SQL TLS'; Passed = $AdminReadiness.SqlTls.EncryptOption -ceq 'TRUE' -and $AdminReadiness.SqlTls.TrustServerCertificate -eq $false }
-        @{ Name = 'MCP configuration and exact tool allowlist valid'; Passed = $AdminReadiness.Mcp.ConfigValid -eq $true -and $AdminReadiness.Mcp.ForbiddenMutationTools -eq $false -and $exactToolAllowlist }
-        @{ Name = 'Interactive authentication remains explicit'; Passed = $AdminReadiness.AuthStatus -ceq 'AuthRequired' }
+        @{ Name = 'Readiness records complete and sanitized'; Passed = (Get-ReadinessValue $SqlReadiness 'Completed') -eq $true -and (Get-ReadinessValue $AdminReadiness 'Completed') -eq $true -and (Get-ReadinessValue $SqlReadiness 'SchemaVersion') -ceq '1.0' -and (Get-ReadinessValue $AdminReadiness 'SchemaVersion') -ceq '1.0' -and (Get-ReadinessValue $SqlReadiness 'Evidence.Sanitized') -eq $true -and (Get-ReadinessValue $AdminReadiness 'Evidence.Sanitized') -eq $true }
+        @{ Name = 'Cross-record deployment identity'; Passed = $deploymentIdValid -and $adminDeploymentId -ceq $deploymentId }
+        @{ Name = 'Cross-record immutable repository commit'; Passed = $sqlCommit -match '^[0-9a-f]{40}$' -and $adminCommit -ceq $sqlCommit }
+        @{ Name = 'SQL VM exact identity and private boundary'; Passed = (Get-ReadinessValue $SqlReadiness 'Vm.Name') -ceq 'vm-mcpsql-sql' -and (Get-ReadinessValue $SqlReadiness 'Vm.Size') -ceq 'Standard_E8s_v5' -and (Get-ReadinessValue $SqlReadiness 'Vm.Location') -ceq 'indonesiacentral' -and (Get-ReadinessValue $SqlReadiness 'Vm.PublicIp') -eq $false }
+        @{ Name = 'SQL VM Trusted Launch'; Passed = (Get-ReadinessValue $SqlReadiness 'Vm.SecureBoot') -eq $true -and (Get-ReadinessValue $SqlReadiness 'Vm.Tpm') -eq $true }
+        @{ Name = 'SQL Server exact product and service'; Passed = (Get-ReadinessValue $SqlReadiness 'Sql.Version') -eq 16 -and ([string](Get-ReadinessValue $SqlReadiness 'Sql.Edition')) -match 'Enterprise' -and -not [string]::IsNullOrWhiteSpace([string](Get-ReadinessValue $SqlReadiness 'Sql.Service')) -and (Get-ReadinessValue $SqlReadiness 'Sql.State') -ceq 'Running' -and (Get-ReadinessValue $SqlReadiness 'Sql.Port') -eq 1433 -and (Get-ReadinessValue $SqlReadiness 'Sql.BrowserStartupType') -ceq 'Disabled' }
+        @{ Name = 'SQL exact data and log disks'; Passed = $disks.Count -eq 2 -and $dataDisk.Count -eq 1 -and $logDisk.Count -eq 1 -and (Get-ReadinessValue $dataDisk[0] 'Drive') -ceq 'F:' -and (Get-ReadinessValue $dataDisk[0] 'Label') -ceq 'SQLData' -and (Get-ReadinessValue $dataDisk[0] 'AllocationUnitSize') -eq 65536 -and (Get-ReadinessValue $dataDisk[0] 'SizeGiB') -eq 256 -and (Get-ReadinessValue $logDisk[0] 'Drive') -ceq 'G:' -and (Get-ReadinessValue $logDisk[0] 'Label') -ceq 'SQLLog' -and (Get-ReadinessValue $logDisk[0] 'AllocationUnitSize') -eq 65536 -and (Get-ReadinessValue $logDisk[0] 'SizeGiB') -eq 128 }
+        @{ Name = 'TempDB complete approved placement'; Passed = (Get-ReadinessValue $SqlReadiness 'TempDb.EnoughSpace') -eq $true -and (Get-ReadinessValue $SqlReadiness 'TempDb.FileCount') -eq $tempDbFiles.Count -and $tempDbPathsValid -and (Get-ReadinessValue $SqlReadiness 'TempDb.AllFilesUnderApprovedRoot') -eq $true -and (Get-ReadinessValue $SqlReadiness 'TempDb.OldPathCount') -eq 0 -and ((Get-ReadinessValue $SqlReadiness 'TempDb.Storage') -ceq 'Temporary' -or ((Get-ReadinessValue $SqlReadiness 'TempDb.Storage') -ceq 'ManagedData' -and -not [string]::IsNullOrWhiteSpace([string](Get-ReadinessValue $SqlReadiness 'TempDb.Deviation')))) }
+        @{ Name = 'SQL firewall and Browser boundary'; Passed = (Get-ReadinessValue $SqlReadiness 'Firewall.Rule') -ceq 'MCP SQL Workshop 1433' -and (Get-ReadinessValue $SqlReadiness 'Firewall.RemoteAddress') -ceq '10.20.1.0/24' -and (Get-ReadinessValue $SqlReadiness 'Firewall.BroadRule') -eq $false }
+        @{ Name = 'SQL exact TLS registry and certificate'; Passed = $thumbprint -match '^[A-F0-9]{40}$' -and (Get-ReadinessValue $SqlReadiness 'Certificate.RegistryCertificate') -ceq $thumbprint -and (Get-ReadinessValue $SqlReadiness 'Certificate.StoreThumbprint') -ceq $thumbprint -and (Get-ReadinessValue $SqlReadiness 'Certificate.PublicCertificateThumbprint') -ceq $thumbprint -and (Get-ReadinessValue $SqlReadiness 'Certificate.ForceEncryption') -eq 1 -and (Get-ReadinessValue $SqlReadiness 'Certificate.HasPrivateKey') -eq $true -and (Get-ReadinessValue $SqlReadiness 'Certificate.ServerAuthenticationEku') -eq $true -and (Get-ReadinessValue $SqlReadiness 'Certificate.SanVerified') -eq $true -and (Get-ReadinessValue $SqlReadiness 'Certificate.ServiceKeyAclVerified') -eq $true -and (Get-ReadinessValue $SqlReadiness 'Certificate.PrivateKeyExported') -eq $false -and $publicHash -match '^[A-F0-9]{64}$' -and (Get-ReadinessValue $SqlReadiness 'Certificate.TlsLoadFailures') -eq 0 -and (Get-ReadinessValue $SqlReadiness 'Certificate.StartupBindingEvidence') -in @('ExactThumbprint', 'DeferredRemoteValidation') }
+        @{ Name = 'SQL backup and database configuration'; Passed = (Get-ReadinessValue $SqlReadiness 'Backup.VerifyOnly') -eq $true -and ([string](Get-ReadinessValue $SqlReadiness 'Backup.Sha256')) -match '^[A-F0-9]{64}$' -and (Get-ReadinessValue $SqlReadiness 'Database.Marker') -ceq '68A70D6E-62D8-4A77-8F0A-9DA7934DBA7C' -and (Get-ReadinessValue $SqlReadiness 'Database.QueryStore') -ceq 'READ_WRITE' -and (Get-ReadinessValue $SqlReadiness 'Database.ResourceGovernor') -ceq 'Enabled' -and (Get-ReadinessValue $SqlReadiness 'Database.ProcedureCount') -eq 8 }
+        @{ Name = 'Administration VM exact identity and security'; Passed = (Get-ReadinessValue $AdminReadiness 'Vm.Name') -ceq 'vm-mcpsql-admin' -and (Get-ReadinessValue $AdminReadiness 'Vm.Size') -ceq 'Standard_D4s_v5' -and (Get-ReadinessValue $AdminReadiness 'Vm.Location') -ceq 'indonesiacentral' -and (Get-ReadinessValue $AdminReadiness 'Vm.AdminPublicIpBoundaryObserved') -eq $true -and (Get-ReadinessValue $AdminReadiness 'Vm.PublicIpCount') -eq 1 -and (Get-ReadinessValue $AdminReadiness 'Vm.SecureBoot') -eq $true -and (Get-ReadinessValue $AdminReadiness 'Vm.Tpm') -eq $true -and ([string](Get-ReadinessValue $AdminReadiness 'Vm.Os')) -match 'Windows 11 Enterprise' -and [int](Get-ReadinessValue $AdminReadiness 'Vm.Build') -ge 26100 -and (Get-ReadinessValue $AdminReadiness 'Vm.WindowsClientLicenseAttested') -eq $true -and $activation -in @('Licensed', 'ObservedUnknown') }
+        @{ Name = 'Administration exact tools and extensions'; Passed = (Test-ExactSet -Actual $packageIds -Expected $expectedPackages) -and $packageVersionsObserved -and (Test-ExactSet -Actual $extensionIds -Expected $expectedExtensions) -and $dabVersionValid }
+        @{ Name = 'Administration root environment ACL'; Passed = (Get-ReadinessValue $AdminReadiness 'RootEnvAcl.Path') -ceq 'C:\McpSqlWorkshop\workspace\.env' -and (Get-ReadinessValue $AdminReadiness 'RootEnvAcl.Restricted') -eq $true }
+        @{ Name = 'Administration private network checks'; Passed = (Get-ReadinessValue $AdminReadiness 'Network.DnsName') -ceq 'sql01.mcpworkshop.internal' -and (Get-ReadinessValue $AdminReadiness 'Network.ResolvedAddress') -ceq '10.20.2.10' -and (Get-ReadinessValue $AdminReadiness 'Network.Tcp1433') -eq $true }
+        @{ Name = 'Administration validated SQL TLS'; Passed = (Get-ReadinessValue $AdminReadiness 'SqlTls.EncryptOption') -ceq 'TRUE' -and (Get-ReadinessValue $AdminReadiness 'SqlTls.TrustServerCertificate') -eq $false -and (Get-ReadinessValue $AdminReadiness 'SqlTls.CertificateValidated') -eq $true -and (Get-ReadinessValue $AdminReadiness 'SqlTls.ValidationMethod') -ceq 'SqlClientChainHostAndTransferredCertificate' -and (Get-ReadinessValue $AdminReadiness 'SqlTls.RemoteAdminTest') -eq $true -and (Get-ReadinessValue $AdminReadiness 'SqlTls.CertificateThumbprint') -ceq $thumbprint -and (Get-ReadinessValue $AdminReadiness 'SqlTls.PublicCertificateSha256') -ceq $publicHash -and (Get-ReadinessValue $AdminReadiness 'SqlTls.HostNameInCertificate') -ceq 'sql01.mcpworkshop.internal' }
+        @{ Name = 'MCP configuration and exact tool allowlist valid'; Passed = (Get-ReadinessValue $AdminReadiness 'Mcp.ConfigValid') -eq $true -and (Get-ReadinessValue $AdminReadiness 'Mcp.DabMinimumVersionMet') -eq $true -and (Get-ReadinessValue $AdminReadiness 'Mcp.ForbiddenMutationTools') -eq $false -and $exactToolAllowlist }
+        @{ Name = 'Authentication observations explicit'; Passed = $authStatus -in @('Authenticated', 'NotAuthenticated', 'Unavailable') -and (Get-ReadinessValue $AdminReadiness 'Auth.CopilotAuthStatus') -ceq 'InteractiveSignInRequired' }
     )) {
         Add-WorkshopCheck -Checks $checks -Name $check.Name -Passed ([bool]$check.Passed) `
             -Detail $(if ($check.Passed) { 'Verified.' } else { 'Not verified.' }) `
             -Remediation 'Correct the failed bootstrap checkpoint and rerun the idempotent bootstrap.'
+    }
+    if ($activation -ceq 'ObservedUnknown' -and (Get-ReadinessValue $AdminReadiness 'Vm.WindowsClientLicenseAttested') -eq $true) {
+        $checks.Add([pscustomobject][ordered]@{
+            Name = 'Administration activation observation'
+            Status = 'Warning'
+            Detail = 'Activation was observed but not confirmed; Windows client licensing was explicitly attested.'
+            Remediation = 'Confirm activation interactively before the workshop if required by organizational policy.'
+        })
     }
     [pscustomobject][ordered]@{
         Passed = @($checks | Where-Object Status -EQ 'Failed').Count -eq 0

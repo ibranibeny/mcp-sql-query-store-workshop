@@ -66,6 +66,48 @@ Describe 'SQL VM bootstrap static contract' {
         $text | Should -Match 'AllocationUnitSize'
     }
 
+    It 'preflights exact F and G assignments and never selects an alternate drive letter' {
+        $text = $script:SqlContract.Text
+        $text | Should -Match 'Get-Volume\s+-DriveLetter\s+\$PreferredDriveLetter'
+        $text | Should -Match 'Get-Partition\s+-DriveLetter\s+\$PreferredDriveLetter'
+        $text | Should -Match "PreferredDriveLetter\s+F"
+        $text | Should -Match "PreferredDriveLetter\s+G"
+        $text | Should -Not -Match '\[char\]\(\[int\]\$PreferredDriveLetter\s*\+'
+        $text | Should -Match 'Drive\s*=\s*"\$PreferredDriveLetter`:"'
+        $fPreflight = $text.IndexOf('PreferredDriveLetter F -PreflightOnly')
+        $gPreflight = $text.IndexOf('PreferredDriveLetter G -PreflightOnly')
+        $firstMutation = $text.IndexOf('Mount-WorkshopDisk -Lun 0 -ExpectedSizeGiB', $gPreflight + 1)
+        $fPreflight | Should -BeGreaterThan -1
+        $gPreflight | Should -BeGreaterThan $fPreflight
+        $firstMutation | Should -BeGreaterThan $gPreflight
+    }
+
+    It 'moves and verifies every TempDB file under one capacity-checked approved root' {
+        $text = $script:SqlContract.Text
+        $text | Should -Match 'FROM\s+tempdb\.sys\.database_files'
+        $text | Should -Match 'type_desc'
+        $text | Should -Match 'file_id'
+        $text | Should -Match 'QUOTENAME'
+        $text | Should -Match 'Get-PSDrive|SizeRemaining'
+        $text | Should -Match 'FileCount'
+        $text | Should -Match 'Files\s*='
+        $text | Should -Match 'OldPathCount'
+        $text | Should -Match 'AllFilesUnderApprovedRoot'
+        $text | Should -Not -Match '\$tempDbPathCount\s+-eq\s+2'
+    }
+
+    It 'uses resource TempDB only after safety validation and otherwise records managed fallback' {
+        $text = $script:SqlContract.Text
+        $text | Should -Match 'Get-Volume\s+-DriveLetter\s+D'
+        $text | Should -Match 'Get-Partition\s+-DriveLetter\s+D'
+        $text | Should -Match 'HealthStatus'
+        $text | Should -Match 'IsBoot'
+        $text | Should -Match 'IsSystem'
+        $text | Should -Match 'requiredTempDbBytes'
+        $text | Should -Match 'ManagedData'
+        $text | Should -Match 'TempDB placed on managed data disk'
+    }
+
     It 'configures SQL 1433, a narrow firewall rule, disabled Browser, and exact service restart readback' {
         $text = $script:SqlContract.Text
         $text | Should -Match 'TcpPort'
@@ -77,6 +119,10 @@ Describe 'SQL VM bootstrap static contract' {
         $text | Should -Match 'Restart-Service'
         $text | Should -Match 'Running'
         $text | Should -Not -Match '(?i)RemoteAddress\s+[''\"]?(Any|\*|0\.0\.0\.0/0)'
+        $text | Should -Match "Win32_Service\s+-Filter\s+`"Name='SQLBrowser'`""
+        $text | Should -Match 'browserService\.StartMode'
+        $text | Should -Match 'firewallAddressReadback'
+        $text | Should -Match 'RemoteAddress.*adminSubnet'
     }
 
     It 'creates non-exportable private-DNS TLS and exports only a public certificate' {
@@ -90,6 +136,21 @@ Describe 'SQL VM bootstrap static contract' {
         $text | Should -Match 'Certificate'
         $text | Should -Match 'Get-Acl|Set-Acl|CryptoKeySecurity'
         $text | Should -Not -Match 'Export-PfxCertificate|\.pfx'
+    }
+
+    It 'reads back the exact normalized TLS binding and rejects certificate load errors' {
+        $text = $script:SqlContract.Text
+        $text | Should -Match 'certificateThumbprint'
+        $text | Should -Match 'Get-ItemPropertyValue\s+-Path\s+\$tcpRoot\s+-Name\s+Certificate'
+        $text | Should -Match 'TlsLoadFailures'
+        $text | Should -Match 'failed\|failure\|could not\|unable\|not'
+        $text | Should -Match 'load\|initialize'
+        $text | Should -Match 'ErrorLogPath'
+        $text | Should -Not -Match "Get-ChildItem\s+-Path\s+'C:\\\\Program Files\\\\Microsoft SQL Server'.*-Recurse"
+        $text | Should -Match 'PublicCertificateThumbprint'
+        $text | Should -Match 'RegistryCertificate'
+        $text | Should -Match 'ForceEncryption'
+        $text | Should -Match 'storeCertificate'
     }
 
     It 'downloads only the official backup and records an observed SHA256 before invoking scripts 00 through 07' {
@@ -169,8 +230,10 @@ Describe 'Administration VM bootstrap static contract' {
         $text | Should -Match "'rev-parse',\s*'HEAD'"
         $text | Should -Match 'Import-Certificate'
         $text | Should -Match 'Get-FileHash'
-        $text | Should -Match 'CertificateFingerprint'
+        $text | Should -Match 'PublicCertificateSha256'
+        $text | Should -Match 'CertificateThumbprint'
         $text | Should -Not -Match 'Import-PfxCertificate|\.pfx'
+        $text | Should -Match 'SqlClientChainHostAndTransferredCertificate'
     }
 
     It 'creates only root env with restrictive ACL and verifies private DNS encrypted SQL and MCP allowlist' {
@@ -187,9 +250,33 @@ Describe 'Administration VM bootstrap static contract' {
             $text | Should -Match $tool
         }
         $text | Should -Match 'create-record|create_records|update-record|update_records|delete-record|delete_records'
-        $text | Should -Match 'AuthRequired'
+        $text | Should -Match 'GitHubCliAuthStatus'
+        $text | Should -Match 'CopilotAuthStatus'
+        $text | Should -Match 'InteractiveSignInRequired'
         $text | Should -Match 'Set-Acl'
         $text | Should -Not -Match 'mcp[/\\]\.env'
+    }
+
+    It 'observes GitHub CLI authentication without emitting token-bearing output' {
+        $functionAst = $script:AdminContract.Ast.Find({
+            param($node)
+            $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -eq 'Get-GitHubCliAuthStatus'
+        }, $true)
+        $functionAst | Should -Not -BeNullOrEmpty
+        Invoke-Expression $functionAst.Extent.Text
+        (Get-GitHubCliAuthStatus -GitHubCliPath 'gh.exe' -CommandInvoker {
+            param($FilePath, $Arguments)
+            $null = $FilePath, $Arguments
+            [pscustomobject]@{ ExitCode = 0; Output = @('github.com account observed') }
+        }).Status | Should -Be 'Authenticated'
+        (Get-GitHubCliAuthStatus -GitHubCliPath 'gh.exe' -CommandInvoker {
+            param($FilePath, $Arguments)
+            $null = $FilePath, $Arguments
+            [pscustomobject]@{ ExitCode = 1; Output = @('not logged in') }
+        }).Status | Should -Be 'NotAuthenticated'
+        (Get-GitHubCliAuthStatus -GitHubCliPath $null -CommandInvoker { throw 'must not run' }).Status |
+            Should -Be 'Unavailable'
     }
 }
 
@@ -200,6 +287,57 @@ Describe 'Bootstrap orchestration and evidence contracts' {
         $script:SecureValue = [Security.SecureString]::new()
         foreach ($character in 'unit-test-secret-value'.ToCharArray()) { $script:SecureValue.AppendChar($character) }
         $script:SecureValue.MakeReadOnly()
+
+        function New-CompleteReadinessPair {
+            $deploymentId = '11111111-2222-3333-4444-555555555555'
+            $commit = '0123456789abcdef0123456789abcdef01234567'
+            $thumbprint = '0123456789ABCDEF0123456789ABCDEF01234567'
+            $publicHash = 'A' * 64
+            [pscustomobject]@{
+                Sql = [pscustomobject]@{
+                    SchemaVersion = '1.0'; DeploymentId = $deploymentId; Completed = $true
+                    Evidence = [pscustomobject]@{ Sanitized = $true }
+                    Repository = [pscustomobject]@{ Commit = $commit }
+                    Vm = [pscustomobject]@{ Name = 'vm-mcpsql-sql'; Size = 'Standard_E8s_v5'; Location = 'indonesiacentral'; PublicIp = $false; SecureBoot = $true; Tpm = $true }
+                    Sql = [pscustomobject]@{ Version = 16; Edition = 'Enterprise Edition'; Service = 'MSSQLSERVER'; State = 'Running'; Port = 1433; BrowserStartupType = 'Disabled'; Encryption = 'Forced'; EncryptOption = 'TRUE' }
+                    Disks = @(
+                        [pscustomobject]@{ Lun = 0; Drive = 'F:'; Label = 'SQLData'; AllocationUnitSize = 65536; SizeGiB = 256 },
+                        [pscustomobject]@{ Lun = 1; Drive = 'G:'; Label = 'SQLLog'; AllocationUnitSize = 65536; SizeGiB = 128 }
+                    )
+                    TempDb = [pscustomobject]@{ ApprovedRoot = 'D:\SQLTempDB'; Storage = 'Temporary'; Deviation = $null; EnoughSpace = $true; FileCount = 3; AllFilesUnderApprovedRoot = $true; OldPathCount = 0; Files = @(
+                        [pscustomobject]@{ FileId = 1; LogicalName = 'tempdev'; Type = 'ROWS'; PhysicalName = 'D:\SQLTempDB\tempdb-1-tempdev.mdf' },
+                        [pscustomobject]@{ FileId = 2; LogicalName = 'templog'; Type = 'LOG'; PhysicalName = 'D:\SQLTempDB\templog-2-templog.ldf' },
+                        [pscustomobject]@{ FileId = 3; LogicalName = 'temp2'; Type = 'ROWS'; PhysicalName = 'D:\SQLTempDB\tempdb-3-temp2.ndf' }
+                    ) }
+                    Firewall = [pscustomobject]@{ Rule = 'MCP SQL Workshop 1433'; RemoteAddress = '10.20.1.0/24'; BroadRule = $false }
+                    Certificate = [pscustomobject]@{ DnsName = 'sql01.mcpworkshop.internal'; Thumbprint = $thumbprint; RegistryCertificate = $thumbprint; StoreThumbprint = $thumbprint; ForceEncryption = 1; HasPrivateKey = $true; ServerAuthenticationEku = $true; SanVerified = $true; ServiceKeyAclVerified = $true; PublicCertificateThumbprint = $thumbprint; PublicCertificateSha256 = $publicHash; PrivateKeyExported = $false; TlsLoadFailures = 0; StartupBindingEvidence = 'DeferredRemoteValidation' }
+                    Backup = [pscustomobject]@{ VerifyOnly = $true; Sha256 = 'B' * 64 }
+                    Database = [pscustomobject]@{ Marker = '68A70D6E-62D8-4A77-8F0A-9DA7934DBA7C'; QueryStore = 'READ_WRITE'; ResourceGovernor = 'Enabled'; ProcedureCount = 8 }
+                }
+                Admin = [pscustomobject]@{
+                    SchemaVersion = '1.0'; DeploymentId = $deploymentId; Completed = $true
+                    Evidence = [pscustomobject]@{ Sanitized = $true }
+                    Vm = [pscustomobject]@{ Name = 'vm-mcpsql-admin'; Size = 'Standard_D4s_v5'; Location = 'indonesiacentral'; AdminPublicIpBoundaryObserved = $true; PublicIpCount = 1; SecureBoot = $true; Tpm = $true; Os = 'Microsoft Windows 11 Enterprise'; Build = '26100'; Activation = 'ObservedUnknown'; WindowsClientLicenseAttested = $true }
+                    Repository = [pscustomobject]@{ Commit = $commit }
+                    RootEnvAcl = [pscustomobject]@{ Path = 'C:\McpSqlWorkshop\workspace\.env'; Restricted = $true }
+                    Tools = [pscustomobject]@{ VisualStudioCode = '1.99.0'; DotNet = '9.0.100'; Git = 'git version 2.49.0'; GitHubCli = 'gh version 2.70.0'; DAB = '2.0.9'; WingetPackages = @(
+                        [pscustomobject]@{ Id = 'Microsoft.VisualStudioCode'; VersionReadback = '1.99.0' },
+                        [pscustomobject]@{ Id = 'Microsoft.SQLServerManagementStudio'; VersionReadback = '22.7.0' },
+                        [pscustomobject]@{ Id = 'Microsoft.DotNet.SDK.9'; VersionReadback = '9.0.100' },
+                        [pscustomobject]@{ Id = 'Git.Git'; VersionReadback = '2.49.0' },
+                        [pscustomobject]@{ Id = 'GitHub.cli'; VersionReadback = '2.70.0' }
+                    ); Extensions = @('ms-mssql.mssql@1.30.0', 'GitHub.copilot@1.300.0', 'GitHub.copilot-chat@0.25.0', 'ms-vscode.powershell@2025.0.0') }
+                    Auth = [pscustomobject]@{ GitHubCliAuthStatus = 'Unavailable'; CopilotAuthStatus = 'InteractiveSignInRequired' }
+                    Network = [pscustomobject]@{ DnsName = 'sql01.mcpworkshop.internal'; ResolvedAddress = '10.20.2.10'; Tcp1433 = $true }
+                    SqlTls = [pscustomobject]@{ DnsName = 'sql01.mcpworkshop.internal'; Address = '10.20.2.10'; Tcp1433 = $true; CertificateThumbprint = $thumbprint; PublicCertificateSha256 = $publicHash; CertificateValidated = $true; ValidationMethod = 'SqlClientChainHostAndTransferredCertificate'; EncryptOption = 'TRUE'; TrustServerCertificate = $false; HostNameInCertificate = 'sql01.mcpworkshop.internal'; RemoteAdminTest = $true }
+                    Mcp = [pscustomobject]@{ ConfigValid = $true; DabMinimumVersionMet = $true; ForbiddenMutationTools = $false; ToolNames = @(
+                        'describe_entities', 'read_records', 'execute_entity', 'aggregate_records',
+                        'get_memory_snapshot', 'get_active_workshop_grants', 'get_query_store_top_queries',
+                        'get_query_store_waits', 'get_procedure_plan_summary', 'compare_workshop_runs'
+                    ) }
+                }
+            }
+        }
     }
 
     It 'exports bootstrap, readiness, and evidence functions' {
@@ -268,7 +406,8 @@ Describe 'Bootstrap orchestration and evidence contracts' {
         $result = Initialize-WorkshopSqlVm -Config $script:BootstrapConfig `
             -DatabaseMasterKeyPassword $script:SecureValue -McpReaderPassword $script:SecureValue `
             -RepositoryUrl 'https://github.com/example/workshop.git' `
-            -RepositoryCommit '0123456789abcdef0123456789abcdef01234567' -Operations $operations
+            -RepositoryCommit '0123456789abcdef0123456789abcdef01234567' `
+            -DeploymentId '11111111-2222-3333-4444-555555555555' -Operations $operations
 
         $result.Completed | Should -BeTrue
         $script:CapturedPayload.ExpectedVmName | Should -Be $script:BootstrapConfig.SqlVm.Name
@@ -298,12 +437,14 @@ Describe 'Bootstrap orchestration and evidence contracts' {
         }
         $sqlReadiness = [pscustomobject]@{
             Completed = $true
-            Certificate = [pscustomobject]@{ PublicCertificatePath = 'C:\McpSqlWorkshop\public\sql01.cer'; PublicCertificateSha256 = ('B' * 64) }
+            Certificate = [pscustomobject]@{ PublicCertificatePath = 'C:\McpSqlWorkshop\public\sql01.cer'; PublicCertificateSha256 = ('B' * 64); Thumbprint = ('A' * 40) }
         }
         $result = Initialize-WorkshopAdminVm -Config $script:BootstrapConfig -McpReaderPassword $script:SecureValue `
             -RepositoryUrl 'https://github.com/example/workshop.git' `
             -RepositoryCommit '0123456789abcdef0123456789abcdef01234567' `
+            -DeploymentId '11111111-2222-3333-4444-555555555555' `
             -InteractiveUserName 'workshop-admin' `
+            -WindowsClientLicenseAttested $true `
             -SqlReadiness $sqlReadiness -Operations $operations
 
         $result.Completed | Should -BeTrue
@@ -312,26 +453,54 @@ Describe 'Bootstrap orchestration and evidence contracts' {
         ($result | ConvertTo-Json -Depth 10) | Should -Not -Match 'unit-test-secret-value'
     }
 
-    It 'fails readiness closed when any private, TLS, MCP, or auth claim is unverified' {
-        $sql = [pscustomobject]@{
-            Completed = $true; Vm = [pscustomobject]@{ PublicIp = $false }
-            Sql = [pscustomobject]@{ Encryption = 'Forced'; EncryptOption = 'TRUE' }; Backup = [pscustomobject]@{ VerifyOnly = $true }
-        }
-        $admin = [pscustomobject]@{
-            Completed = $true; AuthStatus = 'AuthRequired'
-            SqlTls = [pscustomobject]@{ EncryptOption = 'TRUE'; TrustServerCertificate = $false }
-            Mcp = [pscustomobject]@{
-                ConfigValid = $true
-                ForbiddenMutationTools = $false
-                ToolNames = @(
-                    'describe_entities', 'read_records', 'execute_entity', 'aggregate_records',
-                    'get_memory_snapshot', 'get_active_workshop_grants', 'get_query_store_top_queries',
-                    'get_query_store_waits', 'get_procedure_plan_summary', 'compare_workshop_runs'
-                )
-            }
-        }
-        (Test-WorkshopReadiness -SqlReadiness $sql -AdminReadiness $admin).Passed | Should -BeTrue
-        $admin.Mcp.ForbiddenMutationTools = $true
-        (Test-WorkshopReadiness -SqlReadiness $sql -AdminReadiness $admin).Passed | Should -BeFalse
+    It 'passes only a complete exact pair and labels attested unknown activation as a warning' {
+        $pair = New-CompleteReadinessPair
+        $result = Test-WorkshopReadiness -SqlReadiness $pair.Sql -AdminReadiness $pair.Admin
+        $result.Passed | Should -BeTrue
+        @($result.Checks | Where-Object Status -EQ 'Warning').Name | Should -Contain 'Administration activation observation'
+    }
+
+    It 'fails closed for every missing or wrong required security fact' -ForEach @(
+        @{ Path = 'Sql.Vm.Name'; Value = 'wrong' },
+        @{ Path = 'Sql.Disks'; Value = @() },
+        @{ Path = 'Sql.TempDb.OldPathCount'; Value = 1 },
+        @{ Path = 'Sql.Certificate.RegistryCertificate'; Value = $null },
+        @{ Path = 'Sql.Certificate.TlsLoadFailures'; Value = 1 },
+        @{ Path = 'Sql.Database.ProcedureCount'; Value = 7 },
+        @{ Path = 'Admin.Vm.PublicIpCount'; Value = 0 },
+        @{ Path = 'Admin.RootEnvAcl.Restricted'; Value = $false },
+        @{ Path = 'Admin.Auth.GitHubCliAuthStatus'; Value = $null },
+        @{ Path = 'Admin.SqlTls.CertificateValidated'; Value = $false },
+        @{ Path = 'Admin.SqlTls.ValidationMethod'; Value = 'generic' },
+        @{ Path = 'Admin.Mcp.ForbiddenMutationTools'; Value = $true },
+        @{ Path = 'Admin.DeploymentId'; Value = '99999999-2222-3333-4444-555555555555' },
+        @{ Path = 'Admin.Repository.Commit'; Value = 'ffffffffffffffffffffffffffffffffffffffff' }
+    ) {
+        $pair = New-CompleteReadinessPair
+        $segments = $Path -split '\.'
+        $target = $pair
+        foreach ($segment in $segments[0..($segments.Count - 2)]) { $target = $target.$segment }
+        $target.($segments[-1]) = $Value
+        (Test-WorkshopReadiness -SqlReadiness $pair.Sql -AdminReadiness $pair.Admin).Passed |
+            Should -BeFalse -Because $Path
+    }
+
+    It 'fails closed rather than throwing when required records are absent' {
+        { $script:Result = Test-WorkshopReadiness -SqlReadiness ([pscustomobject]@{}) -AdminReadiness ([pscustomobject]@{}) } |
+            Should -Not -Throw
+        $script:Result.Passed | Should -BeFalse
+    }
+
+    It 'fails closed without throwing for malformed DAB versions and deployment identifiers' {
+        $pair = New-CompleteReadinessPair
+        $pair.Admin.Tools.DAB = 'not-a-version'
+        { $script:MalformedVersionResult = Test-WorkshopReadiness -SqlReadiness $pair.Sql -AdminReadiness $pair.Admin } |
+            Should -Not -Throw
+        $script:MalformedVersionResult.Passed | Should -BeFalse
+
+        $pair = New-CompleteReadinessPair
+        $pair.Sql.DeploymentId = '------------------------------------'
+        $pair.Admin.DeploymentId = '------------------------------------'
+        (Test-WorkshopReadiness -SqlReadiness $pair.Sql -AdminReadiness $pair.Admin).Passed | Should -BeFalse
     }
 }

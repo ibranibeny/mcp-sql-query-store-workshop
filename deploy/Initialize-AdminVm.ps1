@@ -51,6 +51,29 @@ function Invoke-NativeChecked {
     @($output | ForEach-Object { [string] $_ })
 }
 
+function Get-GitHubCliAuthStatus {
+    param(
+        [AllowNull()][string] $GitHubCliPath,
+        [scriptblock] $CommandInvoker = {
+            param($FilePath, $Arguments)
+            $output = @(& $FilePath @Arguments 2>&1 | ForEach-Object { [string]$_ })
+            [pscustomobject]@{ ExitCode = $LASTEXITCODE; Output = $output }
+        }
+    )
+    if ([string]::IsNullOrWhiteSpace($GitHubCliPath)) {
+        return [pscustomobject]@{ Status = 'Unavailable' }
+    }
+    try {
+        $result = & $CommandInvoker $GitHubCliPath @('auth', 'status')
+        # Deliberately discard output: authentication diagnostics can contain account details.
+        $status = if ([int]$result.ExitCode -eq 0) { 'Authenticated' } else { 'NotAuthenticated' }
+        [pscustomobject]@{ Status = $status }
+    }
+    catch {
+        [pscustomobject]@{ Status = 'Unavailable' }
+    }
+}
+
 function Protect-WorkshopFileAcl {
     param([Parameter(Mandatory)][string] $Path, [Parameter(Mandatory)][string] $InteractiveUser)
     $acl = [Security.AccessControl.FileSecurity]::new()
@@ -185,6 +208,7 @@ try {
     $license = Get-CimInstance SoftwareLicensingProduct -Filter "Name LIKE 'Windows%Enterprise%' AND PartialProductKey IS NOT NULL" -ErrorAction SilentlyContinue |
         Sort-Object LicenseStatus -Descending | Select-Object -First 1
     $activationStatus = if ($null -eq $license) { 'Unavailable' } elseif ([int]$license.LicenseStatus -eq 1) { 'Licensed' } else { 'Unknown' }
+    if ($activationStatus -ne 'Licensed') { $activationStatus = 'ObservedUnknown' }
 
     $packageVersions = [ordered]@{}
     $wingetPath = Resolve-WorkshopExecutable -Name 'winget.exe' -Candidates @(
@@ -210,6 +234,7 @@ try {
     $dotnetPath = Resolve-WorkshopExecutable -Name 'dotnet.exe' -Candidates @('C:\Program Files\dotnet\dotnet.exe')
     $codePath = Resolve-WorkshopExecutable -Name 'code.cmd' -Candidates @('C:\Program Files\Microsoft VS Code\bin\code.cmd')
     $ghPath = Resolve-WorkshopExecutable -Name 'gh.exe' -Candidates @('C:\Program Files\GitHub CLI\gh.exe')
+    $githubCliAuthStatus = (Get-GitHubCliAuthStatus -GitHubCliPath $ghPath).Status
     if (-not (Test-Path -LiteralPath (Join-Path $repositoryRoot '.git'))) {
         $null = Invoke-NativeChecked -FilePath $gitPath -ArgumentList @('clone', '--no-checkout', '--', [string]$payload.RepositoryUrl, $repositoryRoot)
     }
@@ -251,8 +276,10 @@ try {
     $certificatePath = Join-Path $env:TEMP 'sql01-public.cer'
     [IO.File]::WriteAllBytes($certificatePath, [Convert]::FromBase64String([string]$payload.PublicCertificateBase64))
     $certificateHash = (Get-FileHash -LiteralPath $certificatePath -Algorithm SHA256).Hash
-    Assert-Condition ($certificateHash -ceq [string]$payload.CertificateFingerprint) 'CertificateFingerprint does not match the SQL readiness evidence.'
+    Assert-Condition ($certificateHash -ceq [string]$payload.PublicCertificateSha256) 'Public certificate SHA-256 does not match the SQL readiness evidence.'
     $certificate = [Security.Cryptography.X509Certificates.X509Certificate2]::new($certificatePath)
+    $certificateThumbprint = ([string]$certificate.Thumbprint -replace '\s', '').ToUpperInvariant()
+    Assert-Condition ($certificateThumbprint -ceq [string]$payload.CertificateThumbprint) 'Public certificate thumbprint does not match the SQL readiness evidence.'
     Assert-Condition (-not $certificate.HasPrivateKey) 'Only the SQL public certificate may be transferred.'
     $null = Import-Certificate -FilePath $certificatePath -CertStoreLocation Cert:\LocalMachine\Root
     Remove-Item -LiteralPath $certificatePath -Force
@@ -275,6 +302,12 @@ try {
     $connectionText = $connectionBuilder.ConnectionString
     [IO.File]::WriteAllText($envPath, "MSSQL_CONNECTION_STRING=$connectionText`r`n", [Text.UTF8Encoding]::new($false))
     Protect-WorkshopFileAcl -Path $envPath -InteractiveUser ([string]$payload.InteractiveUserName)
+    $envAcl = Get-Acl -LiteralPath $envPath
+    $allowedEnvReaders = @('BUILTIN\Administrators', 'NT AUTHORITY\SYSTEM', [string]$payload.InteractiveUserName)
+    $unexpectedEnvReaders = @($envAcl.Access | Where-Object {
+        $_.AccessControlType -eq 'Allow' -and $_.IdentityReference.Value -notin $allowedEnvReaders
+    })
+    Assert-Condition ($envAcl.AreAccessRulesProtected -and $unexpectedEnvReaders.Count -eq 0) 'Root .env ACL readback is broader than the approved identities.'
     $env:MSSQL_CONNECTION_STRING = $connectionText
 
     $builder = [System.Data.SqlClient.SqlConnectionStringBuilder]::new($connectionText)
@@ -311,12 +344,17 @@ try {
     $readiness = [ordered]@{
         Completed = $true
         CapturedAtUtc = [DateTime]::UtcNow.ToString('o')
-        Vm = [ordered]@{ Name = $metadata.compute.name; Size = $metadata.compute.vmSize; Location = $metadata.compute.location; AdminPublicIpBoundaryObserved = $true; SecureBoot = $true; Tpm = $true; Os = $os.Caption; Build = $os.BuildNumber; Activation = $activationStatus }
+        SchemaVersion = '1.0'
+        DeploymentId = [string]$payload.DeploymentId
+        Evidence = [ordered]@{ Sanitized = $true }
+        Vm = [ordered]@{ Name = $metadata.compute.name; Size = $metadata.compute.vmSize; Location = $metadata.compute.location; AdminPublicIpBoundaryObserved = $true; PublicIpCount = $imdsPublicIps.Count; SecureBoot = $true; Tpm = $true; Os = $os.Caption; Build = $os.BuildNumber; Activation = $activationStatus; WindowsClientLicenseAttested = [bool]$payload.WindowsClientLicenseAttested }
         Repository = [ordered]@{ Commit = $head }
         Tools = $toolVersions
-        AuthStatus = 'AuthRequired'
-        SqlTls = [ordered]@{ DnsName = $privateDnsName; Address = $expectedSqlIp; Tcp1433 = $true; CertificateFingerprint = $certificateHash; EncryptOption = 'TRUE'; TrustServerCertificate = $false; HostNameInCertificate = $privateDnsName; ClientProvider = 'System.Data.SqlClient' }
-        Mcp = [ordered]@{ ConfigValid = $true; ToolNames = $toolNames; ForbiddenMutationTools = $false }
+        RootEnvAcl = [ordered]@{ Path = $envPath; Restricted = $true }
+        Auth = [ordered]@{ GitHubCliAuthStatus = $githubCliAuthStatus; CopilotAuthStatus = 'InteractiveSignInRequired' }
+        Network = [ordered]@{ DnsName = $privateDnsName; ResolvedAddress = $expectedSqlIp; Tcp1433 = $true }
+        SqlTls = [ordered]@{ DnsName = $privateDnsName; Address = $expectedSqlIp; Tcp1433 = $true; CertificateThumbprint = $certificateThumbprint; PublicCertificateSha256 = $certificateHash; CertificateValidated = $true; ValidationMethod = 'SqlClientChainHostAndTransferredCertificate'; EncryptOption = 'TRUE'; TrustServerCertificate = $false; HostNameInCertificate = $privateDnsName; ClientProvider = 'System.Data.SqlClient'; RemoteAdminTest = $true }
+        Mcp = [ordered]@{ ConfigValid = $true; DabMinimumVersionMet = ([version]([regex]::Match($dabVersion, '\d+\.\d+\.\d+').Value) -ge [version]'2.0.9'); ToolNames = $toolNames; ForbiddenMutationTools = $false }
     }
     $readiness | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $readinessPath -Encoding UTF8
     $readiness

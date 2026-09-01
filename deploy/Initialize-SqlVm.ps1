@@ -62,6 +62,42 @@ function Invoke-LocalSqlScalar {
     }
 }
 
+function Invoke-LocalSqlQuery {
+    param([Parameter(Mandatory)][string] $Query, [string] $Database = 'master', [switch] $BootstrapTrust)
+    $builder = [System.Data.SqlClient.SqlConnectionStringBuilder]::new()
+    $builder.DataSource = if ($BootstrapTrust) { 'localhost' } else { $privateDnsName }
+    $builder.InitialCatalog = $Database
+    $builder.IntegratedSecurity = $true
+    $builder.Encrypt = $true
+    $builder.TrustServerCertificate = $BootstrapTrust.IsPresent
+    $builder.ApplicationName = 'MCP-SQL-Workshop-Bootstrap'
+    $connection = [System.Data.SqlClient.SqlConnection]::new($builder.ConnectionString)
+    $command = $null
+    $reader = $null
+    try {
+        $connection.Open()
+        $command = $connection.CreateCommand()
+        $command.CommandText = $Query
+        $command.CommandTimeout = 120
+        $reader = $command.ExecuteReader()
+        $rows = [System.Collections.Generic.List[object]]::new()
+        while ($reader.Read()) {
+            $row = [ordered]@{}
+            for ($index = 0; $index -lt $reader.FieldCount; $index++) {
+                $row[$reader.GetName($index)] = $reader.GetValue($index)
+            }
+            $rows.Add([pscustomobject]$row)
+        }
+        $rows.ToArray()
+    }
+    finally {
+        if ($null -ne $reader) { $reader.Dispose() }
+        if ($null -ne $command) { $command.Dispose() }
+        $connection.Dispose()
+        $builder.Clear()
+    }
+}
+
 function Get-SqlService {
     $services = @(Get-CimInstance Win32_Service -Filter "Name LIKE 'MSSQL%'" |
         Where-Object { $_.Name -notmatch 'Launcher|FDLauncher' })
@@ -87,7 +123,8 @@ function Mount-WorkshopDisk {
         [Parameter(Mandatory)][int] $Lun,
         [Parameter(Mandatory)][int] $ExpectedSizeGiB,
         [Parameter(Mandatory)][string] $Label,
-        [Parameter(Mandatory)][char] $PreferredDriveLetter
+        [Parameter(Mandatory)][char] $PreferredDriveLetter,
+        [switch] $PreflightOnly
     )
     $candidates = @(Get-Disk | Where-Object {
         $location = [string] $_.Location
@@ -98,18 +135,34 @@ function Mount-WorkshopDisk {
     $disk = $candidates[0]
     $actualGiB = [math]::Round([double] $disk.Size / 1GB)
     Assert-Condition ($actualGiB -eq $ExpectedSizeGiB) "Disk at LUN $Lun does not match the expected size."
+
+    # Inspect both views before any mutation. F and G are part of the deployment contract, not preferences.
+    $assignedVolume = Get-Volume -DriveLetter $PreferredDriveLetter -ErrorAction SilentlyContinue
+    $assignedPartition = Get-Partition -DriveLetter $PreferredDriveLetter -ErrorAction SilentlyContinue
+    if ($null -ne $assignedVolume -or $null -ne $assignedPartition) {
+        Assert-Condition ($null -ne $assignedVolume -and $null -ne $assignedPartition) "Drive $PreferredDriveLetter`: has an incomplete volume assignment."
+        Assert-Condition ([int]$assignedPartition.DiskNumber -eq [int]$disk.Number) "Drive $PreferredDriveLetter`: is occupied by a disk other than expected LUN $Lun."
+        Assert-Condition ($assignedVolume.FileSystemLabel -ceq $Label) "Drive $PreferredDriveLetter`: has an unexpected label for LUN $Lun."
+        Assert-Condition ([math]::Round([double]$assignedVolume.Size / 1GB) -eq $ExpectedSizeGiB) "Drive $PreferredDriveLetter`: has an unexpected size for LUN $Lun."
+    }
+    if ($PreflightOnly) {
+        if ($disk.PartitionStyle -eq 'RAW') {
+            Assert-Condition ($null -eq $assignedVolume -and $null -eq $assignedPartition) "Drive $PreferredDriveLetter`: is already occupied; initialization was refused."
+        }
+        else {
+            Assert-Condition ($disk.PartitionStyle -eq 'GPT') "LUN $Lun is initialized with a conflicting partition style."
+            Assert-Condition ($null -ne $assignedVolume -and $null -ne $assignedPartition) "Initialized LUN $Lun is not assigned to mandatory drive $PreferredDriveLetter`: ."
+            Assert-Condition ($assignedVolume.FileSystemType -eq 'NTFS' -and [int64]$assignedVolume.AllocationUnitSize -eq 65536) "Drive $PreferredDriveLetter`: does not satisfy the NTFS 64 KiB contract."
+        }
+        return [pscustomobject]@{ Lun = $Lun; Drive = "$PreferredDriveLetter`:"; Label = $Label; AllocationUnitSize = 65536; SizeGiB = $actualGiB }
+    }
     if ($disk.PartitionStyle -eq 'RAW') {
+        Assert-Condition ($null -eq $assignedVolume -and $null -eq $assignedPartition) "Drive $PreferredDriveLetter`: is already occupied; initialization was refused."
         if (-not $PSCmdlet.ShouldProcess("Disk $($disk.Number) at LUN $Lun", 'Initialize GPT and format NTFS with a 64 KiB allocation unit')) {
             throw "Disk initialization was declined for LUN $Lun."
         }
         $disk = Initialize-Disk -Number $disk.Number -PartitionStyle GPT -PassThru
-        $letter = $PreferredDriveLetter
-        if (Get-Volume -DriveLetter $letter -ErrorAction SilentlyContinue) {
-            $approved = @([char]([int]$PreferredDriveLetter + 2), [char]([int]$PreferredDriveLetter + 3))
-            $letter = @($approved | Where-Object { -not (Get-Volume -DriveLetter $_ -ErrorAction SilentlyContinue) })[0]
-            Assert-Condition ($null -ne $letter) "No approved drive letter is available for LUN $Lun."
-        }
-        $partition = New-Partition -DiskNumber $disk.Number -UseMaximumSize -DriveLetter $letter
+        $partition = New-Partition -DiskNumber $disk.Number -UseMaximumSize -DriveLetter $PreferredDriveLetter
         $null = Format-Volume -Partition $partition -FileSystem NTFS -AllocationUnitSize 65536 -NewFileSystemLabel $Label -Confirm:$false
     }
     else {
@@ -117,11 +170,12 @@ function Mount-WorkshopDisk {
     }
     $partitions = @(Get-Partition -DiskNumber $disk.Number | Where-Object DriveLetter)
     Assert-Condition ($partitions.Count -eq 1) "LUN $Lun has an ambiguous partition layout."
-    $volume = Get-Volume -DriveLetter $partitions[0].DriveLetter
+    Assert-Condition ([char]$partitions[0].DriveLetter -eq $PreferredDriveLetter) "LUN $Lun is not assigned to mandatory drive $PreferredDriveLetter`: ."
+    $volume = Get-Volume -DriveLetter $PreferredDriveLetter
     Assert-Condition ($volume.FileSystemType -eq 'NTFS') "LUN $Lun is not NTFS."
     Assert-Condition ([int64] $volume.AllocationUnitSize -eq 65536) "LUN $Lun does not use a 64 KiB allocation unit."
     Assert-Condition ($volume.FileSystemLabel -ceq $Label) "LUN $Lun has an unexpected volume label."
-    [pscustomobject]@{ Lun = $Lun; Drive = "$($partitions[0].DriveLetter):"; Label = $Label; AllocationUnitSize = 65536; SizeGiB = $actualGiB }
+    [pscustomobject]@{ Lun = $Lun; Drive = "$PreferredDriveLetter`:"; Label = $Label; AllocationUnitSize = 65536; SizeGiB = $actualGiB }
 }
 
 function Protect-WorkshopDirectoryAcl {
@@ -184,6 +238,8 @@ try {
     $edition = [string](Invoke-LocalSqlScalar "SELECT CONVERT(nvarchar(128), SERVERPROPERTY('Edition'));" -BootstrapTrust)
     Assert-Condition ([int] $major -eq 16 -and $edition -match 'Enterprise') 'SQL Server 2022 Enterprise is required.'
 
+    $null = Mount-WorkshopDisk -Lun 0 -ExpectedSizeGiB ([int]$payload.DataDiskGiB) -Label SQLData -PreferredDriveLetter F -PreflightOnly -Confirm:$false
+    $null = Mount-WorkshopDisk -Lun 1 -ExpectedSizeGiB ([int]$payload.LogDiskGiB) -Label SQLLog -PreferredDriveLetter G -PreflightOnly -Confirm:$false
     $dataDisk = Mount-WorkshopDisk -Lun 0 -ExpectedSizeGiB ([int]$payload.DataDiskGiB) -Label SQLData -PreferredDriveLetter F -Confirm:$false
     $logDisk = Mount-WorkshopDisk -Lun 1 -ExpectedSizeGiB ([int]$payload.LogDiskGiB) -Label SQLLog -PreferredDriveLetter G -Confirm:$false
     $dataPath = Join-Path $dataDisk.Drive 'SQLData'
@@ -196,9 +252,29 @@ try {
     $null = Start-Transcript -LiteralPath $transcriptPath -Force
     $transcriptStarted = $true
 
+    $tempDbFilesBefore = @(Invoke-LocalSqlQuery -Database tempdb -BootstrapTrust -Query @'
+SELECT file_id AS FileId, name AS LogicalName, type_desc AS Type, physical_name AS PhysicalName,
+       CONVERT(bigint, size) * 8192 AS SizeBytes
+FROM tempdb.sys.database_files
+ORDER BY file_id;
+'@)
+    Assert-Condition ($tempDbFilesBefore.Count -ge 2) 'TempDB must expose at least two files before relocation.'
+    Assert-Condition (@($tempDbFilesBefore | Where-Object Type -EQ 'ROWS').Count -ge 1) 'TempDB has no ROWS file.'
+    Assert-Condition (@($tempDbFilesBefore | Where-Object Type -EQ 'LOG').Count -ge 1) 'TempDB has no LOG file.'
+    $requiredTempDbBytes = [int64](($tempDbFilesBefore | Measure-Object -Property SizeBytes -Sum).Sum) + 1GB
     $resourceMarker = 'D:\DATALOSS_WARNING_README.txt'
-    $tempDbPath = if (Test-Path -LiteralPath $resourceMarker) { 'D:\SQLTempDB' } else { Join-Path $dataDisk.Drive 'SQLTempDB' }
-    $tempDbDeviation = if (Test-Path -LiteralPath $resourceMarker) { $null } else { 'Azure temporary disk marker unavailable; TempDB placed on managed data disk.' }
+    $resourceVolume = Get-Volume -DriveLetter D -ErrorAction SilentlyContinue
+    $resourcePartition = Get-Partition -DriveLetter D -ErrorAction SilentlyContinue
+    $tempDbUsesResourceDisk = (Test-Path -LiteralPath $resourceMarker) -and
+        $null -ne $resourceVolume -and $null -ne $resourcePartition -and
+        $resourceVolume.FileSystemType -eq 'NTFS' -and $resourceVolume.HealthStatus -eq 'Healthy' -and
+        -not $resourcePartition.IsBoot -and -not $resourcePartition.IsSystem -and
+        [int64]$resourceVolume.SizeRemaining -ge $requiredTempDbBytes
+    $tempDbPath = if ($tempDbUsesResourceDisk) { 'D:\SQLTempDB' } else { Join-Path $dataDisk.Drive 'SQLTempDB' }
+    $tempDbStorage = if ($tempDbUsesResourceDisk) { 'Temporary' } else { 'ManagedData' }
+    $tempDbDeviation = if ($tempDbUsesResourceDisk) { $null } else { 'Azure temporary disk failed marker, volume, partition, health, or capacity validation; TempDB placed on managed data disk.' }
+    $selectedTempDbVolume = Get-Volume -DriveLetter ([IO.Path]::GetPathRoot($tempDbPath).TrimEnd(':','\'))
+    Assert-Condition ([int64]$selectedTempDbVolume.SizeRemaining -ge $requiredTempDbBytes) 'Approved TempDB root does not have enough free space for all current files plus the safety reserve.'
     $null = New-Item -ItemType Directory -Path $tempDbPath -Force
     foreach ($sqlPath in @($dataPath, $logPath, (Split-Path $backupPath), $tempDbPath)) {
         Grant-SqlServiceDirectoryAccess -Path $sqlPath -Identity $service.StartName
@@ -221,6 +297,12 @@ try {
     $activeProfiles = @((Get-NetConnectionProfile).NetworkCategory | Sort-Object -Unique)
     Assert-Condition ($activeProfiles.Count -gt 0) 'Active Windows Firewall profile could not be determined.'
     $null = New-NetFirewallRule -DisplayName 'MCP SQL Workshop 1433' -Direction Inbound -Action Allow -Protocol TCP -LocalPort 1433 -RemoteAddress $adminSubnet -Profile $activeProfiles
+    $firewallRuleReadback = Get-NetFirewallRule -DisplayName 'MCP SQL Workshop 1433' -ErrorAction Stop
+    $firewallPortReadback = $firewallRuleReadback | Get-NetFirewallPortFilter
+    $firewallAddressReadback = $firewallRuleReadback | Get-NetFirewallAddressFilter
+    Assert-Condition ($firewallRuleReadback.Enabled -eq 'True' -and $firewallRuleReadback.Direction -eq 'Inbound' -and $firewallRuleReadback.Action -eq 'Allow') 'Workshop SQL firewall rule state readback failed.'
+    Assert-Condition ($firewallPortReadback.Protocol -eq 'TCP' -and @($firewallPortReadback.LocalPort) -contains '1433') 'Workshop SQL firewall port readback failed.'
+    Assert-Condition (@($firewallAddressReadback.RemoteAddress).Count -eq 1 -and @($firewallAddressReadback.RemoteAddress)[0] -ceq $adminSubnet) 'Workshop SQL firewall source readback is not the exact administration subnet.'
     $broadSqlRules = @(Get-NetFirewallRule -Direction Inbound -Action Allow -Enabled True | ForEach-Object {
         $rule = $_
         $port = $rule | Get-NetFirewallPortFilter
@@ -254,6 +336,8 @@ try {
     $rsa = [Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPrivateKey($certificate)
     Assert-Condition ($rsa -is [Security.Cryptography.RSACng]) 'SQL TLS private key must use the non-exportable CNG provider.'
     Assert-Condition ($rsa.Key.ExportPolicy -notmatch 'AllowExport') 'SQL TLS private key is exportable.'
+    $certificateThumbprint = ([string]$certificate.Thumbprint -replace '\s', '').ToUpperInvariant()
+    Assert-Condition ($certificateThumbprint -match '^[A-F0-9]{40}$') 'SQL TLS certificate thumbprint is not a normalized SHA-1 thumbprint.'
     $keyPath = Join-Path $env:ProgramData "Microsoft\Crypto\Keys\$($rsa.Key.UniqueName)"
     $keyAcl = Get-Acl -LiteralPath $keyPath
     $keyAcl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($service.StartName, 'Read', 'Allow'))
@@ -263,29 +347,57 @@ try {
         $_.IdentityReference.Value -eq $service.StartName -and $_.FileSystemRights -band [Security.AccessControl.FileSystemRights]::Read
     } | Select-Object -First 1)) 'SQL service account private-key read ACL was not verified.'
     $null = Export-Certificate -Cert $certificate -FilePath $publicCertificatePath -Force
+    $publicCertificate = [Security.Cryptography.X509Certificates.X509Certificate2]::new($publicCertificatePath)
+    $publicCertificateThumbprint = ([string]$publicCertificate.Thumbprint -replace '\s', '').ToUpperInvariant()
+    Assert-Condition ($publicCertificateThumbprint -ceq $certificateThumbprint) 'Exported public certificate thumbprint does not match the generated SQL certificate.'
     $null = Import-Certificate -FilePath $publicCertificatePath -CertStoreLocation Cert:\LocalMachine\Root
-    Set-ItemProperty -Path $tcpRoot -Name Certificate -Value ($certificate.Thumbprint.ToLowerInvariant())
+    Set-ItemProperty -Path $tcpRoot -Name Certificate -Value $certificateThumbprint
     Set-ItemProperty -Path $tcpRoot -Name ForceEncryption -Value 1
 
-    $tempDbFiles = @(
-        @{ Name = 'tempdev'; File = Join-Path $tempDbPath 'tempdb.mdf' },
-        @{ Name = 'templog'; File = Join-Path $tempDbPath 'templog.ldf' }
-    )
-    foreach ($tempDbFile in $tempDbFiles) {
-        $escapedFile = ([string]$tempDbFile.File).Replace("'", "''")
-        $null = Invoke-LocalSqlScalar -Query "ALTER DATABASE tempdb MODIFY FILE (NAME = N'$($tempDbFile.Name)', FILENAME = N'$escapedFile');" -BootstrapTrust
+    foreach ($tempDbFile in $tempDbFilesBefore) {
+        $safeLogicalName = ([string]$tempDbFile.LogicalName -replace '[^A-Za-z0-9._-]', '_')
+        $extension = if ($tempDbFile.Type -ceq 'LOG') { '.ldf' } elseif ([int]$tempDbFile.FileId -eq 1) { '.mdf' } else { '.ndf' }
+        $prefix = if ($tempDbFile.Type -ceq 'LOG') { 'templog' } else { 'tempdb' }
+        $targetFile = Join-Path $tempDbPath ("{0}-{1}-{2}{3}" -f $prefix, $tempDbFile.FileId, $safeLogicalName, $extension)
+        $escapedLogicalName = ([string]$tempDbFile.LogicalName).Replace("'", "''")
+        $quotedLogicalName = [string](Invoke-LocalSqlScalar -Query "SELECT QUOTENAME(N'$escapedLogicalName');" -BootstrapTrust)
+        Assert-Condition (-not [string]::IsNullOrWhiteSpace($quotedLogicalName)) "QUOTENAME rejected TempDB logical file '$($tempDbFile.LogicalName)'."
+        $escapedFile = $targetFile.Replace("'", "''")
+        $null = Invoke-LocalSqlScalar -Query "ALTER DATABASE tempdb MODIFY FILE (NAME = $quotedLogicalName, FILENAME = N'$escapedFile');" -BootstrapTrust
     }
 
     Restart-Service -Name $service.Name -Force
     $restarted = Get-Service -Name $service.Name
     Assert-Condition ($restarted.Status -eq 'Running') 'SQL service failed its restart checkpoint.'
+    $browserService = Get-CimInstance Win32_Service -Filter "Name='SQLBrowser'"
+    Assert-Condition ($null -ne $browserService -and $browserService.StartMode -eq 'Disabled' -and $browserService.State -ne 'Running') 'SQL Browser readback is not disabled and stopped.'
     Assert-Condition ((Get-ItemPropertyValue -Path $ipAll -Name TcpPort) -ceq '1433') 'SQL TCP 1433 readback failed.'
-    Assert-Condition ([int](Get-ItemPropertyValue -Path $tcpRoot -Name ForceEncryption) -eq 1) 'SQL ForceEncryption readback failed.'
-    $errorLog = Get-ChildItem -Path 'C:\Program Files\Microsoft SQL Server' -Filter ERRORLOG -Recurse -ErrorAction SilentlyContinue |
-        Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
-    Assert-Condition ($null -ne $errorLog -and (Select-String -LiteralPath $errorLog.FullName -Pattern 'certificate' -Quiet)) 'SQL error log does not confirm certificate startup.'
-    $tempDbPathCount = [int](Invoke-LocalSqlScalar -Query "SELECT COUNT(*) FROM tempdb.sys.database_files WHERE physical_name LIKE N'$($tempDbPath.Replace("'", "''"))%';")
-    Assert-Condition ($tempDbPathCount -eq 2) 'TempDB file paths were not active after the SQL restart checkpoint.'
+    $registryCertificate = ([string](Get-ItemPropertyValue -Path $tcpRoot -Name Certificate) -replace '\s', '').ToUpperInvariant()
+    $forceEncryption = [int](Get-ItemPropertyValue -Path $tcpRoot -Name ForceEncryption)
+    Assert-Condition ($registryCertificate -ceq $certificateThumbprint) 'SQL certificate registry readback does not match the generated certificate thumbprint.'
+    Assert-Condition ($forceEncryption -eq 1) 'SQL ForceEncryption readback failed.'
+    $storeCertificate = Get-Item -LiteralPath "Cert:\LocalMachine\My\$certificateThumbprint" -ErrorAction Stop
+    Assert-Condition (([string]$storeCertificate.Thumbprint -replace '\s', '').ToUpperInvariant() -ceq $certificateThumbprint -and $storeCertificate.HasPrivateKey) 'SQL certificate store readback failed.'
+    $errorLogDirectory = [string](Get-ItemPropertyValue -Path $instanceRoot -Name ErrorLogPath -ErrorAction Stop)
+    Assert-Condition (-not [string]::IsNullOrWhiteSpace($errorLogDirectory)) 'SQL instance ErrorLogPath registry readback is empty.'
+    $errorLogPath = Join-Path $errorLogDirectory 'ERRORLOG'
+    Assert-Condition (Test-Path -LiteralPath $errorLogPath -PathType Leaf) 'Exact SQL instance error log was not found after restart.'
+    $errorLogText = Get-Content -LiteralPath $errorLogPath -Raw
+    $tlsLoadFailures = @([regex]::Matches($errorLogText, '(?im)^.*(?:(?:failed|failure|could not|unable|not).*(?:load|initialize).*(?:certificate|TLS)|(?:certificate|TLS).*(?:failed|failure|could not|unable|not).*(?:load|initialize)).*$')).Count
+    Assert-Condition ($tlsLoadFailures -eq 0) 'SQL error log reports a TLS certificate load failure.'
+    $normalizedErrorLog = $errorLogText -replace '\s', ''
+    $startupBindingEvidence = if ($normalizedErrorLog -match [regex]::Escape($certificateThumbprint) -and
+        $errorLogText -match '(?i)certificate.*(?:successfully loaded|loaded successfully)') { 'ExactThumbprint' } else { 'DeferredRemoteValidation' }
+    $tempDbFilesAfter = @(Invoke-LocalSqlQuery -Database tempdb -Query @'
+SELECT file_id AS FileId, name AS LogicalName, type_desc AS Type, physical_name AS PhysicalName
+FROM tempdb.sys.database_files
+ORDER BY file_id;
+'@)
+    $approvedTempDbPrefix = $tempDbPath.TrimEnd('\') + '\'
+    $oldTempDbPaths = @($tempDbFilesAfter | Where-Object { -not ([string]$_.PhysicalName).StartsWith($approvedTempDbPrefix, [StringComparison]::OrdinalIgnoreCase) })
+    Assert-Condition ($tempDbFilesAfter.Count -ge 2) 'TempDB exposes fewer than two files after restart.'
+    Assert-Condition ($tempDbFilesAfter.Count -eq $tempDbFilesBefore.Count) 'TempDB file count changed during relocation.'
+    Assert-Condition ($oldTempDbPaths.Count -eq 0) 'One or more TempDB files remain outside the approved root.'
 
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
     if (-not (Test-Path -LiteralPath $backupPath)) {
@@ -325,12 +437,16 @@ try {
     $readiness = [ordered]@{
         Completed = $true
         CapturedAtUtc = [DateTime]::UtcNow.ToString('o')
+        SchemaVersion = '1.0'
+        DeploymentId = [string]$payload.DeploymentId
+        Evidence = [ordered]@{ Sanitized = $true }
+        Repository = [ordered]@{ Commit = [string]$payload.RepositoryCommit }
         Vm = [ordered]@{ Name = $metadata.compute.name; Size = $metadata.compute.vmSize; Location = $metadata.compute.location; PublicIp = $false; SecureBoot = $true; Tpm = $true }
-        Sql = [ordered]@{ Version = 16; Edition = $edition; Service = $service.Name; State = 'Running'; Port = 1433; Encryption = 'Forced'; EncryptOption = $tdsEncryption }
+        Sql = [ordered]@{ Version = 16; Edition = $edition; Service = $service.Name; State = [string]$restarted.Status; Port = 1433; BrowserStartupType = [string]$browserService.StartMode; Encryption = 'Forced'; EncryptOption = $tdsEncryption }
         Disks = @($dataDisk, $logDisk)
-        TempDb = [ordered]@{ Path = $tempDbPath; PersistentDataOnTemporaryDisk = $false; Deviation = $tempDbDeviation }
-        Firewall = [ordered]@{ Rule = 'MCP SQL Workshop 1433'; RemoteAddress = $adminSubnet; BroadRule = $false }
-        Certificate = [ordered]@{ DnsName = $privateDnsName; ThumbprintSha256 = ([BitConverter]::ToString(([Security.Cryptography.SHA256]::Create().ComputeHash([Text.Encoding]::UTF8.GetBytes($certificate.Thumbprint)))).Replace('-', '')); PublicCertificateSha256 = (Get-FileHash -LiteralPath $publicCertificatePath -Algorithm SHA256).Hash; PublicCertificatePath = $publicCertificatePath; PrivateKeyExported = $false }
+        TempDb = [ordered]@{ ApprovedRoot = $tempDbPath; Storage = $tempDbStorage; PersistentDataOnTemporaryDisk = $false; Deviation = $tempDbDeviation; EnoughSpace = $true; FileCount = $tempDbFilesAfter.Count; AllFilesUnderApprovedRoot = $true; OldPathCount = $oldTempDbPaths.Count; Files = $tempDbFilesAfter }
+        Firewall = [ordered]@{ Rule = [string]$firewallRuleReadback.DisplayName; RemoteAddress = [string]@($firewallAddressReadback.RemoteAddress)[0]; BroadRule = ($broadSqlRules.Count -ne 0) }
+        Certificate = [ordered]@{ DnsName = $privateDnsName; Thumbprint = $certificateThumbprint; RegistryCertificate = $registryCertificate; StoreThumbprint = (([string]$storeCertificate.Thumbprint -replace '\s', '').ToUpperInvariant()); ForceEncryption = $forceEncryption; HasPrivateKey = [bool]$storeCertificate.HasPrivateKey; ServerAuthenticationEku = $true; SanVerified = $true; ServiceKeyAclVerified = $true; PublicCertificateThumbprint = $publicCertificateThumbprint; PublicCertificateSha256 = (Get-FileHash -LiteralPath $publicCertificatePath -Algorithm SHA256).Hash; PublicCertificatePath = $publicCertificatePath; PrivateKeyExported = $false; TlsLoadFailures = $tlsLoadFailures; StartupBindingEvidence = $startupBindingEvidence }
         Backup = [ordered]@{ Uri = $backupUri; Sha256 = $backupHash; ChecksumClassification = 'observed-not-upstream-expected'; VerifyOnly = $true }
         Database = [ordered]@{ Marker = $databaseMarker; QueryStore = $queryStoreState; ResourceGovernor = $resourceGovernorState; ProcedureCount = $procedureCount; PriorMaxServerMemoryMB = $priorMaxServerMemory }
     }

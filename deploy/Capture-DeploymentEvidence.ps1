@@ -19,6 +19,13 @@ function ConvertTo-RedactedEvidenceText {
 if (-not $SqlReadiness.Completed -or -not $AdminReadiness.Completed) {
     throw 'Both readiness records must be complete before evidence pages are generated.'
 }
+if ($SqlReadiness.SchemaVersion -cne '1.0' -or $AdminReadiness.SchemaVersion -cne '1.0' -or
+    -not $SqlReadiness.Evidence.Sanitized -or -not $AdminReadiness.Evidence.Sanitized -or
+    $SqlReadiness.DeploymentId -cne $AdminReadiness.DeploymentId -or
+    $SqlReadiness.Repository.Commit -cne $AdminReadiness.Repository.Commit -or
+    $SqlReadiness.Certificate.Thumbprint -cne $AdminReadiness.SqlTls.CertificateThumbprint) {
+    throw 'Readiness evidence identity, schema, sanitization, commit, or certificate binding does not match.'
+}
 
 $null = New-Item -ItemType Directory -Path $OutputDirectory -Force
 $rows = @(
@@ -27,7 +34,8 @@ $rows = @(
     [pscustomobject]@{ Area = 'SQL VM'; Check = 'Backup'; Status = if ($SqlReadiness.Backup.VerifyOnly) { 'Passed' } else { 'Failed' }; Detail = 'Official asset hash observed; VERIFYONLY completed' }
     [pscustomobject]@{ Area = 'Admin VM'; Check = 'SQL TLS'; Status = if ($AdminReadiness.SqlTls.EncryptOption -eq 'TRUE') { 'Passed' } else { 'Failed' }; Detail = 'Private DNS and certificate validation' }
     [pscustomobject]@{ Area = 'Admin VM'; Check = 'MCP allowlist'; Status = if ($AdminReadiness.Mcp.ConfigValid -and -not $AdminReadiness.Mcp.ForbiddenMutationTools) { 'Passed' } else { 'Failed' }; Detail = ($AdminReadiness.Mcp.ToolNames -join ', ') }
-    [pscustomobject]@{ Area = 'Admin VM'; Check = 'GitHub/Copilot authentication'; Status = $AdminReadiness.AuthStatus; Detail = 'Interactive sign-in is intentionally not automated' }
+    [pscustomobject]@{ Area = 'Admin VM'; Check = 'GitHub CLI authentication'; Status = $AdminReadiness.Auth.GitHubCliAuthStatus; Detail = 'Observed without emitting command output' }
+    [pscustomobject]@{ Area = 'Admin VM'; Check = 'Copilot authentication'; Status = $AdminReadiness.Auth.CopilotAuthStatus; Detail = 'Interactive sign-in is intentionally not automated' }
 ) | ForEach-Object {
     [pscustomobject]@{
         Area = ConvertTo-RedactedEvidenceText $_.Area
@@ -57,6 +65,11 @@ $markdown | Set-Content -LiteralPath $markdownPath -Encoding UTF8
 
 [pscustomobject][ordered]@{
     Completed = $true
+    SchemaVersion = '1.0'
+    DeploymentId = ConvertTo-RedactedEvidenceText $SqlReadiness.DeploymentId
+    RepositoryCommit = ConvertTo-RedactedEvidenceText $SqlReadiness.Repository.Commit
+    CertificateThumbprint = ConvertTo-RedactedEvidenceText $SqlReadiness.Certificate.Thumbprint
+    Sanitized = $true
     HtmlPath = $htmlPath
     MarkdownPath = $markdownPath
     ScreenshotsCaptured = $false
