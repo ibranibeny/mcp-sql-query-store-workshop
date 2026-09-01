@@ -681,6 +681,58 @@ END;';
         )
             THROW 51923, 'The lab ownership marker changed before optional data removal.', 1;
 
+        /* Snapshot every eligible database before inventorying anything for optional deletion.
+           Access is a safety prerequisite, never an eligibility filter. */
+        DECLARE @CrossDatabaseScan table
+        (
+            DatabaseOrdinal int IDENTITY(1,1) NOT NULL PRIMARY KEY,
+            DatabaseId int NOT NULL UNIQUE,
+            DatabaseName sysname NOT NULL UNIQUE
+        );
+        INSERT @CrossDatabaseScan (DatabaseId, DatabaseName)
+        SELECT database_id, name
+        FROM sys.databases
+        WHERE state_desc = N'ONLINE'
+          AND source_database_id IS NULL
+          AND name <> N'tempdb'
+          AND (database_id > 4 OR name IN (N'master', N'model', N'msdb'))
+        ORDER BY database_id;
+
+        DECLARE @CrossDatabaseCount int = (SELECT COUNT(*) FROM @CrossDatabaseScan);
+        IF @CrossDatabaseCount > 256
+            THROW 51946, 'More than 256 online databases prevent a bounded optional lab deletion safety scan.', 1;
+
+        DECLARE @InaccessibleDatabaseCount int =
+        (
+            SELECT COUNT(*)
+            FROM @CrossDatabaseScan
+            WHERE COALESCE(HAS_DBACCESS(DatabaseName), 0) = 0
+        );
+        DECLARE @InaccessibleDatabaseList nvarchar(1600);
+        DECLARE @CrossDatabaseError nvarchar(2048);
+        IF @InaccessibleDatabaseCount > 0
+        BEGIN
+            SELECT @InaccessibleDatabaseList = STRING_AGG(CONVERT(nvarchar(max), sanitized.DatabaseName), N', ')
+                WITHIN GROUP (ORDER BY inaccessible.DatabaseId)
+            FROM
+            (
+                SELECT TOP (8) DatabaseId, DatabaseName
+                FROM @CrossDatabaseScan
+                WHERE COALESCE(HAS_DBACCESS(DatabaseName), 0) = 0
+                ORDER BY DatabaseId
+            ) AS inaccessible
+            CROSS APPLY
+            (
+                SELECT QUOTENAME(LEFT(REPLACE(REPLACE(REPLACE(inaccessible.DatabaseName,
+                    NCHAR(13), N'?'), NCHAR(10), N'?'), NCHAR(9), N'?'), 120)) AS DatabaseName
+            ) AS sanitized;
+
+            SET @CrossDatabaseError = N'Cannot prove optional lab deletion safe; inaccessible database count '
+                + CONVERT(nvarchar(10), @InaccessibleDatabaseCount) + N'; first up to 8: '
+                + COALESCE(@InaccessibleDatabaseList, N'(name unavailable)') + N'.';
+            THROW 51951, @CrossDatabaseError, 1;
+        END;
+
         DECLARE @ExpectedLabObjects table
         (
             ObjectName sysname NOT NULL PRIMARY KEY,
@@ -1288,24 +1340,42 @@ END;';
            lock serializes workshop setup and cleanup, but SQL Server cannot lock arbitrary DDL
            in every database. A cross-database DDL race remains possible; metadata uncertainty,
            access loss, or a detected reference therefore fails closed. */
-        DECLARE @CrossDatabaseScan table
+        SET @InaccessibleDatabaseCount =
         (
-            DatabaseOrdinal int IDENTITY(1,1) NOT NULL PRIMARY KEY,
-            DatabaseName sysname NOT NULL UNIQUE
+            SELECT COUNT(*)
+            FROM @CrossDatabaseScan
+            WHERE COALESCE(HAS_DBACCESS(DatabaseName), 0) <> 1
         );
-        INSERT @CrossDatabaseScan (DatabaseName)
-        SELECT name
-        FROM sys.databases
-        WHERE state_desc = N'ONLINE'
-          AND source_database_id IS NULL
-          AND name <> N'tempdb'
-          AND HAS_DBACCESS(name) = 1
-          AND (database_id > 4 OR name IN (N'master', N'model', N'msdb'))
-        ORDER BY database_id;
+        IF @InaccessibleDatabaseCount > 0
+        BEGIN
+            SET @CrossDatabaseError = N'Database accessibility changed before optional lab deletion; inaccessible count '
+                + CONVERT(nvarchar(10), @InaccessibleDatabaseCount) + N'.';
+            THROW 51952, @CrossDatabaseError, 1;
+        END;
 
-        DECLARE @CrossDatabaseCount int = (SELECT COUNT(*) FROM @CrossDatabaseScan);
-        IF @CrossDatabaseCount > 256
-            THROW 51946, 'More than 256 accessible online databases prevent a bounded optional lab deletion safety scan.', 1;
+        IF EXISTS
+        (
+            SELECT database_id, name
+            FROM sys.databases
+            WHERE state_desc = N'ONLINE'
+              AND source_database_id IS NULL
+              AND name <> N'tempdb'
+              AND (database_id > 4 OR name IN (N'master', N'model', N'msdb'))
+            EXCEPT
+            SELECT DatabaseId, DatabaseName FROM @CrossDatabaseScan
+        )
+        OR EXISTS
+        (
+            SELECT DatabaseId, DatabaseName FROM @CrossDatabaseScan
+            EXCEPT
+            SELECT database_id, name
+            FROM sys.databases
+            WHERE state_desc = N'ONLINE'
+              AND source_database_id IS NULL
+              AND name <> N'tempdb'
+              AND (database_id > 4 OR name IN (N'master', N'model', N'msdb'))
+        )
+            THROW 51953, 'The eligible database set changed during optional lab deletion safety checks.', 1;
 
         CREATE TABLE #OwnedLabObjects
         (
@@ -1325,7 +1395,6 @@ END;';
         DECLARE @CrossDatabaseOrdinal int = 1;
         DECLARE @CrossDatabaseName sysname;
         DECLARE @CrossDatabaseSql nvarchar(max);
-        DECLARE @CrossDatabaseError nvarchar(2048);
         WHILE @CrossDatabaseOrdinal <= @CrossDatabaseCount
         BEGIN
             SELECT @CrossDatabaseName = DatabaseName
@@ -1439,6 +1508,14 @@ WHERE
             THROW 51949, 'Unrecognized cross-database lab dependency found; refusing optional lab deletion.', 1;
         IF EXISTS (SELECT 1 FROM #CrossDatabaseFindings WHERE FindingType = 'S')
             THROW 51950, 'Unrecognized cross-database lab synonym found; refusing optional lab deletion.', 1;
+
+        IF EXISTS
+        (
+            SELECT 1
+            FROM @CrossDatabaseScan
+            WHERE COALESCE(HAS_DBACCESS(DatabaseName), 0) <> 1
+        )
+            THROW 51954, 'Database accessibility changed immediately before optional lab deletion.', 1;
 
         /* The application lock narrows workshop lifecycle races; unrelated cross-database DDL races
            cannot be fully locked, so the safest behavior is to abort on every uncertain scan. */

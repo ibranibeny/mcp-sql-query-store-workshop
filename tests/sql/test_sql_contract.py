@@ -2146,19 +2146,44 @@ def test_cleanup_dependency_guard_blocks_external_non_schema_bound_modules_in_bo
     assert optional.index("UNRECOGNIZED LAB DEPENDENCY") < first_drop
 
 
-def test_cleanup_snapshots_every_accessible_online_database_with_a_hard_bound() -> None:
+def test_cleanup_snapshots_every_eligible_online_database_and_fails_closed_on_inaccessibility() -> None:
     text = normalized("09-Cleanup.sql")
     optional = text[text.index("IF @DROPLABDATA = 1"):]
     cross_database = optional[optional.index("DECLARE @CROSSDATABASESCAN"):]
+    initial_guard = cross_database[:cross_database.index("DECLARE @EXPECTEDLABOBJECTS")]
+    first_enumeration = cross_database.index("WHILE @CROSSDATABASEORDINAL <= @CROSSDATABASECOUNT")
+    first_drop = cross_database.index("DROP VIEW IF EXISTS LAB.VW_WORKSHOPSAMPLESUMMARY")
 
     assert "FROM SYS.DATABASES" in cross_database
     assert "STATE_DESC = N'ONLINE'" in cross_database
     assert "SOURCE_DATABASE_ID IS NULL" in cross_database
     assert "NAME <> N'TEMPDB'" in cross_database
-    assert "HAS_DBACCESS(NAME) = 1" in cross_database
     assert "N'MASTER'" in cross_database and "N'MSDB'" in cross_database
-    assert re.search(r"@CROSSDATABASECOUNT\s*>\s*256.*?THROW", cross_database)
-    assert "WHILE @CROSSDATABASEORDINAL <= @CROSSDATABASECOUNT" in cross_database
+    assert "HAS_DBACCESS(DATABASENAME)" in initial_guard
+    assert re.search(r"HAS_DBACCESS\(DATABASENAME\).*?=\s*0.*?THROW", initial_guard)
+    assert "AND HAS_DBACCESS(NAME) = 1" not in initial_guard
+    assert re.search(r"@CROSSDATABASECOUNT\s*>\s*256.*?THROW", initial_guard)
+    assert "@INACCESSIBLEDATABASECOUNT" in initial_guard
+    assert "@INACCESSIBLEDATABASELIST" in initial_guard
+    assert "QUOTENAME(" in initial_guard
+    assert initial_guard.index("HAS_DBACCESS(DATABASENAME)") < first_enumeration < first_drop
+
+
+def test_cleanup_rechecks_database_access_immediately_before_cross_database_enumeration_and_drop() -> None:
+    text = normalized("09-Cleanup.sql")
+    optional = text[text.index("IF @DROPLABDATA = 1"):]
+    cross_database = optional[optional.index("DECLARE @CROSSDATABASESCAN"):]
+    first_check = cross_database.index("DECLARE @INACCESSIBLEDATABASECOUNT")
+    recheck = cross_database[cross_database.index("SET @INACCESSIBLEDATABASECOUNT", first_check):]
+    first_enumeration = recheck.index("WHILE @CROSSDATABASEORDINAL <= @CROSSDATABASECOUNT")
+    last_dependency_guard = recheck.index("UNRECOGNIZED CROSS-DATABASE LAB SYNONYM")
+    first_drop = recheck.index("DROP VIEW IF EXISTS LAB.VW_WORKSHOPSAMPLESUMMARY")
+
+    assert re.search(r"HAS_DBACCESS\(.*?\).*?<>\s*1.*?THROW", recheck[:first_enumeration])
+    assert "DATABASE METADATA VISIBILITY IS INSUFFICIENT" in recheck
+    final_access_check = recheck.rindex("HAS_DBACCESS(DATABASENAME)")
+    assert last_dependency_guard < final_access_check < first_drop
+    assert first_enumeration < first_drop
 
 
 def test_cleanup_cross_database_dependency_query_is_quoted_parameterized_and_exact() -> None:
