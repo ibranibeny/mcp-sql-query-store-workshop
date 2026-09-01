@@ -1271,14 +1271,19 @@ Describe 'Task 12 workload orchestration' {
         }
     }
 
-    It 'passes the same absolute experiment deadline to every worker start' {
+    It 'passes one shared bounded deadline to workers in each measurement phase' {
         $fixture = Get-TestOperationSet
         [void](Invoke-WorkshopExperiment -RunId ([guid]::NewGuid()) -OperationSet $fixture.Operations `
             -MaximumDurationSeconds 60 -WorkerRampSeconds 20)
 
         @($fixture.State.Starts).Count | Should -BeGreaterThan 0
-        @($fixture.State.Starts | Select-Object -ExpandProperty Deadline -Unique).Count | Should -Be 1
-        $fixture.State.Starts[0].Deadline | Should -BeExactly ([datetimeoffset]'2026-09-01T10:01:00Z')
+        $baselineDeadlines = @($fixture.State.Starts | Where-Object Phase -eq Baseline |
+            Select-Object -ExpandProperty Deadline -Unique)
+        $optimizedDeadlines = @($fixture.State.Starts | Where-Object Phase -eq Optimized |
+            Select-Object -ExpandProperty Deadline -Unique)
+        $baselineDeadlines | Should -Be @([datetimeoffset]'2026-09-01T10:01:00Z')
+        $optimizedDeadlines.Count | Should -Be 1
+        $optimizedDeadlines[0] | Should -BeGreaterThan $baselineDeadlines[0]
     }
 
     It 'fails at the exact experiment deadline during drain without entering optimized measurement' {
@@ -1303,14 +1308,14 @@ Describe 'Task 12 workload orchestration' {
         $fixture.State.KillCalls | Should -BeGreaterOrEqual 1
     }
 
-    It 'fails at the exact experiment deadline after a synchronous trial and discards partial performance evidence' {
+    It 'fails at the comparison phase deadline after a synchronous trial and discards partial performance evidence' {
         $fixture = Get-TestOperationSet
         $inner = $fixture.Operations.Sample
         $fixture.Operations.Sample = {
             param($RunId,$Phase,$Kind,$TrialPhase,$ScheduleEntry,$RemainingSeconds)
             $value = & $inner $RunId $Phase $Kind $TrialPhase $ScheduleEntry $RemainingSeconds
             if ($Kind -eq 'Trial') {
-                $fixture.State.Now = [datetimeoffset]'2026-09-01T10:01:00Z'
+                $fixture.State.Now = [datetimeoffset]'2026-09-01T11:00:00Z'
             }
             return $value
         }.GetNewClosure()
@@ -1669,7 +1674,61 @@ Describe 'Task 12 workload orchestration' {
             -MaximumWorkers 4 -MaximumDurationSeconds 60 -SampleIntervalSeconds 5 -WorkerRampSeconds 20
         $result.Outcome | Should -Be 'BaselineTargetNotReached'
         @($fixture.State.Starts | Where-Object Phase -eq Optimized).Count | Should -Be 0
+        $result.Trials.Count | Should -Be 0
         $fixture.State.Exported | Should -BeTrue
+    }
+
+    It 'continues frozen trials after optimized peak 51 times out and derives ImprovedOutsideTarget' {
+        $optimized = 1..20 | ForEach-Object { Get-TestSample Optimized 51 }
+        $fixture = Get-TestOperationSet -Optimized $optimized
+
+        $result = Invoke-WorkshopExperiment -RunId ([guid]::NewGuid()) -OperationSet $fixture.Operations `
+            -MaximumDurationSeconds 60 -SampleIntervalSeconds 5 -WorkerRampSeconds 20
+
+        $result.Outcome | Should -BeExactly 'ImprovedOutsideTarget' `
+            -Because ($result.Evidence.terminationEvidence | ConvertTo-Json -Compress)
+        $result.Phase | Should -BeExactly 'Comparison'
+        $result.Trials.Count | Should -Be 12
+        $result.TerminationEvidence.Timeout | Should -BeTrue
+        $result.Evidence.terminationEvidence.timeout | Should -BeTrue
+        $result.Evidence.terminationEvidence.psobject.Properties.Name | Should -Not -Contain 'failure'
+        $result.Evidence.measuredPeaks.baseline | Should -BeExactly ([decimal]82)
+        $result.Evidence.measuredPeaks.optimized | Should -BeExactly ([decimal]51)
+        @($fixture.State.Starts | Where-Object Phase -eq Optimized).Count | Should -Be $result.FrozenSettings.Workers
+        @($fixture.State.Starts | Where-Object { $_.Phase -eq 'Optimized' -and -not $_.Disposed }).Count |
+            Should -Be 0
+        $fixture.State.Stops.Count | Should -Be $fixture.State.Starts.Count
+        @($fixture.State.Events | Where-Object Kind -eq 'Fingerprint').Count | Should -BeGreaterOrEqual 2
+        $result.Evidence.status | Should -BeExactly 'Completed'
+    }
+
+    It 'continues frozen trials after optimized peak 56 times out and derives NoMaterialImprovement' {
+        $optimized = 1..20 | ForEach-Object { Get-TestSample Optimized 56 }
+        $fixture = Get-TestOperationSet -Optimized $optimized
+        $sampleOperation = $fixture.Operations.Sample
+        $fixture.Operations.Sample = {
+            param($RunId,$Phase,$Kind,$TrialPhase,$ScheduleEntry,$RemainingSeconds)
+            $value = & $sampleOperation $RunId $Phase $Kind $TrialPhase $ScheduleEntry $RemainingSeconds
+            if ($Kind -eq 'Trial' -and $TrialPhase -eq 'Optimized') {
+                $value.DurationMs = 100
+                $value.CpuMs = 50
+                $value.LogicalReads = 1000
+                $value.WaitMs = 5
+            }
+            return $value
+        }.GetNewClosure()
+
+        $result = Invoke-WorkshopExperiment -RunId ([guid]::NewGuid()) -OperationSet $fixture.Operations `
+            -MaximumDurationSeconds 60 -SampleIntervalSeconds 5 -WorkerRampSeconds 20
+
+        $result.Outcome | Should -BeExactly 'NoMaterialImprovement' `
+            -Because ($result.Evidence.terminationEvidence | ConvertTo-Json -Compress)
+        $result.Trials.Count | Should -Be 12
+        $result.Validation.AdditionalMetricImproved | Should -BeFalse
+        $result.TerminationEvidence.Timeout | Should -BeTrue
+        $result.Evidence.terminationEvidence.psobject.Properties.Name | Should -Not -Contain 'failure'
+        $result.Evidence.measuredPeaks.optimized | Should -BeExactly ([decimal]56)
+        $result.Evidence.status | Should -BeExactly 'Completed'
     }
 
     It 'stops immediately for safety with manual stop precedence' {

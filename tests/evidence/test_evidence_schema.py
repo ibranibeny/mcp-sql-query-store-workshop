@@ -652,6 +652,25 @@ def test_schema_requires_independent_consistent_termination_evidence(
     assert_invalid(schema, healthy_timeout)
 
 
+@pytest.mark.parametrize(
+    ("outcome", "optimized_peak"),
+    (("ImprovedOutsideTarget", 51), ("NoMaterialImprovement", 56)),
+)
+def test_optimized_target_miss_can_complete_comparison_with_timeout_evidence(
+    schema: dict,
+    target: dict,
+    outcome: str,
+    optimized_peak: int,
+) -> None:
+    measured = measured_evidence(target, outcome=outcome)
+    measured["terminationEvidence"]["timeout"] = True
+    measured["samples"][1] = measured_sample(2, "Optimized", optimized_peak)
+    measured["measuredPeaks"]["optimized"] = optimized_peak
+    assert "failure" not in measured["terminationEvidence"]
+
+    validate_evidence(measured, schema)
+
+
 def test_metric_ranges_and_outcome_enum_are_enforced(
     schema: dict, target: dict
 ) -> None:

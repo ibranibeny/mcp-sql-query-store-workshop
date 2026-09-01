@@ -1355,7 +1355,7 @@ function ConvertTo-WorkshopEvidence {
         if ($Outcome -ceq 'SafetyStop' -and -not $termination.safetyStopTriggered) {
             throw 'SafetyStop requires an independent safety stop flag.'
         }
-        if ($Outcome -in @('TargetMet', 'ImprovedOutsideTarget') -and $termination.timeout) {
+        if ($Outcome -ceq 'TargetMet' -and $termination.timeout) {
             throw "Outcome '$Outcome' cannot claim a timeout."
         }
         $expectedOutcome = if ($status -ceq 'Failed') {
@@ -2159,6 +2159,9 @@ function Invoke-WorkshopExperiment {
         }
 
         $terminalPhase = 'Optimized'
+        $optimizedMeasurementStart = [datetimeoffset] (& $OperationSet.Clock)
+        $deadline = $optimizedMeasurementStart.AddSeconds($MaximumDurationSeconds)
+        $runtimeState.Deadline = $deadline
         & $assertFrozenFingerprint
 
         $consecutive = 0
@@ -2176,7 +2179,6 @@ function Invoke-WorkshopExperiment {
         while ($null -eq $outcome) {
             $now = [datetimeoffset] (& $OperationSet.Clock)
             if ($now -ge $deadline) {
-                $outcome = 'Failed'
                 $timeout = $true
                 [void](& $OperationSet.KillTagged $RunId)
                 break
@@ -2185,7 +2187,6 @@ function Invoke-WorkshopExperiment {
             & $assertFrozenFingerprint
             $now = [datetimeoffset] (& $OperationSet.Clock)
             if ($now -ge $deadline) {
-                $outcome = 'Failed'
                 $timeout = $true
                 [void](& $OperationSet.KillTagged $RunId)
                 break
@@ -2196,16 +2197,20 @@ function Invoke-WorkshopExperiment {
                 -HostAvailableMB $sample.HostAvailableMB -ProcessPhysicalLow $sample.ProcessPhysicalLow `
                 -ProcessVirtualLow $sample.ProcessVirtualLow `
                 -ConsecutiveHealthFailures $healthFailures `
-                -ElapsedSeconds (($now - $start).TotalSeconds) `
+                -ElapsedSeconds (($now - $optimizedMeasurementStart).TotalSeconds) `
                 -MaximumDurationSeconds $MaximumDurationSeconds -Phase Optimized `
                 -ManualStop $sample.ManualStopRequested
             if ($safety.Decision -eq 'Stop') {
-                $outcome = $safety.Outcome
                 $terminalPhase = 'Optimized'
-                $manualStopRequested = $outcome -eq 'ManualStop'
-                $safetyStopTriggered = $outcome -eq 'SafetyStop'
+                $manualStopRequested = $safety.Outcome -eq 'ManualStop'
+                $safetyStopTriggered = $safety.Outcome -eq 'SafetyStop'
                 $safetyReasons = if ($safetyStopTriggered) { @($safety.Reasons) } else { @() }
-                $timeout = $outcome -eq 'NoMaterialImprovement'
+                if ($manualStopRequested -or $safetyStopTriggered) {
+                    $outcome = $safety.Outcome
+                }
+                else {
+                    $timeout = $true
+                }
                 [void](& $OperationSet.KillTagged $RunId)
                 break
             }
@@ -2221,10 +2226,13 @@ function Invoke-WorkshopExperiment {
         foreach ($worker in @($workers)) { if ($worker -is [System.IDisposable] -or $worker.psobject.Methods['Dispose']) { $worker.Dispose() } }
         $workers.Clear()
 
-        if ($null -eq $outcome) { & $assertFrozenFingerprint }
+        if ($null -eq $outcome -and -not $timeout) { & $assertFrozenFingerprint }
 
         if ($null -eq $outcome) {
             $terminalPhase = 'Comparison'
+            $comparisonStart = [datetimeoffset] (& $OperationSet.Clock)
+            $deadline = $comparisonStart.AddSeconds($MaximumDurationSeconds)
+            $runtimeState.Deadline = $deadline
             $sequence = @(Get-WorkshopTrialSequence)
             for ($index = 0; $index -lt $sequence.Count; $index++) {
                 if (([datetimeoffset] (& $OperationSet.Clock)) -ge $deadline) {
@@ -2272,7 +2280,7 @@ function Invoke-WorkshopExperiment {
                         -ProcessPhysicalLow $safetySample.ProcessPhysicalLow `
                         -ProcessVirtualLow $safetySample.ProcessVirtualLow `
                         -ConsecutiveHealthFailures (& $updateHealthFailures ([bool]$safetySample.Healthy)) `
-                        -ElapsedSeconds (($safetyNow-$start).TotalSeconds) `
+                        -ElapsedSeconds (($safetyNow-$comparisonStart).TotalSeconds) `
                         -MaximumDurationSeconds $MaximumDurationSeconds -Phase $trialPhase `
                         -ManualStop $safetySample.ManualStopRequested
                     if ($safety.Decision -eq 'Stop') {

@@ -212,10 +212,15 @@
             "oneOf": [
               {
                 "properties": {
-                  "outcome": { "enum": ["TargetMet", "ImprovedOutsideTarget"] },
+                  "outcome": { "const": "TargetMet" },
                   "terminationEvidence": {
                     "properties": { "timeout": { "const": false } }
                   }
+                }
+              },
+              {
+                "properties": {
+                  "outcome": { "const": "ImprovedOutsideTarget" }
                 }
               },
               {
