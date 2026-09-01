@@ -10,6 +10,10 @@ EXTENSIONS_CONFIG = ROOT / ".vscode" / "extensions.json"
 ENV_EXAMPLE = ROOT / "mcp" / ".env.example"
 README = ROOT / "mcp" / "README.md"
 COPILOT_INSTRUCTIONS = ROOT / ".github" / "copilot-instructions.md"
+DAB_SCHEMA_URL = (
+    "https://github.com/Azure/data-api-builder/releases/download/"
+    "v2.0.9/dab.draft.schema.json"
+)
 
 VIEW_ENTITIES = {
     "WorkshopRunSummary": "lab.vw_WorkshopRunSummary",
@@ -54,13 +58,17 @@ def actions(entity: dict) -> list:
 def test_dab_config_has_only_documented_top_level_and_runtime_properties():
     config = load_json(DAB_CONFIG)
     assert set(config) == {"$schema", "data-source", "runtime", "entities"}
-    assert re.fullmatch(
-        r"https://github\.com/Azure/data-api-builder/releases/download/v2\.[^/]+/dab\.draft\.schema\.json",
-        config["$schema"],
-    )
+    assert config["$schema"] == DAB_SCHEMA_URL
     assert set(config["data-source"]) <= {"database-type", "connection-string", "options"}
     assert set(config["runtime"]) == {"rest", "graphql", "mcp"}
     assert set(config["runtime"]["mcp"]) == {"enabled", "path", "description", "dml-tools"}
+
+
+def test_schema_reference_is_offline_allowlisted_and_version_pinned():
+    schema_url = load_json(DAB_CONFIG)["$schema"]
+    assert schema_url == DAB_SCHEMA_URL
+    assert schema_url.startswith("https://github.com/Azure/data-api-builder/")
+    assert "/releases/download/v2.0.9/" in schema_url
 
 
 def test_dab_runtime_is_mssql_mcp_only_and_read_only():
@@ -152,7 +160,6 @@ def test_procedures_are_execute_only_custom_tools_with_documented_parameters():
 def test_every_entity_and_configured_field_has_a_description():
     for entity in load_json(DAB_CONFIG)["entities"].values():
         assert entity["description"].strip()
-        assert entity["source"]["object-description"].strip()
         assert entity["fields"]
         names = [field["name"] for field in entity["fields"]]
         assert len(names) == len(set(names))
@@ -160,6 +167,13 @@ def test_every_entity_and_configured_field_has_a_description():
             assert set(field) <= {"name", "alias", "description", "primary-key"}
             assert field["name"].strip()
             assert field["description"].strip()
+
+
+def test_entity_sources_exclude_unsupported_object_description():
+    entities = load_json(DAB_CONFIG)["entities"]
+    assert len(entities) == 8
+    for entity in entities.values():
+        assert "object-description" not in entity["source"]
 
 
 def test_no_anonymous_or_write_permissions_exist():

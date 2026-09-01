@@ -1,5 +1,5 @@
 {
-  "$schema": "https://github.com/Azure/data-api-builder/releases/download/v2.0.0/dab.draft.schema.json",
+  "$schema": "https://github.com/Azure/data-api-builder/releases/download/v2.0.9/dab.draft.schema.json",
   "data-source": {
     "database-type": "mssql",
     "connection-string": "@env('MSSQL_CONNECTION_STRING')",
@@ -37,7 +37,6 @@
       "description": "Read-only summaries of bounded workshop runs and measured comparison outcomes. TARGET values are not measurements; use only rows classified as LAB-MEASURED for observed results.",
       "source": {
         "object": "lab.vw_WorkshopRunSummary",
-        "object-description": "Curated projection of workshop run status, evidence classification, Query Store identifiers, and measured performance totals.",
         "type": "view"
       },
       "fields": [
@@ -80,7 +79,6 @@
       "description": "Read-only time-series memory samples collected during bounded baseline and optimized phases. Values are observations only when their run is LAB-MEASURED.",
       "source": {
         "object": "lab.vw_WorkshopSampleSummary",
-        "object-description": "Curated projection of workshop resource-pool, host, process, and SQL Server memory samples.",
         "type": "view"
       },
       "fields": [
@@ -123,7 +121,6 @@
       "description": "Returns one current read-only memory snapshot for the workshop resource pool regular semaphore and host. No parameters or parameter bounds apply; values are point-in-time evidence, not a completed benchmark.",
       "source": {
         "object": "lab.usp_GetMemorySnapshot",
-        "object-description": "Bounded diagnostic procedure that reads the workshop pool, SQL Server, process, and host memory DMVs without changing state.",
         "type": "stored-procedure"
       },
       "fields": [
@@ -159,7 +156,6 @@
       "description": "Returns active memory grants only for doubly scoped workshop sessions. Parameter bounds: Top is 1-100 and defaults to 20; RunID is optional and limits evidence to one workshop run.",
       "source": {
         "object": "lab.usp_GetActiveWorkshopGrants",
-        "object-description": "Bounded DMV diagnostic for active or waiting query-memory grants from workshop-tagged sessions.",
         "type": "stored-procedure",
         "parameters": [
           { "name": "Top", "required": false, "default": 20, "description": "Maximum rows to return; integer from 1 through 100." },
@@ -193,7 +189,6 @@
       "description": "Returns bounded Query Store runtime evidence only for the baseline and optimized workshop procedures. Parameter bounds: StartUtc precedes EndUtc, the window is at most 24 hours, and Top is 1-100 with default 20.",
       "source": {
         "object": "lab.usp_GetQueryStoreTopQueries",
-        "object-description": "Read-only bounded Query Store runtime aggregate for the two workshop procedure object identifiers.",
         "type": "stored-procedure",
         "parameters": [
           { "name": "StartUtc", "required": true, "description": "Inclusive UTC start of the evidence window; must precede EndUtc." },
@@ -223,7 +218,6 @@
       "description": "Returns bounded Query Store wait evidence only for the baseline and optimized workshop procedures. Parameter bounds: StartUtc precedes EndUtc, the window is at most 24 hours, and Top is 1-100 with default 20.",
       "source": {
         "object": "lab.usp_GetQueryStoreWaits",
-        "object-description": "Read-only bounded Query Store wait-category aggregate for the two workshop procedure object identifiers.",
         "type": "stored-procedure",
         "parameters": [
           { "name": "StartUtc", "required": true, "description": "Inclusive UTC start of the evidence window; must precede EndUtc." },
@@ -248,7 +242,6 @@
       "description": "Returns bounded Query Store plan metadata for one workshop procedure. Parameter bounds: ProcedureName is exactly lab.usp_MonthEndSalesBaseline or lab.usp_MonthEndSalesOptimized; Top is 1-100 with default 20. PlanHash is evidence identity, not proof of performance.",
       "source": {
         "object": "lab.usp_GetProcedurePlanSummary",
-        "object-description": "Read-only bounded Query Store plan summary for only the baseline or optimized workshop procedure.",
         "type": "stored-procedure",
         "parameters": [
           { "name": "ProcedureName", "required": true, "description": "Exact two-part name: lab.usp_MonthEndSalesBaseline or lab.usp_MonthEndSalesOptimized." },
@@ -275,7 +268,6 @@
       "description": "Compares one completed, frozen workshop comparison using exactly twelve correct paired trials. Parameter bounds: RunID and ValidationBatchID are required UUIDs. Returns measured peak and median grant utilization plus duration, CPU, reads, spills, waits, regression flags, and final evidence outcome.",
       "source": {
         "object": "lab.usp_CompareWorkshopRuns",
-        "object-description": "Read-only evidence comparison that validates a completed comparison run and its exact validation batch before calculating outcomes.",
         "type": "stored-procedure",
         "parameters": [
           { "name": "RunID", "required": true, "description": "UUID of a completed Comparison-phase workshop run with frozen settings and both phase samples." },
