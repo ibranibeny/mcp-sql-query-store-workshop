@@ -2971,19 +2971,23 @@ function Get-WorkshopKillPlan {
         [Parameter(Mandatory)][ValidateRange(1, 32767)][int] $CurrentSessionId
     )
 
-    $namePattern = '^MCP-SQL-Workshop-' + [regex]::Escape($RunId.ToString('D')) + '-(?:Baseline|Optimized)-[1-4]$'
+    $namePattern = '^MCP-SQL-Workshop-' + [regex]::Escape($RunId.ToString('D')) + '-(?:Baseline|Optimized|Comparison)-[1-4]$'
     $expectedBytes = $RunId.ToByteArray()
-    return @($Sessions | Where-Object {
+    $candidates = @($Sessions | Where-Object {
         $sessionId = 0
         $validId = [int]::TryParse([string] $_.SessionId, [ref] $sessionId)
         $context = [byte[]] $_.ContextInfo
-        $contextMatches = $context.Length -eq $expectedBytes.Length -and
-            [System.Linq.Enumerable]::SequenceEqual[byte]($context, $expectedBytes)
+        $contextMatches = $context.Length -ge $expectedBytes.Length -and
+            [Convert]::ToHexString($context, 0, 16) -ceq [Convert]::ToHexString($expectedBytes)
         $validId -and $sessionId -gt 0 -and $sessionId -ne $CurrentSessionId -and
             $_.IsUserProcess -and $_.IsActive -and
             ([string] $_.ProgramName) -cmatch $namePattern -and
             $contextMatches
-    } | Sort-Object SessionId | ForEach-Object {
+    })
+    if ($candidates.Count -gt 100) {
+        throw 'Workshop session termination refuses more than 100 candidates.'
+    }
+    return @($candidates | Sort-Object SessionId | ForEach-Object {
         $sessionId = [int] $_.SessionId
         [pscustomobject][ordered]@{ SessionId = $sessionId; Statement = "KILL $sessionId;" }
     })
@@ -3992,18 +3996,30 @@ WHERE s.session_id=@@SPID;
     $killTagged = {
         param([guid] $RunId, [int] $RemainingSeconds = 5)
         $operationDeadline = [datetimeoffset]::UtcNow.AddSeconds([math]::Max(1, $RemainingSeconds))
-        $sessionSql = "SELECT CONVERT(int,s.session_id) AS SessionId, CONVERT(bit,s.is_user_process) AS IsUserProcess, CONVERT(bit,CASE WHEN r.session_id IS NOT NULL THEN 1 ELSE 0 END) AS IsActive, CONVERT(nvarchar(128),s.program_name) AS ProgramName, CONVERT(varbinary(128),s.context_info) AS ContextInfo, CONVERT(int,@@SPID) AS CurrentSessionId FROM sys.dm_exec_sessions AS s LEFT JOIN sys.dm_exec_requests AS r ON r.session_id=s.session_id WHERE s.program_name LIKE @Prefix;"
-        $parameters = @{ '@Prefix' = @{ Type = [Data.SqlDbType]::NVarChar; Size = 128; Value = "MCP-SQL-Workshop-$($RunId.ToString('D'))-%" } }
+        $sessionSql = "SELECT CONVERT(int,s.session_id) AS SessionId, CONVERT(bit,s.is_user_process) AS IsUserProcess, CONVERT(bit,1) AS IsActive, CONVERT(nvarchar(128),s.program_name) AS ProgramName, CONVERT(varbinary(128),s.context_info) AS ContextInfo, CONVERT(int,@@SPID) AS CurrentSessionId FROM sys.dm_exec_sessions AS s INNER JOIN sys.dm_exec_requests AS r ON r.session_id=s.session_id WHERE CONVERT(binary(16),SUBSTRING(s.context_info,1,16))=@RunBytes AND s.session_id<>@@SPID;"
+        $parameters = @{ '@RunBytes' = @{ Type = [Data.SqlDbType]::Binary; Size = 16; Value = $RunId.ToByteArray() } }
         $sessions = @(& $invokeTable 'MCP-SQL-Workshop-Controller-Stop' $sessionSql $parameters `
             $null $RemainingSeconds $operationDeadline)
         if ($sessions.Count -eq 0) { return @() }
         $plan = @(& $getKillPlan -RunId $RunId -Sessions $sessions -CurrentSessionId $sessions[0].CurrentSessionId)
+        $killed = [System.Collections.Generic.List[int]]::new()
         foreach ($entry in $plan) {
-            # Persist the exact captured row before executing a KILL generated solely from a validated integer SPID.
+            $revalidationSql = "SELECT CONVERT(int,s.session_id) AS SessionId, CONVERT(bit,s.is_user_process) AS IsUserProcess, CONVERT(bit,1) AS IsActive, CONVERT(nvarchar(128),s.program_name) AS ProgramName, CONVERT(varbinary(128),s.context_info) AS ContextInfo, CONVERT(int,@@SPID) AS CurrentSessionId FROM sys.dm_exec_sessions AS s INNER JOIN sys.dm_exec_requests AS r ON r.session_id=s.session_id WHERE s.session_id=@SessionId AND s.session_id<>@@SPID AND CONVERT(binary(16),SUBSTRING(s.context_info,1,16))=@RunBytes;"
+            $revalidationParameters = @{
+                '@SessionId' = @{ Type = [Data.SqlDbType]::Int; Value = [int]$entry.SessionId }
+                '@RunBytes' = @{ Type = [Data.SqlDbType]::Binary; Size = 16; Value = $RunId.ToByteArray() }
+            }
+            $current = @(& $invokeTable 'MCP-SQL-Workshop-Controller-Stop' $revalidationSql `
+                $revalidationParameters $null $RemainingSeconds $operationDeadline)
+            if ($current.Count -ne 1) { continue }
+            $revalidatedPlan = @(& $getKillPlan -RunId $RunId -Sessions $current `
+                -CurrentSessionId $current[0].CurrentSessionId)
+            if ($revalidatedPlan.Count -ne 1 -or $revalidatedPlan[0].SessionId -ne $entry.SessionId) { continue }
             [void] (& $invokeTable 'MCP-SQL-Workshop-Controller-Stop' $entry.Statement @{} `
                 $null $RemainingSeconds $operationDeadline)
+            $killed.Add([int]$entry.SessionId)
         }
-        return @($plan.SessionId)
+        return @($killed)
     }.GetNewClosure()
 
     $getSha256ForPersistence = ${function:Get-Sha256}

@@ -2288,13 +2288,33 @@ Describe 'Task 12 stop and export safety' {
         $rows = @(
             [pscustomobject]@{ SessionId = 51; IsUserProcess = $true; IsActive = $true; ProgramName = "MCP-SQL-Workshop-$run-Baseline-1"; ContextInfo = $run.ToByteArray() }
             [pscustomobject]@{ SessionId = 52; IsUserProcess = $true; IsActive = $true; ProgramName = "MCP-SQL-Workshop-$run-Optimized-1"; ContextInfo = ([guid]::NewGuid()).ToByteArray() }
-            [pscustomobject]@{ SessionId = 53; IsUserProcess = $true; IsActive = $false; ProgramName = "MCP-SQL-Workshop-$run-Baseline-2"; ContextInfo = $run.ToByteArray() }
-            [pscustomobject]@{ SessionId = 54; IsUserProcess = $false; IsActive = $true; ProgramName = "MCP-SQL-Workshop-$run-Baseline-3"; ContextInfo = $run.ToByteArray() }
+            [pscustomobject]@{ SessionId = 53; IsUserProcess = $true; IsActive = $true; ProgramName = "MCP-SQL-Workshop-$run-Baseline-2-extra"; ContextInfo = $run.ToByteArray() }
+            [pscustomobject]@{ SessionId = 54; IsUserProcess = $true; IsActive = $true; ProgramName = "MCP-SQL-Workshop-bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb-Baseline-3"; ContextInfo = $run.ToByteArray() }
+            [pscustomobject]@{ SessionId = 55; IsUserProcess = $true; IsActive = $false; ProgramName = "MCP-SQL-Workshop-$run-Baseline-2"; ContextInfo = $run.ToByteArray() }
+            [pscustomobject]@{ SessionId = 56; IsUserProcess = $false; IsActive = $true; ProgramName = "MCP-SQL-Workshop-$run-Baseline-3"; ContextInfo = $run.ToByteArray() }
+            [pscustomobject]@{ SessionId = 57; IsUserProcess = $true; IsActive = $true; ProgramName = "MCP-SQL-Workshop-$run-Comparison-4"; ContextInfo = $run.ToByteArray() + [byte[]](1, 2) }
+            [pscustomobject]@{ SessionId = 99; IsUserProcess = $true; IsActive = $true; ProgramName = "MCP-SQL-Workshop-$run-Optimized-4"; ContextInfo = $run.ToByteArray() }
         )
         $plan = @(Get-WorkshopKillPlan -RunId $run -Sessions $rows -CurrentSessionId 99)
-        $plan.Count | Should -Be 1
-        $plan[0].SessionId | Should -Be 51
-        $plan[0].Statement | Should -BeExactly 'KILL 51;'
+        $plan.Count | Should -Be 2
+        $plan.SessionId | Should -Be @(51, 57)
+        $plan.Statement | Should -BeExactly @('KILL 51;', 'KILL 57;')
+    }
+
+    It 'rejects more than 100 termination candidates instead of truncating silently' {
+        $run = [guid]'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
+        $rows = 1..101 | ForEach-Object {
+            [pscustomobject]@{
+                SessionId = $_
+                IsUserProcess = $true
+                IsActive = $true
+                ProgramName = "MCP-SQL-Workshop-$run-Baseline-1"
+                ContextInfo = $run.ToByteArray()
+            }
+        }
+
+        { Get-WorkshopKillPlan -RunId $run -Sessions $rows -CurrentSessionId 32767 } |
+            Should -Throw '*100*'
     }
 
     It 'rejects noncanonical run paths and reparse-point output' {

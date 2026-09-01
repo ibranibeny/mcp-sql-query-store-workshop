@@ -18,6 +18,8 @@ DECLARE @ExpectedServerName nvarchar(256) = NULLIF(LOWER(LTRIM(RTRIM(TRY_CONVERT
 DECLARE @DatabaseName sysname = NULLIF(LTRIM(RTRIM(TRY_CONVERT(sysname, SESSION_CONTEXT(N'DatabaseName')))), N'');
 DECLARE @DropLabDataValue sql_variant = SESSION_CONTEXT(N'DropLabData');
 DECLARE @DropLabData bit = COALESCE(TRY_CONVERT(bit, @DropLabDataValue), 0);
+DECLARE @CleanupRunIdValue sql_variant = SESSION_CONTEXT(N'CleanupRunId');
+DECLARE @CleanupRunId uniqueidentifier = TRY_CONVERT(uniqueidentifier, @CleanupRunIdValue);
 DECLARE @WorkshopMarker uniqueidentifier = '68A70D6E-62D8-4A77-8F0A-9DA7934DBA7C';
 DECLARE @WorkshopSchemaVersion int = 1;
 DECLARE @WorkshopSetupName sysname = N'MCP SQL Query Store Workshop';
@@ -42,6 +44,10 @@ IF @DropLabDataValue IS NOT NULL
     THROW 51904, 'DropLabData must be exactly 0 or 1.', 1;
 IF @DropLabData NOT IN (0, 1)
     THROW 51905, 'DropLabData must be 0 or 1.', 1;
+IF @CleanupRunIdValue IS NOT NULL
+   AND (SQL_VARIANT_PROPERTY(@CleanupRunIdValue, 'BaseType') <> N'uniqueidentifier'
+        OR @CleanupRunId IS NULL)
+    THROW 51932, 'CleanupRunId must be an exact uniqueidentifier session-context value.', 1;
 IF CHARINDEX(N'\', @ExpectedHost) > 0 SET @ExpectedHost = LEFT(@ExpectedHost, CHARINDEX(N'\', @ExpectedHost) - 1);
 IF CHARINDEX(N'.', @ExpectedHost) > 0 SET @ExpectedHost = LEFT(@ExpectedHost, CHARINDEX(N'.', @ExpectedHost) - 1);
 IF CHARINDEX(N'\', @ActualServer) > 0 SET @ActualServer = LEFT(@ActualServer, CHARINDEX(N'\', @ActualServer) - 1);
@@ -184,8 +190,8 @@ FROM WorkshopAdmin.dbo.DatabaseConfigurationBackup
 WHERE MarkerId = @WorkshopMarker AND SchemaVersion = @WorkshopSchemaVersion
   AND DatabaseName = @DatabaseName;
 
-    /* Snapshot at most 100 doubly tagged worker sessions. A valid marker is a GUID in
-       CONTEXT_INFO and must refer to an existing workshop run. Never rescan or kill broadly. */
+     /* Snapshot only active, known workshop runs. An explicit CleanupRunId restricts the
+         snapshot to one run; otherwise only persisted Running runs are eligible. */
     DECLARE @SessionsToKill table
     (
         KillOrdinal int IDENTITY(1,1) NOT NULL PRIMARY KEY,
@@ -193,8 +199,9 @@ WHERE MarkerId = @WorkshopMarker AND SchemaVersion = @WorkshopSchemaVersion
         RunId uniqueidentifier NOT NULL
     );
     INSERT @SessionsToKill (SessionId, RunId)
-    SELECT TOP (100) session.session_id, runMarker.RunId
+        SELECT session.session_id, runMarker.RunId
     FROM sys.dm_exec_sessions AS session
+        INNER JOIN sys.dm_exec_requests AS request ON request.session_id = session.session_id
     CROSS APPLY
     (
         SELECT TRY_CONVERT(uniqueidentifier,
@@ -202,13 +209,35 @@ WHERE MarkerId = @WorkshopMarker AND SchemaVersion = @WorkshopSchemaVersion
     ) AS runMarker
     WHERE session.is_user_process = 1
       AND session.session_id <> @@SPID
-      AND session.program_name LIKE N'MCP-SQL-Workshop-%'
       AND runMarker.RunId IS NOT NULL
-      AND EXISTS (SELECT 1 FROM lab.WorkshopRun WHERE RunID = runMarker.RunId)
+            AND (@CleanupRunId IS NULL OR runMarker.RunId = @CleanupRunId)
+            AND EXISTS
+            (
+                    SELECT 1 FROM lab.WorkshopRun AS known_run
+                    WHERE known_run.RunID = runMarker.RunId
+                        AND (@CleanupRunId IS NOT NULL OR known_run.RunStatus = 'Running')
+            )
+            AND
+            (
+                    session.program_name COLLATE Latin1_General_100_BIN2 = N'MCP-SQL-Workshop-' + CONVERT(nvarchar(36), runMarker.RunId) + N'-Baseline-1'
+                    OR session.program_name COLLATE Latin1_General_100_BIN2 = N'MCP-SQL-Workshop-' + CONVERT(nvarchar(36), runMarker.RunId) + N'-Baseline-2'
+                    OR session.program_name COLLATE Latin1_General_100_BIN2 = N'MCP-SQL-Workshop-' + CONVERT(nvarchar(36), runMarker.RunId) + N'-Baseline-3'
+                    OR session.program_name COLLATE Latin1_General_100_BIN2 = N'MCP-SQL-Workshop-' + CONVERT(nvarchar(36), runMarker.RunId) + N'-Baseline-4'
+                    OR session.program_name COLLATE Latin1_General_100_BIN2 = N'MCP-SQL-Workshop-' + CONVERT(nvarchar(36), runMarker.RunId) + N'-Optimized-1'
+                    OR session.program_name COLLATE Latin1_General_100_BIN2 = N'MCP-SQL-Workshop-' + CONVERT(nvarchar(36), runMarker.RunId) + N'-Optimized-2'
+                    OR session.program_name COLLATE Latin1_General_100_BIN2 = N'MCP-SQL-Workshop-' + CONVERT(nvarchar(36), runMarker.RunId) + N'-Optimized-3'
+                    OR session.program_name COLLATE Latin1_General_100_BIN2 = N'MCP-SQL-Workshop-' + CONVERT(nvarchar(36), runMarker.RunId) + N'-Optimized-4'
+                    OR session.program_name COLLATE Latin1_General_100_BIN2 = N'MCP-SQL-Workshop-' + CONVERT(nvarchar(36), runMarker.RunId) + N'-Comparison-1'
+                    OR session.program_name COLLATE Latin1_General_100_BIN2 = N'MCP-SQL-Workshop-' + CONVERT(nvarchar(36), runMarker.RunId) + N'-Comparison-2'
+                    OR session.program_name COLLATE Latin1_General_100_BIN2 = N'MCP-SQL-Workshop-' + CONVERT(nvarchar(36), runMarker.RunId) + N'-Comparison-3'
+                    OR session.program_name COLLATE Latin1_General_100_BIN2 = N'MCP-SQL-Workshop-' + CONVERT(nvarchar(36), runMarker.RunId) + N'-Comparison-4'
+            )
     ORDER BY session.session_id;
 
     DECLARE @KillOrdinal int = 1;
     DECLARE @KillCount int = (SELECT COUNT(*) FROM @SessionsToKill);
+        IF @KillCount > 100
+                THROW 51933, 'Cleanup refuses to terminate more than 100 candidate sessions.', 1;
     DECLARE @KillSessionId smallint;
     DECLARE @KillRunId uniqueidentifier;
     WHILE @KillOrdinal <= @KillCount
@@ -217,17 +246,41 @@ WHERE MarkerId = @WorkshopMarker AND SchemaVersion = @WorkshopSchemaVersion
         FROM @SessionsToKill WHERE KillOrdinal = @KillOrdinal;
         IF EXISTS
         (
-            SELECT 1 FROM sys.dm_exec_sessions AS session
+            SELECT 1 FROM sys.dm_exec_sessions AS currentSession
+            INNER JOIN sys.dm_exec_requests AS currentRequest
+                ON currentRequest.session_id = currentSession.session_id
             CROSS APPLY
             (
                 SELECT TRY_CONVERT(uniqueidentifier,
-                    CONVERT(binary(16), SUBSTRING(session.context_info, 1, 16))) AS RunId
+                    CONVERT(binary(16), SUBSTRING(currentSession.context_info, 1, 16))) AS RunId
             ) AS currentMarker
-            WHERE session.session_id = @KillSessionId
-              AND session.program_name LIKE N'MCP-SQL-Workshop-%'
+            WHERE currentSession.session_id = @KillSessionId
+              AND currentSession.session_id <> @@SPID
+              AND currentSession.is_user_process = 1
               AND currentMarker.RunId IS NOT NULL
               AND currentMarker.RunId = @KillRunId
-              AND EXISTS (SELECT 1 FROM lab.WorkshopRun WHERE RunID = currentMarker.RunId)
+              AND (@CleanupRunId IS NULL OR currentMarker.RunId = @CleanupRunId)
+              AND EXISTS
+              (
+                  SELECT 1 FROM lab.WorkshopRun AS current_known_run
+                  WHERE current_known_run.RunID = currentMarker.RunId
+                    AND (@CleanupRunId IS NOT NULL OR current_known_run.RunStatus = 'Running')
+              )
+              AND
+              (
+                  currentSession.program_name COLLATE Latin1_General_100_BIN2 = N'MCP-SQL-Workshop-' + CONVERT(nvarchar(36), currentMarker.RunId) + N'-Baseline-1'
+                  OR currentSession.program_name COLLATE Latin1_General_100_BIN2 = N'MCP-SQL-Workshop-' + CONVERT(nvarchar(36), currentMarker.RunId) + N'-Baseline-2'
+                  OR currentSession.program_name COLLATE Latin1_General_100_BIN2 = N'MCP-SQL-Workshop-' + CONVERT(nvarchar(36), currentMarker.RunId) + N'-Baseline-3'
+                  OR currentSession.program_name COLLATE Latin1_General_100_BIN2 = N'MCP-SQL-Workshop-' + CONVERT(nvarchar(36), currentMarker.RunId) + N'-Baseline-4'
+                  OR currentSession.program_name COLLATE Latin1_General_100_BIN2 = N'MCP-SQL-Workshop-' + CONVERT(nvarchar(36), currentMarker.RunId) + N'-Optimized-1'
+                  OR currentSession.program_name COLLATE Latin1_General_100_BIN2 = N'MCP-SQL-Workshop-' + CONVERT(nvarchar(36), currentMarker.RunId) + N'-Optimized-2'
+                  OR currentSession.program_name COLLATE Latin1_General_100_BIN2 = N'MCP-SQL-Workshop-' + CONVERT(nvarchar(36), currentMarker.RunId) + N'-Optimized-3'
+                  OR currentSession.program_name COLLATE Latin1_General_100_BIN2 = N'MCP-SQL-Workshop-' + CONVERT(nvarchar(36), currentMarker.RunId) + N'-Optimized-4'
+                  OR currentSession.program_name COLLATE Latin1_General_100_BIN2 = N'MCP-SQL-Workshop-' + CONVERT(nvarchar(36), currentMarker.RunId) + N'-Comparison-1'
+                  OR currentSession.program_name COLLATE Latin1_General_100_BIN2 = N'MCP-SQL-Workshop-' + CONVERT(nvarchar(36), currentMarker.RunId) + N'-Comparison-2'
+                  OR currentSession.program_name COLLATE Latin1_General_100_BIN2 = N'MCP-SQL-Workshop-' + CONVERT(nvarchar(36), currentMarker.RunId) + N'-Comparison-3'
+                  OR currentSession.program_name COLLATE Latin1_General_100_BIN2 = N'MCP-SQL-Workshop-' + CONVERT(nvarchar(36), currentMarker.RunId) + N'-Comparison-4'
+              )
         )
         BEGIN
             DECLARE @KillSql nvarchar(32) = N'KILL ' + CONVERT(nvarchar(11), @KillSessionId) + N';';
@@ -714,6 +767,380 @@ END;';
         )
             THROW 51931, 'Unexpected or drifted lab object fingerprint found; refusing optional lab deletion.', 1;
 
+        DECLARE @ExpectedLabConstraints table
+        (
+            TableName sysname NOT NULL,
+            ConstraintName sysname NOT NULL PRIMARY KEY,
+            ConstraintType char(2) NOT NULL
+        );
+        INSERT @ExpectedLabConstraints (TableName, ConstraintName, ConstraintType) VALUES
+            (N'WorkshopMarker', N'PK_WorkshopMarker', 'PK'),
+            (N'Numbers', N'PK_Numbers', 'PK'),
+            (N'FactSales', N'PK_FactSales', 'PK'),
+            (N'FactSales', N'CK_FactSales_Positive', 'C'),
+            (N'DataGenerationLog', N'PK_DataGenerationLog', 'PK'),
+            (N'WorkshopRun', N'PK_WorkshopRun', 'PK'),
+            (N'WorkshopRun', N'CK_WorkshopRun_EvidenceClassification', 'C'),
+            (N'WorkshopRun', N'CK_WorkshopRun_Phase', 'C'),
+            (N'WorkshopRun', N'CK_WorkshopRun_Status', 'C'),
+            (N'WorkshopRun', N'CK_WorkshopRun_Outcome', 'C'),
+            (N'WorkshopRun', N'CK_WorkshopRun_Timestamps', 'C'),
+            (N'WorkshopRun', N'CK_WorkshopRun_FrozenSettingsJson', 'C'),
+            (N'WorkshopRun', N'CK_WorkshopRun_BaselineIdentifiers', 'C'),
+            (N'WorkshopRun', N'CK_WorkshopRun_OptimizedIdentifiers', 'C'),
+            (N'WorkshopRun', N'CK_WorkshopRun_Metrics', 'C'),
+            (N'WorkshopSample', N'PK_WorkshopSample', 'PK'),
+            (N'WorkshopSample', N'FK_WorkshopSample_WorkshopRun', 'F'),
+            (N'WorkshopSample', N'CK_WorkshopSample_Sequence', 'C'),
+            (N'WorkshopSample', N'CK_WorkshopSample_Phase', 'C'),
+            (N'WorkshopSample', N'CK_WorkshopSample_PoolMemory', 'C'),
+            (N'WorkshopSample', N'CK_WorkshopSample_Utilization', 'C'),
+            (N'WorkshopSample', N'CK_WorkshopSample_Counts', 'C'),
+            (N'WorkshopSample', N'CK_WorkshopSample_HostMemory', 'C'),
+            (N'WorkshopSample', N'CK_WorkshopSample_ProcessMemory', 'C'),
+            (N'WorkshopSample', N'CK_WorkshopSample_ServerMemory', 'C'),
+            (N'WorkshopRequestSample', N'PK_WorkshopRequestSample', 'PK'),
+            (N'WorkshopRequestSample', N'FK_WorkshopRequestSample_WorkshopSample', 'F'),
+            (N'WorkshopRequestSample', N'CK_WorkshopRequestSample_Identifiers', 'C'),
+            (N'WorkshopRequestSample', N'CK_WorkshopRequestSample_Memory', 'C'),
+            (N'WorkshopRequestSample', N'CK_WorkshopRequestSample_Wait', 'C'),
+            (N'WorkshopRequestSample', N'CK_WorkshopRequestSample_QueryIdentifiers', 'C'),
+            (N'WorkshopTrial', N'PK_WorkshopTrial', 'PK'),
+            (N'WorkshopTrial', N'FK_WorkshopTrial_WorkshopRun', 'F'),
+            (N'WorkshopTrial', N'CK_WorkshopTrial_Sequence', 'C'),
+            (N'WorkshopTrial', N'CK_WorkshopTrial_ParameterSlot', 'C'),
+            (N'WorkshopTrial', N'CK_WorkshopTrial_Phase', 'C'),
+            (N'WorkshopTrial', N'CK_WorkshopTrial_Metrics', 'C'),
+            (N'WorkshopTrial', N'CK_WorkshopTrial_Validation', 'C'),
+            (N'WorkshopTrial', N'CK_WorkshopTrial_Timestamps', 'C'),
+            (N'ValidationRun', N'PK_ValidationRun', 'PK'),
+            (N'ValidationRun', N'UQ_ValidationRun_BatchCase', 'UQ'),
+            (N'ValidationRun', N'FK_ValidationRun_BaselineWorkshopRun', 'F'),
+            (N'ValidationRun', N'FK_ValidationRun_OptimizedWorkshopRun', 'F'),
+            (N'ValidationRun', N'CK_ValidationRun_Linkage', 'C');
+
+        IF EXISTS
+        (
+            SELECT OBJECT_NAME(constraint_entry.parent_object_id), constraint_entry.name, constraint_entry.type
+            FROM sys.objects AS constraint_entry
+            INNER JOIN sys.tables AS parent_table ON parent_table.object_id = constraint_entry.parent_object_id
+            WHERE parent_table.schema_id = SCHEMA_ID(N'lab')
+              AND constraint_entry.type IN ('PK', 'UQ', 'C', 'D', 'F')
+            EXCEPT SELECT TableName, ConstraintName, ConstraintType FROM @ExpectedLabConstraints
+        )
+        OR EXISTS
+        (
+            SELECT TableName, ConstraintName, ConstraintType FROM @ExpectedLabConstraints
+            EXCEPT
+            SELECT OBJECT_NAME(constraint_entry.parent_object_id), constraint_entry.name, constraint_entry.type
+            FROM sys.objects AS constraint_entry
+            INNER JOIN sys.tables AS parent_table ON parent_table.object_id = constraint_entry.parent_object_id
+            WHERE parent_table.schema_id = SCHEMA_ID(N'lab')
+              AND constraint_entry.type IN ('PK', 'UQ', 'C', 'D', 'F')
+        )
+            THROW 51934, 'Unrecognized lab constraint found; refusing optional lab deletion.', 1;
+        IF EXISTS
+        (
+            SELECT 1 FROM sys.default_constraints AS default_constraint
+            INNER JOIN sys.tables AS parent_table ON parent_table.object_id = default_constraint.parent_object_id
+            WHERE parent_table.schema_id = SCHEMA_ID(N'lab')
+        )
+            THROW 51934, 'Unrecognized lab constraint found; refusing optional lab deletion.', 1;
+        IF EXISTS
+        (
+            SELECT 1 FROM sys.check_constraints AS check_constraint
+            INNER JOIN sys.tables AS parent_table ON parent_table.object_id = check_constraint.parent_object_id
+            WHERE parent_table.schema_id = SCHEMA_ID(N'lab')
+              AND (check_constraint.is_disabled <> 0 OR check_constraint.is_not_trusted <> 0
+                   OR check_constraint.is_not_for_replication <> 0
+                   OR NOT EXISTS
+                      (SELECT 1 FROM @ExpectedLabConstraints AS expected
+                       WHERE expected.ConstraintType = 'C'
+                         AND expected.ConstraintName = check_constraint.name
+                         AND expected.TableName = parent_table.name))
+        )
+            THROW 51934, 'Unrecognized lab constraint found; refusing optional lab deletion.', 1;
+        IF EXISTS
+        (
+            SELECT 1 FROM sys.key_constraints AS key_constraint
+            INNER JOIN sys.tables AS parent_table ON parent_table.object_id = key_constraint.parent_object_id
+            WHERE parent_table.schema_id = SCHEMA_ID(N'lab')
+              AND NOT EXISTS
+                  (SELECT 1 FROM @ExpectedLabConstraints AS expected
+                   WHERE expected.ConstraintType = key_constraint.type
+                     AND expected.ConstraintName = key_constraint.name
+                     AND expected.TableName = parent_table.name)
+        )
+            THROW 51934, 'Unrecognized lab constraint found; refusing optional lab deletion.', 1;
+
+        DECLARE @ExpectedLabIndexes table
+        (
+            TableName sysname NOT NULL,
+            IndexName sysname NOT NULL PRIMARY KEY,
+            TypeDesc nvarchar(60) NOT NULL,
+            IsUnique bit NOT NULL,
+            IsPrimaryKey bit NOT NULL,
+            IsUniqueConstraint bit NOT NULL
+        );
+        INSERT @ExpectedLabIndexes VALUES
+            (N'WorkshopMarker', N'PK_WorkshopMarker', N'CLUSTERED', 1, 1, 0),
+            (N'Numbers', N'PK_Numbers', N'CLUSTERED', 1, 1, 0),
+            (N'FactSales', N'PK_FactSales', N'CLUSTERED', 1, 1, 0),
+            (N'FactSales', N'IX_FactSales_OrderDate_Territory', N'NONCLUSTERED', 0, 0, 0),
+            (N'DataGenerationLog', N'PK_DataGenerationLog', N'CLUSTERED', 1, 1, 0),
+            (N'WorkshopRun', N'PK_WorkshopRun', N'CLUSTERED', 1, 1, 0),
+            (N'WorkshopSample', N'PK_WorkshopSample', N'CLUSTERED', 1, 1, 0),
+            (N'WorkshopRequestSample', N'PK_WorkshopRequestSample', N'CLUSTERED', 1, 1, 0),
+            (N'WorkshopTrial', N'PK_WorkshopTrial', N'CLUSTERED', 1, 1, 0),
+            (N'WorkshopTrial', N'IX_WorkshopTrial_ValidationBatchID', N'NONCLUSTERED', 0, 0, 0),
+            (N'ValidationRun', N'PK_ValidationRun', N'CLUSTERED', 1, 1, 0),
+            (N'ValidationRun', N'UQ_ValidationRun_BatchCase', N'NONCLUSTERED', 1, 0, 1);
+
+        DECLARE @ExpectedLabIndexColumns table
+        (
+            IndexName sysname NOT NULL,
+            ColumnName sysname NOT NULL,
+            IndexColumnId int NOT NULL,
+            KeyOrdinal tinyint NOT NULL,
+            IsDescendingKey bit NOT NULL,
+            IsIncludedColumn bit NOT NULL,
+            PRIMARY KEY (IndexName, IndexColumnId)
+        );
+        INSERT @ExpectedLabIndexColumns VALUES
+            (N'PK_WorkshopMarker', N'MarkerId', 1, 1, 0, 0),
+            (N'PK_WorkshopMarker', N'SchemaVersion', 2, 2, 0, 0),
+            (N'PK_Numbers', N'Number', 1, 1, 0, 0),
+            (N'PK_FactSales', N'SyntheticSalesID', 1, 1, 0, 0),
+            (N'IX_FactSales_OrderDate_Territory', N'OrderDate', 1, 1, 0, 0),
+            (N'IX_FactSales_OrderDate_Territory', N'TerritoryID', 2, 2, 0, 0),
+            (N'IX_FactSales_OrderDate_Territory', N'CustomerID', 3, 0, 0, 1),
+            (N'IX_FactSales_OrderDate_Territory', N'ProductID', 4, 0, 0, 1),
+            (N'IX_FactSales_OrderDate_Territory', N'OrderQty', 5, 0, 0, 1),
+            (N'IX_FactSales_OrderDate_Territory', N'UnitPrice', 6, 0, 0, 1),
+            (N'IX_FactSales_OrderDate_Territory', N'SalesAmount', 7, 0, 0, 1),
+            (N'PK_DataGenerationLog', N'BatchStartSyntheticSalesID', 1, 1, 0, 0),
+            (N'PK_DataGenerationLog', N'BatchEndSyntheticSalesID', 2, 2, 0, 0),
+            (N'PK_WorkshopRun', N'RunID', 1, 1, 0, 0),
+            (N'PK_WorkshopSample', N'RunID', 1, 1, 0, 0),
+            (N'PK_WorkshopSample', N'SampleSequence', 2, 2, 0, 0),
+            (N'PK_WorkshopRequestSample', N'RunID', 1, 1, 0, 0),
+            (N'PK_WorkshopRequestSample', N'SampleSequence', 2, 2, 0, 0),
+            (N'PK_WorkshopRequestSample', N'SessionID', 3, 3, 0, 0),
+            (N'PK_WorkshopRequestSample', N'RequestID', 4, 4, 0, 0),
+            (N'PK_WorkshopTrial', N'RunID', 1, 1, 0, 0),
+            (N'PK_WorkshopTrial', N'TrialSequence', 2, 2, 0, 0),
+            (N'IX_WorkshopTrial_ValidationBatchID', N'ValidationBatchID', 1, 1, 0, 0),
+            (N'IX_WorkshopTrial_ValidationBatchID', N'RunID', 2, 2, 0, 0),
+            (N'PK_ValidationRun', N'ValidationRunID', 1, 1, 0, 0),
+            (N'UQ_ValidationRun_BatchCase', N'ValidationBatchID', 1, 1, 0, 0),
+            (N'UQ_ValidationRun_BatchCase', N'ValidationCaseName', 2, 2, 0, 0);
+        IF EXISTS
+        (
+            SELECT OBJECT_NAME(index_entry.object_id), index_entry.name, index_entry.type_desc,
+                   index_entry.is_unique, index_entry.is_primary_key, index_entry.is_unique_constraint
+            FROM sys.indexes AS index_entry
+            INNER JOIN sys.tables AS parent_table ON parent_table.object_id = index_entry.object_id
+            WHERE parent_table.schema_id = SCHEMA_ID(N'lab') AND index_entry.index_id > 0
+              AND index_entry.is_disabled = 0 AND index_entry.is_hypothetical = 0
+              AND index_entry.has_filter = 0 AND index_entry.fill_factor = 0
+              AND index_entry.is_padded = 0 AND index_entry.ignore_dup_key = 0
+              AND index_entry.allow_row_locks = 1 AND index_entry.allow_page_locks = 1
+              AND index_entry.optimize_for_sequential_key = 0
+            EXCEPT SELECT * FROM @ExpectedLabIndexes
+        )
+        OR EXISTS
+        (
+            SELECT * FROM @ExpectedLabIndexes
+            EXCEPT
+            SELECT OBJECT_NAME(index_entry.object_id), index_entry.name, index_entry.type_desc,
+                   index_entry.is_unique, index_entry.is_primary_key, index_entry.is_unique_constraint
+            FROM sys.indexes AS index_entry
+            INNER JOIN sys.tables AS parent_table ON parent_table.object_id = index_entry.object_id
+            WHERE parent_table.schema_id = SCHEMA_ID(N'lab') AND index_entry.index_id > 0
+              AND index_entry.is_disabled = 0 AND index_entry.is_hypothetical = 0
+              AND index_entry.has_filter = 0 AND index_entry.fill_factor = 0
+              AND index_entry.is_padded = 0 AND index_entry.ignore_dup_key = 0
+              AND index_entry.allow_row_locks = 1 AND index_entry.allow_page_locks = 1
+              AND index_entry.optimize_for_sequential_key = 0
+        )
+            THROW 51935, 'Unrecognized lab index found; refusing optional lab deletion.', 1;
+        IF EXISTS
+        (
+            SELECT index_entry.name, column_entry.name, index_column.index_column_id,
+                   CONVERT(tinyint, index_column.key_ordinal), index_column.is_descending_key,
+                   index_column.is_included_column
+            FROM sys.indexes AS index_entry
+            INNER JOIN sys.tables AS parent_table ON parent_table.object_id = index_entry.object_id
+            INNER JOIN sys.index_columns AS index_column
+                ON index_column.object_id = index_entry.object_id AND index_column.index_id = index_entry.index_id
+            INNER JOIN sys.columns AS column_entry
+                ON column_entry.object_id = index_column.object_id AND column_entry.column_id = index_column.column_id
+            WHERE parent_table.schema_id = SCHEMA_ID(N'lab') AND index_entry.index_id > 0
+              AND (index_column.key_ordinal > 0 OR index_column.is_included_column = 1)
+            EXCEPT SELECT * FROM @ExpectedLabIndexColumns
+        )
+        OR EXISTS
+        (
+            SELECT * FROM @ExpectedLabIndexColumns
+            EXCEPT
+            SELECT index_entry.name, column_entry.name, index_column.index_column_id,
+                   CONVERT(tinyint, index_column.key_ordinal), index_column.is_descending_key,
+                   index_column.is_included_column
+            FROM sys.indexes AS index_entry
+            INNER JOIN sys.tables AS parent_table ON parent_table.object_id = index_entry.object_id
+            INNER JOIN sys.index_columns AS index_column
+                ON index_column.object_id = index_entry.object_id AND index_column.index_id = index_entry.index_id
+            INNER JOIN sys.columns AS column_entry
+                ON column_entry.object_id = index_column.object_id AND column_entry.column_id = index_column.column_id
+            WHERE parent_table.schema_id = SCHEMA_ID(N'lab') AND index_entry.index_id > 0
+              AND (index_column.key_ordinal > 0 OR index_column.is_included_column = 1)
+        )
+            THROW 51935, 'Unrecognized lab index found; refusing optional lab deletion.', 1;
+
+        IF EXISTS
+        (
+            SELECT 1 FROM sys.triggers AS trigger_entry
+                        WHERE trigger_entry.parent_class = 1
+                            AND OBJECT_SCHEMA_NAME(trigger_entry.parent_id) = N'lab'
+        )
+            THROW 51936, 'Unrecognized lab trigger found; refusing optional lab deletion.', 1;
+        IF EXISTS
+        (
+            SELECT 1 FROM sys.stats AS statistic
+            INNER JOIN sys.tables AS parent_table ON parent_table.object_id = statistic.object_id
+            WHERE parent_table.schema_id = SCHEMA_ID(N'lab')
+              AND NOT EXISTS
+              (
+                  SELECT 1 FROM sys.indexes AS matching_index
+                  WHERE matching_index.object_id = statistic.object_id
+                    AND matching_index.index_id = statistic.stats_id
+                    AND matching_index.name = statistic.name
+              )
+        )
+            THROW 51937, 'Unrecognized lab statistic found; refusing optional lab deletion.', 1;
+        DECLARE @ExpectedLabForeignKeyColumns table
+        (
+            ConstraintName sysname NOT NULL,
+            ParentTable sysname NOT NULL,
+            ParentColumn sysname NOT NULL,
+            ReferencedTable sysname NOT NULL,
+            ReferencedColumn sysname NOT NULL,
+            ConstraintColumnId int NOT NULL,
+            PRIMARY KEY (ConstraintName, ConstraintColumnId)
+        );
+        INSERT @ExpectedLabForeignKeyColumns VALUES
+            (N'FK_WorkshopSample_WorkshopRun', N'WorkshopSample', N'RunID', N'WorkshopRun', N'RunID', 1),
+            (N'FK_WorkshopRequestSample_WorkshopSample', N'WorkshopRequestSample', N'RunID', N'WorkshopSample', N'RunID', 1),
+            (N'FK_WorkshopRequestSample_WorkshopSample', N'WorkshopRequestSample', N'SampleSequence', N'WorkshopSample', N'SampleSequence', 2),
+            (N'FK_WorkshopTrial_WorkshopRun', N'WorkshopTrial', N'RunID', N'WorkshopRun', N'RunID', 1),
+            (N'FK_ValidationRun_BaselineWorkshopRun', N'ValidationRun', N'BaselineRunID', N'WorkshopRun', N'RunID', 1),
+            (N'FK_ValidationRun_OptimizedWorkshopRun', N'ValidationRun', N'OptimizedRunID', N'WorkshopRun', N'RunID', 1);
+        IF EXISTS
+        (
+            SELECT foreign_key.name, parent_table.name, parent_column.name,
+                   referenced_table.name, referenced_column.name, foreign_key_column.constraint_column_id
+            FROM sys.foreign_keys AS foreign_key
+            INNER JOIN sys.foreign_key_columns AS foreign_key_column
+                ON foreign_key_column.constraint_object_id = foreign_key.object_id
+            INNER JOIN sys.tables AS parent_table ON parent_table.object_id = foreign_key.parent_object_id
+            INNER JOIN sys.tables AS referenced_table ON referenced_table.object_id = foreign_key.referenced_object_id
+            INNER JOIN sys.columns AS parent_column
+                ON parent_column.object_id = foreign_key_column.parent_object_id
+               AND parent_column.column_id = foreign_key_column.parent_column_id
+            INNER JOIN sys.columns AS referenced_column
+                ON referenced_column.object_id = foreign_key_column.referenced_object_id
+               AND referenced_column.column_id = foreign_key_column.referenced_column_id
+            WHERE parent_table.schema_id = SCHEMA_ID(N'lab') OR referenced_table.schema_id = SCHEMA_ID(N'lab')
+            EXCEPT SELECT * FROM @ExpectedLabForeignKeyColumns
+        )
+        OR EXISTS
+        (
+            SELECT * FROM @ExpectedLabForeignKeyColumns
+            EXCEPT
+            SELECT foreign_key.name, parent_table.name, parent_column.name,
+                   referenced_table.name, referenced_column.name, foreign_key_column.constraint_column_id
+            FROM sys.foreign_keys AS foreign_key
+            INNER JOIN sys.foreign_key_columns AS foreign_key_column
+                ON foreign_key_column.constraint_object_id = foreign_key.object_id
+            INNER JOIN sys.tables AS parent_table ON parent_table.object_id = foreign_key.parent_object_id
+            INNER JOIN sys.tables AS referenced_table ON referenced_table.object_id = foreign_key.referenced_object_id
+            INNER JOIN sys.columns AS parent_column
+                ON parent_column.object_id = foreign_key_column.parent_object_id
+               AND parent_column.column_id = foreign_key_column.parent_column_id
+            INNER JOIN sys.columns AS referenced_column
+                ON referenced_column.object_id = foreign_key_column.referenced_object_id
+               AND referenced_column.column_id = foreign_key_column.referenced_column_id
+            WHERE parent_table.schema_id = SCHEMA_ID(N'lab') OR referenced_table.schema_id = SCHEMA_ID(N'lab')
+        )
+            THROW 51938, 'Unrecognized lab foreign key found; refusing optional lab deletion.', 1;
+        IF EXISTS
+        (
+            SELECT 1 FROM sys.foreign_keys AS foreign_key
+            INNER JOIN sys.tables AS referenced_table ON referenced_table.object_id = foreign_key.referenced_object_id
+            WHERE referenced_table.schema_id = SCHEMA_ID(N'lab')
+                            AND (foreign_key.is_disabled <> 0 OR foreign_key.is_not_trusted <> 0
+                                     OR foreign_key.is_not_for_replication <> 0
+                                     OR foreign_key.delete_referential_action <> 0
+                                     OR foreign_key.update_referential_action <> 0
+                                     OR NOT EXISTS
+                                            (
+                                                    SELECT 1 FROM @ExpectedLabConstraints AS expected
+                                                    WHERE expected.ConstraintType = 'F' AND expected.ConstraintName = foreign_key.name
+                                                        AND expected.TableName = OBJECT_NAME(foreign_key.parent_object_id)
+                                                        AND OBJECT_SCHEMA_NAME(foreign_key.parent_object_id) = N'lab'
+                                            ))
+        )
+            THROW 51938, 'Unrecognized lab foreign key found; refusing optional lab deletion.', 1;
+        IF EXISTS
+        (
+            SELECT 1 FROM sys.database_permissions AS permission_entry
+            WHERE (permission_entry.class = 3 AND permission_entry.major_id = SCHEMA_ID(N'lab'))
+               OR (permission_entry.class = 1 AND permission_entry.major_id IN
+                   (SELECT object_id FROM sys.objects WHERE schema_id = SCHEMA_ID(N'lab')))
+        )
+            THROW 51939, 'Unrecognized lab permission found; refusing optional lab deletion.', 1;
+        IF EXISTS
+        (
+            SELECT 1 FROM sys.extended_properties AS property_entry
+            WHERE (property_entry.class = 3 AND property_entry.major_id = SCHEMA_ID(N'lab'))
+               OR (property_entry.class = 1 AND property_entry.major_id IN
+                   (SELECT object_id FROM sys.objects WHERE schema_id = SCHEMA_ID(N'lab')))
+        )
+            THROW 51940, 'Unrecognized lab extended property found; refusing optional lab deletion.', 1;
+        IF EXISTS
+        (
+            SELECT 1 FROM sys.computed_columns AS computed_column
+            INNER JOIN sys.tables AS parent_table ON parent_table.object_id = computed_column.object_id
+            WHERE parent_table.schema_id = SCHEMA_ID(N'lab')
+        )
+            THROW 51941, 'Unrecognized lab computed column found; refusing optional lab deletion.', 1;
+        IF EXISTS
+        (
+            SELECT 1 FROM sys.tables AS parent_table
+            WHERE parent_table.schema_id = SCHEMA_ID(N'lab')
+              AND (parent_table.temporal_type <> 0 OR parent_table.is_tracked_by_cdc <> 0)
+        )
+        OR EXISTS
+        (
+            SELECT 1 FROM sys.fulltext_indexes AS fulltext_index
+            INNER JOIN sys.tables AS parent_table ON parent_table.object_id = fulltext_index.object_id
+            WHERE parent_table.schema_id = SCHEMA_ID(N'lab')
+        )
+            THROW 51942, 'Unrecognized lab temporal, CDC, or fulltext feature found; refusing optional lab deletion.', 1;
+        IF EXISTS
+        (
+            SELECT 1 FROM sys.sql_expression_dependencies AS dependency
+            WHERE dependency.referenced_id IN
+                  (SELECT object_id FROM sys.objects WHERE schema_id = SCHEMA_ID(N'lab'))
+              AND
+              (
+                  dependency.is_schema_bound_reference = 1
+                  OR dependency.referencing_id NOT IN
+                     (SELECT object_id FROM sys.objects WHERE schema_id = SCHEMA_ID(N'lab'))
+              )
+        )
+            THROW 51943, 'Unrecognized lab dependency found; refusing optional lab deletion.', 1;
+
         IF NOT EXISTS
         (
             SELECT 1 FROM sys.columns
@@ -739,6 +1166,56 @@ END;';
         DROP PROCEDURE IF EXISTS lab.usp_GetMemorySnapshot;
         DROP PROCEDURE IF EXISTS lab.usp_MonthEndSalesOptimized;
         DROP PROCEDURE IF EXISTS lab.usp_MonthEndSalesBaseline;
+
+        ALTER TABLE lab.WorkshopRequestSample DROP CONSTRAINT FK_WorkshopRequestSample_WorkshopSample;
+        ALTER TABLE lab.WorkshopSample DROP CONSTRAINT FK_WorkshopSample_WorkshopRun;
+        ALTER TABLE lab.WorkshopTrial DROP CONSTRAINT FK_WorkshopTrial_WorkshopRun;
+        ALTER TABLE lab.ValidationRun DROP CONSTRAINT FK_ValidationRun_BaselineWorkshopRun;
+        ALTER TABLE lab.ValidationRun DROP CONSTRAINT FK_ValidationRun_OptimizedWorkshopRun;
+        DROP INDEX IX_FactSales_OrderDate_Territory ON lab.FactSales;
+        DROP INDEX IX_WorkshopTrial_ValidationBatchID ON lab.WorkshopTrial;
+
+        ALTER TABLE lab.FactSales DROP CONSTRAINT CK_FactSales_Positive;
+        ALTER TABLE lab.WorkshopRun DROP CONSTRAINT CK_WorkshopRun_EvidenceClassification;
+        ALTER TABLE lab.WorkshopRun DROP CONSTRAINT CK_WorkshopRun_Phase;
+        ALTER TABLE lab.WorkshopRun DROP CONSTRAINT CK_WorkshopRun_Status;
+        ALTER TABLE lab.WorkshopRun DROP CONSTRAINT CK_WorkshopRun_Outcome;
+        ALTER TABLE lab.WorkshopRun DROP CONSTRAINT CK_WorkshopRun_Timestamps;
+        ALTER TABLE lab.WorkshopRun DROP CONSTRAINT CK_WorkshopRun_FrozenSettingsJson;
+        ALTER TABLE lab.WorkshopRun DROP CONSTRAINT CK_WorkshopRun_BaselineIdentifiers;
+        ALTER TABLE lab.WorkshopRun DROP CONSTRAINT CK_WorkshopRun_OptimizedIdentifiers;
+        ALTER TABLE lab.WorkshopRun DROP CONSTRAINT CK_WorkshopRun_Metrics;
+        ALTER TABLE lab.WorkshopSample DROP CONSTRAINT CK_WorkshopSample_Sequence;
+        ALTER TABLE lab.WorkshopSample DROP CONSTRAINT CK_WorkshopSample_Phase;
+        ALTER TABLE lab.WorkshopSample DROP CONSTRAINT CK_WorkshopSample_PoolMemory;
+        ALTER TABLE lab.WorkshopSample DROP CONSTRAINT CK_WorkshopSample_Utilization;
+        ALTER TABLE lab.WorkshopSample DROP CONSTRAINT CK_WorkshopSample_Counts;
+        ALTER TABLE lab.WorkshopSample DROP CONSTRAINT CK_WorkshopSample_HostMemory;
+        ALTER TABLE lab.WorkshopSample DROP CONSTRAINT CK_WorkshopSample_ProcessMemory;
+        ALTER TABLE lab.WorkshopSample DROP CONSTRAINT CK_WorkshopSample_ServerMemory;
+        ALTER TABLE lab.WorkshopRequestSample DROP CONSTRAINT CK_WorkshopRequestSample_Identifiers;
+        ALTER TABLE lab.WorkshopRequestSample DROP CONSTRAINT CK_WorkshopRequestSample_Memory;
+        ALTER TABLE lab.WorkshopRequestSample DROP CONSTRAINT CK_WorkshopRequestSample_Wait;
+        ALTER TABLE lab.WorkshopRequestSample DROP CONSTRAINT CK_WorkshopRequestSample_QueryIdentifiers;
+        ALTER TABLE lab.WorkshopTrial DROP CONSTRAINT CK_WorkshopTrial_Sequence;
+        ALTER TABLE lab.WorkshopTrial DROP CONSTRAINT CK_WorkshopTrial_ParameterSlot;
+        ALTER TABLE lab.WorkshopTrial DROP CONSTRAINT CK_WorkshopTrial_Phase;
+        ALTER TABLE lab.WorkshopTrial DROP CONSTRAINT CK_WorkshopTrial_Metrics;
+        ALTER TABLE lab.WorkshopTrial DROP CONSTRAINT CK_WorkshopTrial_Validation;
+        ALTER TABLE lab.WorkshopTrial DROP CONSTRAINT CK_WorkshopTrial_Timestamps;
+        ALTER TABLE lab.ValidationRun DROP CONSTRAINT CK_ValidationRun_Linkage;
+        ALTER TABLE lab.ValidationRun DROP CONSTRAINT UQ_ValidationRun_BatchCase;
+
+        ALTER TABLE lab.WorkshopRequestSample DROP CONSTRAINT PK_WorkshopRequestSample;
+        ALTER TABLE lab.WorkshopTrial DROP CONSTRAINT PK_WorkshopTrial;
+        ALTER TABLE lab.ValidationRun DROP CONSTRAINT PK_ValidationRun;
+        ALTER TABLE lab.WorkshopSample DROP CONSTRAINT PK_WorkshopSample;
+        ALTER TABLE lab.WorkshopRun DROP CONSTRAINT PK_WorkshopRun;
+        ALTER TABLE lab.DataGenerationLog DROP CONSTRAINT PK_DataGenerationLog;
+        ALTER TABLE lab.FactSales DROP CONSTRAINT PK_FactSales;
+        ALTER TABLE lab.Numbers DROP CONSTRAINT PK_Numbers;
+        ALTER TABLE lab.WorkshopMarker DROP CONSTRAINT PK_WorkshopMarker;
+
         DROP TABLE IF EXISTS lab.WorkshopRequestSample;
         DROP TABLE IF EXISTS lab.WorkshopTrial;
         DROP TABLE IF EXISTS lab.ValidationRun;

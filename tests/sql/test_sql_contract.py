@@ -1909,18 +1909,34 @@ def test_cleanup_requires_exact_context_marker_server_database_and_lock() -> Non
 
 def test_cleanup_session_termination_is_double_tagged_snapshotted_and_bounded() -> None:
     text = normalized("09-Cleanup.sql")
+    assert "SESSION_CONTEXT(N'CLEANUPRUNID')" in text
+    assert "@CLEANUPRUNID UNIQUEIDENTIFIER" in text
     assert "SYS.DM_EXEC_SESSIONS" in text
-    assert "PROGRAM_NAME LIKE N'MCP-SQL-WORKSHOP-%'" in text
+    assert "SYS.DM_EXEC_REQUESTS" in text
     assert "CONTEXT_INFO" in text
     assert "TRY_CONVERT(UNIQUEIDENTIFIER, CONVERT(BINARY(16), SUBSTRING(" in text
-    assert "TOP (100)" in text
+    for phase in ("BASELINE", "OPTIMIZED", "COMPARISON"):
+        assert re.search(rf"N'-{phase}-[1-4]'", text)
+    assert "LATIN1_GENERAL_100_BIN2" in text
+    assert re.search(r"@KILLCOUNT\s*>\s*100.*?THROW", text)
     assert "SESSION_ID <> @@SPID" in text
     assert "PRIMARY KEY" in text
     assert re.search(r"WHILE\s+@KILLORDINAL\s*<=\s+@KILLCOUNT", text)
     assert "WHILE 1 = 1" not in text
     assert "KILL " in text
     assert "CURRENTMARKER.RUNID = @KILLRUNID" in text
+    assert "CURRENTSESSION.PROGRAM_NAME COLLATE LATIN1_GENERAL_100_BIN2" in text
+    assert text.index("CURRENTMARKER.RUNID = @KILLRUNID") < text.index("DECLARE @KILLSQL")
     assert "QUOTENAME" not in text[text.index("DECLARE @KILLSQL"):text.index("EXEC SYS.SP_EXECUTESQL @KILLSQL")]
+
+
+def test_cleanup_session_termination_has_no_wildcard_only_identity_acceptance() -> None:
+    text = normalized("09-Cleanup.sql")
+    termination = text[text.index("DECLARE @SESSIONSTOKILL"):text.index("DECLARE @OWNEDHINTS")]
+    assert "PROGRAM_NAME LIKE N'MCP-SQL-WORKSHOP-%'" not in termination
+    assert re.search(r"PROGRAM_NAME\s+COLLATE\s+LATIN1_GENERAL_100_BIN2\s*=\s*N'MCP-SQL-WORKSHOP-'", termination)
+    assert termination.count("SUBSTRING(") >= 2
+    assert termination.count("SYS.DM_EXEC_REQUESTS") >= 2
 
 
 def test_cleanup_clears_only_owned_hints_and_restores_configuration() -> None:
@@ -2039,6 +2055,24 @@ def test_cleanup_optional_drop_is_marker_owned_dependency_ordered_and_preserves_
     assert "DEFINITIONHASH" in optional and "SCHEMAHASH" in optional
     assert "SYS.OBJECTS" in optional and "SYS.SCHEMAS" in optional
     assert "UNEXPECTED OR DRIFTED LAB OBJECT" in optional
+    for catalog in (
+        "SYS.TRIGGERS", "SYS.INDEXES", "SYS.STATS", "SYS.FOREIGN_KEYS",
+        "SYS.DEFAULT_CONSTRAINTS", "SYS.CHECK_CONSTRAINTS", "SYS.KEY_CONSTRAINTS",
+        "SYS.DATABASE_PERMISSIONS", "SYS.EXTENDED_PROPERTIES",
+        "SYS.COMPUTED_COLUMNS", "SYS.SQL_EXPRESSION_DEPENDENCIES",
+        "SYS.FULLTEXT_INDEXES",
+    ):
+        assert catalog in optional
+    for feature in ("TEMPORAL_TYPE", "IS_TRACKED_BY_CDC", "IS_SCHEMA_BOUND_REFERENCE"):
+        assert feature in optional
+    first_drop = optional.index("DROP VIEW")
+    for blocker in (
+        "UNRECOGNIZED LAB TRIGGER", "UNRECOGNIZED LAB INDEX",
+        "UNRECOGNIZED LAB STATISTIC", "UNRECOGNIZED LAB FOREIGN KEY",
+        "UNRECOGNIZED LAB PERMISSION", "UNRECOGNIZED LAB DEPENDENCY",
+    ):
+        assert blocker in optional
+        assert optional.index(blocker) < first_drop
     assert "DROP DATABASE" not in text
     for source in ("SALES.SALESORDERHEADER", "SALES.SALESORDERDETAIL", "SALES.SALESTERRITORY"):
         assert f"DROP TABLE {source}" not in text
