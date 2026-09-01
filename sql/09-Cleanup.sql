@@ -1284,6 +1284,165 @@ END;';
         )
             THROW 51926, 'Unexpected or drifted lab object definition found; refusing optional lab deletion.', 1;
 
+        /* Recheck all databases immediately before destructive DDL. The lifecycle application
+           lock serializes workshop setup and cleanup, but SQL Server cannot lock arbitrary DDL
+           in every database. A cross-database DDL race remains possible; metadata uncertainty,
+           access loss, or a detected reference therefore fails closed. */
+        DECLARE @CrossDatabaseScan table
+        (
+            DatabaseOrdinal int IDENTITY(1,1) NOT NULL PRIMARY KEY,
+            DatabaseName sysname NOT NULL UNIQUE
+        );
+        INSERT @CrossDatabaseScan (DatabaseName)
+        SELECT name
+        FROM sys.databases
+        WHERE state_desc = N'ONLINE'
+          AND source_database_id IS NULL
+          AND name <> N'tempdb'
+          AND HAS_DBACCESS(name) = 1
+          AND (database_id > 4 OR name IN (N'master', N'model', N'msdb'))
+        ORDER BY database_id;
+
+        DECLARE @CrossDatabaseCount int = (SELECT COUNT(*) FROM @CrossDatabaseScan);
+        IF @CrossDatabaseCount > 256
+            THROW 51946, 'More than 256 accessible online databases prevent a bounded optional lab deletion safety scan.', 1;
+
+        CREATE TABLE #OwnedLabObjects
+        (
+            ObjectId int NOT NULL PRIMARY KEY,
+            ObjectName sysname NOT NULL,
+            ObjectType char(2) NOT NULL
+        );
+        INSERT #OwnedLabObjects (ObjectId, ObjectName, ObjectType)
+        SELECT ObjectId, ObjectName, ObjectType FROM @OwnedLabObjectIds;
+
+        CREATE TABLE #CrossDatabaseFindings
+        (
+            FindingType char(1) NOT NULL,
+            DatabaseName sysname NOT NULL
+        );
+
+        DECLARE @CrossDatabaseOrdinal int = 1;
+        DECLARE @CrossDatabaseName sysname;
+        DECLARE @CrossDatabaseSql nvarchar(max);
+        DECLARE @CrossDatabaseError nvarchar(2048);
+        WHILE @CrossDatabaseOrdinal <= @CrossDatabaseCount
+        BEGIN
+            SELECT @CrossDatabaseName = DatabaseName
+            FROM @CrossDatabaseScan
+            WHERE DatabaseOrdinal = @CrossDatabaseOrdinal;
+
+            SET @CrossDatabaseSql = N'USE ' + QUOTENAME(@CrossDatabaseName) + N';
+IF HAS_PERMS_BY_NAME(@ScannedDatabase, N''DATABASE'', N''VIEW DEFINITION'') <> 1
+    THROW 51947, N''Database metadata visibility is insufficient.'', 1;
+
+INSERT #CrossDatabaseFindings (FindingType, DatabaseName)
+SELECT DISTINCT N''D'', @ScannedDatabase
+FROM sys.sql_expression_dependencies AS dependency
+WHERE
+    (
+        LOWER(dependency.referenced_schema_name) COLLATE Latin1_General_100_BIN2 =
+            LOWER(@TargetSchema) COLLATE Latin1_General_100_BIN2
+        AND EXISTS
+        (
+            SELECT 1 FROM #OwnedLabObjects AS owned
+            WHERE LOWER(owned.ObjectName) COLLATE Latin1_General_100_BIN2 =
+                LOWER(dependency.referenced_entity_name) COLLATE Latin1_General_100_BIN2
+        )
+        AND
+        (
+            LOWER(dependency.referenced_database_name) COLLATE Latin1_General_100_BIN2 =
+                LOWER(@TargetDatabase) COLLATE Latin1_General_100_BIN2
+            OR
+            (
+                LOWER(@ScannedDatabase) COLLATE Latin1_General_100_BIN2 =
+                    LOWER(@TargetDatabase) COLLATE Latin1_General_100_BIN2
+                AND dependency.referenced_database_name IS NULL
+            )
+        )
+        AND NOT
+        (
+            LOWER(@ScannedDatabase) COLLATE Latin1_General_100_BIN2 =
+                LOWER(@TargetDatabase) COLLATE Latin1_General_100_BIN2
+            AND dependency.referencing_id IN
+                (SELECT owned.ObjectId FROM #OwnedLabObjects AS owned)
+        )
+    )
+    OR
+    (
+        LOWER(@ScannedDatabase) COLLATE Latin1_General_100_BIN2 =
+            LOWER(@TargetDatabase) COLLATE Latin1_General_100_BIN2
+        AND dependency.referenced_id IN
+            (SELECT owned.ObjectId FROM #OwnedLabObjects AS owned)
+        AND
+        (
+            dependency.referencing_id IS NULL
+            OR dependency.referencing_id NOT IN
+                (SELECT owned.ObjectId FROM #OwnedLabObjects AS owned)
+        )
+    );
+
+INSERT #CrossDatabaseFindings (FindingType, DatabaseName)
+SELECT DISTINCT N''S'', @ScannedDatabase
+FROM sys.synonyms AS synonym_entry
+CROSS APPLY
+(
+    SELECT LOWER(REPLACE(REPLACE(synonym_entry.base_object_name, N''['', N''''), N'']'', N''''))
+        COLLATE Latin1_General_100_BIN2 AS NormalizedBaseObjectName
+) AS normalized
+WHERE
+    (
+        PARSENAME(normalized.NormalizedBaseObjectName, 3) =
+            LOWER(@TargetDatabase) COLLATE Latin1_General_100_BIN2
+        AND PARSENAME(normalized.NormalizedBaseObjectName, 2) =
+            LOWER(@TargetSchema) COLLATE Latin1_General_100_BIN2
+        AND EXISTS
+        (
+            SELECT 1 FROM #OwnedLabObjects AS owned
+            WHERE LOWER(owned.ObjectName) COLLATE Latin1_General_100_BIN2 =
+                  PARSENAME(normalized.NormalizedBaseObjectName, 1)
+        )
+    )
+    OR normalized.NormalizedBaseObjectName LIKE
+        N''%'' + LOWER(@TargetDatabase) COLLATE Latin1_General_100_BIN2 + N''%''
+    OR
+    (
+        LOWER(@ScannedDatabase) COLLATE Latin1_General_100_BIN2 =
+            LOWER(@TargetDatabase) COLLATE Latin1_General_100_BIN2
+        AND PARSENAME(normalized.NormalizedBaseObjectName, 3) IS NULL
+        AND PARSENAME(normalized.NormalizedBaseObjectName, 2) =
+            LOWER(@TargetSchema) COLLATE Latin1_General_100_BIN2
+        AND EXISTS
+        (
+            SELECT 1 FROM #OwnedLabObjects AS owned
+            WHERE LOWER(owned.ObjectName) COLLATE Latin1_General_100_BIN2 =
+                  PARSENAME(normalized.NormalizedBaseObjectName, 1)
+        )
+    );';
+            BEGIN TRY
+                EXEC sys.sp_executesql @CrossDatabaseSql,
+                    N'@TargetDatabase sysname, @TargetSchema sysname, @ScannedDatabase sysname',
+                    @TargetDatabase = @DatabaseName,
+                    @TargetSchema = N'lab',
+                    @ScannedDatabase = @CrossDatabaseName;
+            END TRY
+            BEGIN CATCH
+                SET @CrossDatabaseError = N'Cannot prove optional lab deletion safe in database '
+                    + QUOTENAME(@CrossDatabaseName) + N'.';
+                THROW 51948, @CrossDatabaseError, 1;
+            END CATCH;
+
+            SET @CrossDatabaseOrdinal += 1;
+        END;
+
+        IF EXISTS (SELECT 1 FROM #CrossDatabaseFindings WHERE FindingType = 'D')
+            THROW 51949, 'Unrecognized cross-database lab dependency found; refusing optional lab deletion.', 1;
+        IF EXISTS (SELECT 1 FROM #CrossDatabaseFindings WHERE FindingType = 'S')
+            THROW 51950, 'Unrecognized cross-database lab synonym found; refusing optional lab deletion.', 1;
+
+        /* The application lock narrows workshop lifecycle races; unrelated cross-database DDL races
+           cannot be fully locked, so the safest behavior is to abort on every uncertain scan. */
+
         DROP VIEW IF EXISTS lab.vw_WorkshopSampleSummary;
         DROP VIEW IF EXISTS lab.vw_WorkshopRunSummary;
         DROP PROCEDURE IF EXISTS lab.usp_CompareWorkshopRuns;

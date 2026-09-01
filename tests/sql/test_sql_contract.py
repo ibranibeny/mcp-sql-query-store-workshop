@@ -2146,6 +2146,80 @@ def test_cleanup_dependency_guard_blocks_external_non_schema_bound_modules_in_bo
     assert optional.index("UNRECOGNIZED LAB DEPENDENCY") < first_drop
 
 
+def test_cleanup_snapshots_every_accessible_online_database_with_a_hard_bound() -> None:
+    text = normalized("09-Cleanup.sql")
+    optional = text[text.index("IF @DROPLABDATA = 1"):]
+    cross_database = optional[optional.index("DECLARE @CROSSDATABASESCAN"):]
+
+    assert "FROM SYS.DATABASES" in cross_database
+    assert "STATE_DESC = N'ONLINE'" in cross_database
+    assert "SOURCE_DATABASE_ID IS NULL" in cross_database
+    assert "NAME <> N'TEMPDB'" in cross_database
+    assert "HAS_DBACCESS(NAME) = 1" in cross_database
+    assert "N'MASTER'" in cross_database and "N'MSDB'" in cross_database
+    assert re.search(r"@CROSSDATABASECOUNT\s*>\s*256.*?THROW", cross_database)
+    assert "WHILE @CROSSDATABASEORDINAL <= @CROSSDATABASECOUNT" in cross_database
+
+
+def test_cleanup_cross_database_dependency_query_is_quoted_parameterized_and_exact() -> None:
+    raw = sql("09-Cleanup.sql")
+    text = normalized("09-Cleanup.sql")
+    optional = text[text.index("IF @DROPLABDATA = 1"):]
+    cross_database = optional[optional.index("DECLARE @CROSSDATABASESCAN"):]
+
+    assert "QUOTENAME(@CROSSDATABASENAME)" in cross_database
+    assert "SYS.SQL_EXPRESSION_DEPENDENCIES" in cross_database
+    assert "LOWER(DEPENDENCY.REFERENCED_DATABASE_NAME)" in cross_database
+    assert "LOWER(@TARGETDATABASE)" in cross_database
+    assert "DEPENDENCY.REFERENCED_ID" in cross_database
+    assert "LOWER(DEPENDENCY.REFERENCED_SCHEMA_NAME)" in cross_database
+    assert "LOWER(@TARGETSCHEMA)" in cross_database
+    assert "DEPENDENCY.REFERENCED_ENTITY_NAME" in cross_database
+    assert "#OWNEDLABOBJECTS" in cross_database
+    assert "SYS.SP_EXECUTESQL @CROSSDATABASESQL" in cross_database
+    assert "@TARGETDATABASE SYSNAME, @TARGETSCHEMA SYSNAME, @SCANNEDDATABASE SYSNAME" in cross_database
+    assert "@TARGETDATABASE = @DATABASENAME" in cross_database
+    dynamic_sql = re.search(
+        r"SET @CROSSDATABASESQL = N'(?P<body>.*?)';\s*BEGIN TRY",
+        raw,
+        re.IGNORECASE | re.DOTALL,
+    )
+    assert dynamic_sql
+    assert "+ @CrossDatabaseName +" not in dynamic_sql.group("body")
+
+
+def test_cleanup_cross_database_synonyms_are_normalized_and_fail_closed() -> None:
+    text = normalized("09-Cleanup.sql")
+    optional = text[text.index("IF @DROPLABDATA = 1"):]
+    cross_database = optional[optional.index("DECLARE @CROSSDATABASESCAN"):]
+
+    assert "SYS.SYNONYMS" in cross_database
+    assert "SYNONYM_ENTRY.BASE_OBJECT_NAME" in cross_database
+    assert "REPLACE(" in cross_database and "N''[''" in cross_database and "N'']''" in cross_database
+    assert "PARSENAME(" in cross_database
+    assert re.search(r"LIKE\s+N''%''\s*\+\s*LOWER\(@TARGETDATABASE\).*?\+\s*N''%''", cross_database)
+    assert "UNRECOGNIZED CROSS-DATABASE LAB SYNONYM" in cross_database
+    catch = cross_database[cross_database.index("BEGIN CATCH"):]
+    assert "ERROR_MESSAGE()" not in catch
+    assert "CANNOT PROVE OPTIONAL LAB DELETION SAFE IN DATABASE " in catch
+    assert "@CROSSDATABASENAME" in catch
+    assert re.search(r"THROW\s+519\d{2},\s*@CROSSDATABASEERROR", catch)
+
+
+def test_cleanup_cross_database_guards_are_rechecked_under_lock_immediately_before_drop() -> None:
+    raw = sql("09-Cleanup.sql").upper()
+    text = normalized("09-Cleanup.sql")
+    lock = text.index("SYS.SP_GETAPPLOCK")
+    scan = text.index("DECLARE @CROSSDATABASESCAN")
+    dependency_block = text.index("UNRECOGNIZED CROSS-DATABASE LAB DEPENDENCY")
+    synonym_block = text.index("UNRECOGNIZED CROSS-DATABASE LAB SYNONYM")
+    first_drop = text.index("DROP VIEW IF EXISTS LAB.VW_WORKSHOPSAMPLESUMMARY")
+
+    assert lock < scan < dependency_block < synonym_block < first_drop
+    assert "DDL RACES" in raw
+    assert "APPLICATION LOCK" in raw
+
+
 def test_diagnostics_records_created_identity_ownership() -> None:
     text = normalized("05-CreateDiagnostics.sql")
     assert "WORKSHOPADMIN.DBO.IDENTITYOWNERSHIP" in text
