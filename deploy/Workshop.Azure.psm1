@@ -3134,7 +3134,13 @@ Move-Item -LiteralPath `$expanded.FullName -Destination `$repo
 `$acl.SetAccessRuleProtection(`$true, `$false)
 foreach (`$identity in @('BUILTIN\Administrators','NT AUTHORITY\SYSTEM')) { `$acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(`$identity,'FullControl','Allow')) }
 Set-Acl -LiteralPath `$payloadPath -AclObject `$acl
-& (Join-Path `$repo 'deploy\$BootstrapScript') -ProtectedPayloadPath `$payloadPath
+`$bootstrapEntryPoint = if ('$BootstrapScript' -ceq 'Initialize-AdminVm.ps1') {
+    'Invoke-AdminBootstrap.ps1'
+}
+else {
+    '$BootstrapScript'
+}
+& (Join-Path `$repo "deploy\`$bootstrapEntryPoint") -ProtectedPayloadPath `$payloadPath
 "@
             $encodedCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($innerScript))
             $publicSettings = @{ timestamp = [DateTime]::UtcNow.ToString('yyyyMMddHHmmss') }
@@ -3367,7 +3373,7 @@ function Test-WorkshopReadiness {
         'get_active_workshop_grants', 'get_memory_snapshot', 'get_procedure_plan_summary',
         'get_query_store_top_queries', 'get_query_store_waits', 'read_records'
     )
-    $expectedPackages = @('Microsoft.VisualStudioCode', 'Microsoft.SQLServerManagementStudio', 'Microsoft.DotNet.SDK.9', 'Git.Git', 'GitHub.cli')
+    $expectedPackages = @('Microsoft.PowerShell', 'Microsoft.VisualStudioCode', 'Microsoft.SQLServerManagementStudio', 'Microsoft.DotNet.SDK.9', 'Git.Git', 'GitHub.cli')
     $expectedExtensions = @('ms-mssql.mssql', 'GitHub.copilot', 'GitHub.copilot-chat', 'ms-vscode.powershell')
     $actualTools = @(Get-ReadinessValue $AdminReadiness 'Mcp.ToolNames')
     $exactToolAllowlist = Test-ExactSet -Actual $actualTools -Expected $expectedTools
@@ -3415,7 +3421,7 @@ function Test-WorkshopReadiness {
         @{ Name = 'SQL backup and database configuration'; Passed = (Get-ReadinessValue $SqlReadiness 'Backup.VerifyOnly') -eq $true -and ([string](Get-ReadinessValue $SqlReadiness 'Backup.Sha256')) -match '^[A-F0-9]{64}$' -and (Get-ReadinessValue $SqlReadiness 'Database.Marker') -ceq '68A70D6E-62D8-4A77-8F0A-9DA7934DBA7C' -and (Get-ReadinessValue $SqlReadiness 'Database.QueryStore') -ceq 'READ_WRITE' -and (Get-ReadinessValue $SqlReadiness 'Database.ResourceGovernor') -ceq 'Enabled' -and (Get-ReadinessValue $SqlReadiness 'Database.ProcedureCount') -eq 8 }
         @{ Name = 'Administration VM exact identity and security'; Passed = (Get-ReadinessValue $AdminReadiness 'Vm.Name') -ceq 'vm-mcpsql-admin' -and (Get-ReadinessValue $AdminReadiness 'Vm.Size') -ceq 'Standard_D4s_v5' -and (Get-ReadinessValue $AdminReadiness 'Vm.Location') -ceq 'indonesiacentral' -and (Get-ReadinessValue $AdminReadiness 'Vm.AdminPublicIpBoundaryObserved') -eq $true -and (Get-ReadinessValue $AdminReadiness 'Vm.PublicIpCount') -eq 1 -and (Get-ReadinessValue $AdminReadiness 'Vm.SecureBoot') -eq $true -and (Get-ReadinessValue $AdminReadiness 'Vm.Tpm') -eq $true -and ([string](Get-ReadinessValue $AdminReadiness 'Vm.Os')) -match 'Windows 11 Enterprise' -and [int](Get-ReadinessValue $AdminReadiness 'Vm.Build') -ge 26100 -and (Get-ReadinessValue $AdminReadiness 'Vm.WindowsClientLicenseAttested') -eq $true -and $activation -in @('Licensed', 'ObservedUnknown') }
         @{ Name = 'Administration exact tools and extensions'; Passed = (Test-ExactSet -Actual $packageIds -Expected $expectedPackages) -and $packageVersionsObserved -and (Test-ExactSet -Actual $extensionIds -Expected $expectedExtensions) -and $dabVersionValid }
-        @{ Name = 'Administration root environment ACL'; Passed = (Get-ReadinessValue $AdminReadiness 'RootEnvAcl.Path') -ceq 'C:\McpSqlWorkshop\workspace\.env' -and (Get-ReadinessValue $AdminReadiness 'RootEnvAcl.Restricted') -eq $true }
+        @{ Name = 'Administration workspace and environment ACLs'; Passed = (Get-ReadinessValue $AdminReadiness 'Workspace.WorkspaceUserModify') -eq $true -and (Get-ReadinessValue $AdminReadiness 'RootEnvAcl.Path') -ceq 'C:\McpSqlWorkshop\workspace\.env' -and (Get-ReadinessValue $AdminReadiness 'RootEnvAcl.Restricted') -eq $true -and (Get-ReadinessValue $AdminReadiness 'RootEnvAcl.EnvAclRestricted') -eq $true }
         @{ Name = 'Administration private network checks'; Passed = (Get-ReadinessValue $AdminReadiness 'Network.DnsName') -ceq 'sql01.mcpworkshop.internal' -and (Get-ReadinessValue $AdminReadiness 'Network.ResolvedAddress') -ceq '10.20.2.10' -and (Get-ReadinessValue $AdminReadiness 'Network.Tcp1433') -eq $true }
         @{ Name = 'Administration validated SQL TLS'; Passed = (Get-ReadinessValue $AdminReadiness 'SqlTls.EncryptOption') -ceq 'TRUE' -and (Get-ReadinessValue $AdminReadiness 'SqlTls.TrustServerCertificate') -eq $false -and (Get-ReadinessValue $AdminReadiness 'SqlTls.CertificateValidated') -eq $true -and (Get-ReadinessValue $AdminReadiness 'SqlTls.ValidationMethod') -ceq 'SqlClientChainHostAndTransferredCertificate' -and (Get-ReadinessValue $AdminReadiness 'SqlTls.RemoteAdminTest') -eq $true -and (Get-ReadinessValue $AdminReadiness 'SqlTls.CertificateThumbprint') -ceq $thumbprint -and (Get-ReadinessValue $AdminReadiness 'SqlTls.PublicCertificateSha256') -ceq $publicHash -and (Get-ReadinessValue $AdminReadiness 'SqlTls.HostNameInCertificate') -ceq 'sql01.mcpworkshop.internal' }
         @{ Name = 'MCP configuration and exact tool allowlist valid'; Passed = (Get-ReadinessValue $AdminReadiness 'Mcp.ConfigValid') -eq $true -and (Get-ReadinessValue $AdminReadiness 'Mcp.DabMinimumVersionMet') -eq $true -and (Get-ReadinessValue $AdminReadiness 'Mcp.ForbiddenMutationTools') -eq $false -and $exactToolAllowlist }

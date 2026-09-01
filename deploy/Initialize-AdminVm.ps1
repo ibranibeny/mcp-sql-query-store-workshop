@@ -8,6 +8,13 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+if ($PSVersionTable.PSVersion -lt [version]'7.4') {
+    throw 'Administration bootstrap requires PowerShell 7.4 or later.'
+}
+if ($env:MCP_SQL_ADMIN_BOOTSTRAP_PWSH -cne '1') {
+    throw 'Administration bootstrap must be launched by the guarded PowerShell 7 bootstrap wrapper.'
+}
+
 $metadataUri = 'http://169.254.169.254/metadata/instance?api-version=2021-02-01'
 $privateDnsName = 'sql01.mcpworkshop.internal'
 $expectedSqlIp = '10.20.2.10'
@@ -16,6 +23,7 @@ $evidenceDirectory = Split-Path $readinessPath
 $transcriptPath = Join-Path $evidenceDirectory 'admin-bootstrap-transcript.log'
 $transcriptStarted = $false
 $packageIds = @(
+    'Microsoft.PowerShell',
     'Microsoft.VisualStudioCode',
     'Microsoft.SQLServerManagementStudio',
     'Microsoft.DotNet.SDK.9',
@@ -23,6 +31,7 @@ $packageIds = @(
     'GitHub.cli'
 )
 $minimumPackageVersions = @{
+    'Microsoft.PowerShell' = [version]'7.4'
     'Microsoft.VisualStudioCode' = [version]'1.0'
     'Microsoft.SQLServerManagementStudio' = [version]'22.7'
     'Microsoft.DotNet.SDK.9' = [version]'9.0'
@@ -75,14 +84,84 @@ function Get-GitHubCliAuthStatus {
 }
 
 function Protect-WorkshopFileAcl {
-    param([Parameter(Mandatory)][string] $Path, [Parameter(Mandatory)][string] $InteractiveUser)
+    param(
+        [Parameter(Mandatory)][string] $Path,
+        [Parameter(Mandatory)][Security.Principal.SecurityIdentifier] $InteractiveUserSid
+    )
     $acl = [Security.AccessControl.FileSecurity]::new()
     $acl.SetAccessRuleProtection($true, $false)
     foreach ($identity in @('BUILTIN\Administrators', 'NT AUTHORITY\SYSTEM')) {
         $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($identity, 'FullControl', 'Allow'))
     }
-    $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($InteractiveUser, 'Read', 'Allow'))
+    $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($InteractiveUserSid, 'Read', 'Allow'))
     Set-Acl -LiteralPath $Path -AclObject $acl
+}
+
+function Resolve-WorkshopLocalUser {
+    param([Parameter(Mandatory)][string] $UserName)
+    Assert-Condition ($UserName -match '^[A-Za-z0-9._-]+$') 'Interactive administration username is invalid.'
+    $localUser = Get-LocalUser -Name $UserName -ErrorAction Stop
+    Assert-Condition $localUser.Enabled 'Interactive administration local account is disabled.'
+    $sid = [Security.Principal.SecurityIdentifier]::new([string]$localUser.SID)
+    [pscustomobject]@{
+        Name = $localUser.Name
+        Sid = $sid
+        Account = $sid.Translate([Security.Principal.NTAccount]).Value
+    }
+}
+
+function Grant-WorkshopWorkspaceModify {
+    param(
+        [Parameter(Mandatory)][string] $Path,
+        [Parameter(Mandatory)][Security.Principal.SecurityIdentifier] $InteractiveUserSid
+    )
+    $acl = Get-Acl -LiteralPath $Path
+    $acl.SetAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+        $InteractiveUserSid, 'Modify', 'ContainerInherit,ObjectInherit', 'None', 'Allow'
+    ))
+    Set-Acl -LiteralPath $Path -AclObject $acl
+
+    $readback = Get-Acl -LiteralPath $Path
+    $rules = @($readback.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))
+    $userRules = @($rules | Where-Object {
+        $_.IdentityReference -eq $InteractiveUserSid -and $_.AccessControlType -eq 'Allow'
+    })
+    $modifyRule = @($userRules | Where-Object {
+        ($_.FileSystemRights -band [Security.AccessControl.FileSystemRights]::Modify) -eq
+            [Security.AccessControl.FileSystemRights]::Modify -and
+        ($_.FileSystemRights -band [Security.AccessControl.FileSystemRights]::FullControl) -ne
+            [Security.AccessControl.FileSystemRights]::FullControl -and
+        ($_.InheritanceFlags -band [Security.AccessControl.InheritanceFlags]::ContainerInherit) -ne 0 -and
+        ($_.InheritanceFlags -band [Security.AccessControl.InheritanceFlags]::ObjectInherit) -ne 0
+    })
+    $requiredOwnerRules = @('S-1-5-18', 'S-1-5-32-544') | ForEach-Object {
+        $requiredSid = [Security.Principal.SecurityIdentifier]::new($_)
+        @($rules | Where-Object {
+            $_.IdentityReference -eq $requiredSid -and $_.AccessControlType -eq 'Allow'
+        }).Count -gt 0
+    }
+    $modifyRule.Count -eq 1 -and $userRules.Count -eq 1 -and $requiredOwnerRules -notcontains $false
+}
+
+function Test-WorkshopEnvAcl {
+    param(
+        [Parameter(Mandatory)][string] $Path,
+        [Parameter(Mandatory)][Security.Principal.SecurityIdentifier] $InteractiveUserSid
+    )
+    $acl = Get-Acl -LiteralPath $Path
+    $rules = @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))
+    $allowedSids = @('S-1-5-18', 'S-1-5-32-544', $InteractiveUserSid.Value)
+    $userRules = @($rules | Where-Object { $_.IdentityReference -eq $InteractiveUserSid })
+    $userReadOnly = $userRules.Count -eq 1 -and
+        ($userRules[0].FileSystemRights -band [Security.AccessControl.FileSystemRights]::Read) -eq
+            [Security.AccessControl.FileSystemRights]::Read -and
+        ($userRules[0].FileSystemRights -band [Security.AccessControl.FileSystemRights]::Write) -eq 0 -and
+        ($userRules[0].FileSystemRights -band [Security.AccessControl.FileSystemRights]::Modify) -ne
+            [Security.AccessControl.FileSystemRights]::Modify
+    $acl.AreAccessRulesProtected -and $rules.Count -eq 3 -and $userReadOnly -and
+        @($rules | Where-Object {
+            $_.AccessControlType -ne 'Allow' -or $_.IdentityReference.Value -notin $allowedSids
+        }).Count -eq 0
 }
 
 function Resolve-WorkshopExecutable {
@@ -343,9 +422,11 @@ try {
     $head = (Invoke-NativeChecked -FilePath $gitPath -ArgumentList @('-C', $repositoryRoot, 'rev-parse', 'HEAD'))[-1].Trim()
     Assert-Condition ($head -ceq [string]$payload.RepositoryCommit) 'Repository HEAD does not match the protected immutable commit.'
 
-    $interactiveUser = ([string]$payload.InteractiveUserName -split '\\')[-1]
-    Assert-Condition ($interactiveUser -match '^[A-Za-z0-9._-]+$') 'Interactive administration username is invalid.'
-    $extensionDirectory = "C:\Users\$interactiveUser\.vscode\extensions"
+    $interactiveUser = Resolve-WorkshopLocalUser -UserName ([string]$payload.InteractiveUserName)
+    $workspaceUserModify = Grant-WorkshopWorkspaceModify -Path $repositoryRoot `
+        -InteractiveUserSid $interactiveUser.Sid
+    Assert-Condition $workspaceUserModify 'Interactive administration user does not have inherited Modify access to the workshop workspace.'
+    $extensionDirectory = "C:\Users\$($interactiveUser.Name)\.vscode\extensions"
     $null = New-Item -ItemType Directory -Path $extensionDirectory -Force
     foreach ($extensionId in $extensionIds) {
         $null = Invoke-NativeChecked -FilePath $codePath -ArgumentList @('--extensions-dir', $extensionDirectory, '--install-extension', $extensionId, '--force')
@@ -397,13 +478,8 @@ try {
         -ReaderSecret $mcpReaderSecret `
         -HostNameInCertificate 'sql01.mcpworkshop.internal' -ApplicationName 'MCP-SQL-Workshop-MCP'
     [IO.File]::WriteAllText($envPath, "MSSQL_CONNECTION_STRING=$connectionText`r`n", [Text.UTF8Encoding]::new($false))
-    Protect-WorkshopFileAcl -Path $envPath -InteractiveUser ([string]$payload.InteractiveUserName)
-    $envAcl = Get-Acl -LiteralPath $envPath
-    $allowedEnvReaders = @('BUILTIN\Administrators', 'NT AUTHORITY\SYSTEM', [string]$payload.InteractiveUserName)
-    $unexpectedEnvReaders = @($envAcl.Access | Where-Object {
-        $_.AccessControlType -eq 'Allow' -and $_.IdentityReference.Value -notin $allowedEnvReaders
-    })
-    $rootEnvAclRestricted = $envAcl.AreAccessRulesProtected -and $unexpectedEnvReaders.Count -eq 0
+    Protect-WorkshopFileAcl -Path $envPath -InteractiveUserSid $interactiveUser.Sid
+    $rootEnvAclRestricted = Test-WorkshopEnvAcl -Path $envPath -InteractiveUserSid $interactiveUser.Sid
     Assert-Condition $rootEnvAclRestricted 'Root .env ACL readback is broader than the approved identities.'
     $parsedEnvironment = Read-DabMssqlEnvironment -Path $envPath -BuilderType $sqlClientTypes.Builder `
         -ExpectedDataSource $privateDnsName -ExpectedUserId 'mcp_workshop_reader' `
@@ -452,8 +528,9 @@ try {
         Evidence = [ordered]@{ Sanitized = $true }
         Vm = [ordered]@{ Name = $metadata.compute.name; Size = $metadata.compute.vmSize; Location = $metadata.compute.location; AdminPublicIpBoundaryObserved = $true; PublicIpCount = $imdsPublicIps.Count; SecureBoot = $true; Tpm = $true; Os = $os.Caption; Build = $os.BuildNumber; Activation = $activationStatus; WindowsClientLicenseAttested = [bool]$payload.WindowsClientLicenseAttested }
         Repository = [ordered]@{ Commit = $head }
+        Workspace = [ordered]@{ User = $interactiveUser.Account; WorkspaceUserModify = $workspaceUserModify }
         Tools = $toolVersions
-        RootEnvAcl = [ordered]@{ Path = $envPath; Restricted = $rootEnvAclRestricted }
+        RootEnvAcl = [ordered]@{ Path = $envPath; Restricted = $rootEnvAclRestricted; EnvAclRestricted = $rootEnvAclRestricted }
         Auth = [ordered]@{ GitHubCliAuthStatus = $githubCliAuthStatus; CopilotAuthStatus = 'InteractiveSignInRequired' }
         Network = [ordered]@{ DnsName = $privateDnsName; ResolvedAddress = $expectedSqlIp; Tcp1433 = $true }
         SqlTls = [ordered]@{ DnsName = $parsedEnvironment.DataSource; Address = $expectedSqlIp; Tcp1433 = $true; CertificateThumbprint = $certificateThumbprint; PublicCertificateSha256 = $certificateHash; CertificateValidated = $true; ValidationMethod = 'SqlClientChainHostAndTransferredCertificate'; EncryptOption = $encrypted; Encrypt = $parsedEnvironment.Encrypt; TrustServerCertificate = $parsedEnvironment.TrustServerCertificate; HostNameInCertificate = $parsedEnvironment.HostNameInCertificate; UserId = $parsedEnvironment.UserId; PasswordPresent = $parsedEnvironment.PasswordPresent; ApplicationName = $parsedEnvironment.ApplicationName; ClientProvider = $sqlClientTypes.Builder.Namespace; RemoteAdminTest = $true }

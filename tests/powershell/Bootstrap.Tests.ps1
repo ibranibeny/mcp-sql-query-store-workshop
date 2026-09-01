@@ -4,6 +4,7 @@ BeforeAll {
     $script:DeployRoot = Join-Path $PSScriptRoot '../../deploy'
     $script:SqlBootstrapPath = Join-Path $script:DeployRoot 'Initialize-SqlVm.ps1'
     $script:AdminBootstrapPath = Join-Path $script:DeployRoot 'Initialize-AdminVm.ps1'
+    $script:AdminBootstrapWrapperPath = Join-Path $script:DeployRoot 'Invoke-AdminBootstrap.ps1'
     $script:EvidencePath = Join-Path $script:DeployRoot 'Capture-DeploymentEvidence.ps1'
     $script:ModulePath = Join-Path $script:DeployRoot 'Workshop.Azure.psd1'
     $script:ToolManifestPath = Join-Path $PSScriptRoot '../../.config/dotnet-tools.json'
@@ -177,13 +178,60 @@ Describe 'SQL VM bootstrap static contract' {
 }
 
 Describe 'Administration VM bootstrap static contract' {
-    BeforeAll { $script:AdminContract = Get-ScriptContract -Path $script:AdminBootstrapPath }
+    BeforeAll {
+        $script:AdminContract = Get-ScriptContract -Path $script:AdminBootstrapPath
+        $script:AdminWrapperContract = Get-ScriptContract -Path $script:AdminBootstrapWrapperPath
+    }
 
     It 'exists, parses, and accepts only a protected payload file' {
         Test-Path -LiteralPath $script:AdminBootstrapPath | Should -BeTrue
         $script:AdminContract.Errors | Should -HaveCount 0
         @($script:AdminContract.Ast.ParamBlock.Parameters.Name.VariablePath.UserPath) | Should -Contain 'ProtectedPayloadPath'
         $script:AdminContract.Text | Should -Match 'Set-StrictMode\s+-Version\s+Latest'
+    }
+
+    It 'bootstraps PowerShell 7 before a single guarded re-execution without secret arguments' {
+        Test-Path -LiteralPath $script:AdminBootstrapWrapperPath | Should -BeTrue
+        $script:AdminWrapperContract.Errors | Should -HaveCount 0
+        @($script:AdminWrapperContract.Ast.ParamBlock.Parameters.Name.VariablePath.UserPath) |
+            Should -Be @('ProtectedPayloadPath')
+        $wrapper = $script:AdminWrapperContract.Text
+        $wrapper | Should -Match 'Microsoft\.PowerShell'
+        $wrapper | Should -Match 'winget\.exe'
+        $wrapper | Should -Match 'MCP_SQL_ADMIN_BOOTSTRAP_PWSH'
+        $wrapper | Should -Match 'pwsh\.exe'
+        $wrapper | Should -Match 'Initialize-AdminVm\.ps1'
+        $wrapper.IndexOf('Microsoft.PowerShell') | Should -BeLessThan $wrapper.IndexOf('pwsh.exe')
+        [regex]::Matches($wrapper, '(?im)^\s*&\s+\$pwshPath\s+').Count | Should -Be 1
+        $wrapper | Should -Match 'exit\s+\$exitCode'
+        $wrapper | Should -Match 'Remove-Item\s+-LiteralPath\s+\$ProtectedPayloadPath'
+        $wrapper | Should -Not -Match 'Unprotect-CmsMessage|ConvertFrom-Json|McpReaderSecret|password|token'
+        $wrapper | Should -Not -Match '(?i)&\s+\$pwshPath[^\r\n]*(?:-Command|-EncodedCommand)'
+    }
+
+    It 'requires PowerShell 7.4 before any DAB SqlClient assembly load' {
+        $text = $script:AdminContract.Text
+        $versionGate = $text.IndexOf("[version]'7.4'")
+        $addType = $text.IndexOf('Add-Type')
+        $versionGate | Should -BeGreaterThan -1
+        $addType | Should -BeGreaterThan $versionGate
+        $text | Should -Match 'MCP_SQL_ADMIN_BOOTSTRAP_PWSH'
+    }
+
+    It 'grants only inherited Modify to a validated local workspace user and verifies exact ACL facts' {
+        $text = $script:AdminContract.Text
+        $text | Should -Match 'Get-LocalUser'
+        $text | Should -Match 'SecurityIdentifier'
+        $text | Should -Match "'Modify'\s*,\s*'ContainerInherit,ObjectInherit'"
+        $text | Should -Not -Match "InteractiveUser[^\r\n]*'FullControl'"
+        $text | Should -Match 'WorkspaceUserModify'
+        $text | Should -Match 'EnvAclRestricted'
+        $text | Should -Match '\$workspaceUserModify\s*=\s*Grant-WorkshopWorkspaceModify'
+        $text | Should -Match 'WorkspaceUserModify\s*=\s*\$workspaceUserModify'
+        $text | Should -Match 'EnvAclRestricted\s*=\s*\$rootEnvAclRestricted'
+        $text | Should -Match 'AreAccessRulesProtected'
+        $text | Should -Match 'InheritanceFlags.*ContainerInherit'
+        $text | Should -Match 'InheritanceFlags.*ObjectInherit'
     }
 
     It 'verifies Windows 11 24H2 Enterprise, activation availability, IMDS identity, and Trusted Launch' {
@@ -200,7 +248,7 @@ Describe 'Administration VM bootstrap static contract' {
 
     It 'installs exact official winget packages and VS Code extensions noninteractively and reads versions back' {
         $text = $script:AdminContract.Text
-        foreach ($id in @('Microsoft.VisualStudioCode', 'Microsoft.SQLServerManagementStudio', 'Microsoft.DotNet.SDK.9', 'Git.Git', 'GitHub.cli')) {
+        foreach ($id in @('Microsoft.PowerShell', 'Microsoft.VisualStudioCode', 'Microsoft.SQLServerManagementStudio', 'Microsoft.DotNet.SDK.9', 'Git.Git', 'GitHub.cli')) {
             $text | Should -Match ([regex]::Escape($id))
         }
         foreach ($id in @('ms-mssql.mssql', 'GitHub.copilot', 'GitHub.copilot-chat', 'ms-vscode.powershell')) {
@@ -390,8 +438,10 @@ Describe 'Bootstrap orchestration and evidence contracts' {
                     Evidence = [pscustomobject]@{ Sanitized = $true }
                     Vm = [pscustomobject]@{ Name = 'vm-mcpsql-admin'; Size = 'Standard_D4s_v5'; Location = 'indonesiacentral'; AdminPublicIpBoundaryObserved = $true; PublicIpCount = 1; SecureBoot = $true; Tpm = $true; Os = 'Microsoft Windows 11 Enterprise'; Build = '26100'; Activation = 'ObservedUnknown'; WindowsClientLicenseAttested = $true }
                     Repository = [pscustomobject]@{ Commit = $commit }
-                    RootEnvAcl = [pscustomobject]@{ Path = 'C:\McpSqlWorkshop\workspace\.env'; Restricted = $true }
+                    Workspace = [pscustomobject]@{ User = 'VM-MCPSQL-ADMIN\workshop-admin'; WorkspaceUserModify = $true }
+                    RootEnvAcl = [pscustomobject]@{ Path = 'C:\McpSqlWorkshop\workspace\.env'; Restricted = $true; EnvAclRestricted = $true }
                     Tools = [pscustomobject]@{ VisualStudioCode = '1.99.0'; DotNet = '9.0.100'; Git = 'git version 2.49.0'; GitHubCli = 'gh version 2.70.0'; DAB = '2.0.9'; WingetPackages = @(
+                        [pscustomobject]@{ Id = 'Microsoft.PowerShell'; VersionReadback = '7.4.0' },
                         [pscustomobject]@{ Id = 'Microsoft.VisualStudioCode'; VersionReadback = '1.99.0' },
                         [pscustomobject]@{ Id = 'Microsoft.SQLServerManagementStudio'; VersionReadback = '22.7.0' },
                         [pscustomobject]@{ Id = 'Microsoft.DotNet.SDK.9'; VersionReadback = '9.0.100' },
@@ -430,6 +480,13 @@ Describe 'Bootstrap orchestration and evidence contracts' {
         $script:SqlContract.Text | Should -Match 'Unprotect-CmsMessage'
         $script:AdminContract.Text | Should -Match 'Unprotect-CmsMessage'
         $moduleText | Should -Not -Match '(?i)Settings\s*=\s*@\{[^}]*password'
+    }
+
+    It 'starts the administration bootstrap through the PowerShell 5 safe wrapper' {
+        $moduleText = Get-Content -LiteralPath (Join-Path $script:DeployRoot 'Workshop.Azure.psm1') -Raw
+        $moduleText | Should -Match 'Invoke-AdminBootstrap\.ps1'
+        $moduleText | Should -Match 'Initialize-AdminVm\.ps1'
+        $moduleText.IndexOf("Invoke-AdminBootstrap.ps1") | Should -BeGreaterThan -1
     }
 
     It 'configures MCP to invoke the pinned local tool and keeps role immediately after stdio mode' {
@@ -539,7 +596,9 @@ Describe 'Bootstrap orchestration and evidence contracts' {
         @{ Path = 'Sql.Certificate.TlsLoadFailures'; Value = 1 },
         @{ Path = 'Sql.Database.ProcedureCount'; Value = 7 },
         @{ Path = 'Admin.Vm.PublicIpCount'; Value = 0 },
+        @{ Path = 'Admin.Workspace.WorkspaceUserModify'; Value = $false },
         @{ Path = 'Admin.RootEnvAcl.Restricted'; Value = $false },
+        @{ Path = 'Admin.RootEnvAcl.EnvAclRestricted'; Value = $false },
         @{ Path = 'Admin.Auth.GitHubCliAuthStatus'; Value = $null },
         @{ Path = 'Admin.SqlTls.CertificateValidated'; Value = $false },
         @{ Path = 'Admin.SqlTls.ValidationMethod'; Value = 'generic' },
