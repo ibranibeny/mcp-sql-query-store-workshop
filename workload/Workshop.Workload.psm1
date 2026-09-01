@@ -1048,11 +1048,720 @@ function ConvertTo-WorkshopEvidence {
     }
 }
 
+function Get-WorkshopApplicationName {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [guid] $RunId,
+
+        [Parameter(Mandatory)]
+        [ValidateSet('Baseline', 'Optimized')]
+        [string] $Phase,
+
+        [Parameter(Mandatory)]
+        [ValidateRange(1, 4)]
+        [int] $Worker
+    )
+
+    return "MCP-SQL-Workshop-$($RunId.ToString('D'))-$Phase-$Worker"
+}
+
+function Get-WorkshopParameterSchedule {
+    [CmdletBinding()]
+    param()
+
+    return @(
+        [pscustomobject][ordered]@{ StartDate = '2022-01-01'; EndDateExclusive = '2023-01-01'; TerritoryID = $null; TopCount = 100 }
+        [pscustomobject][ordered]@{ StartDate = '2021-04-01'; EndDateExclusive = '2022-04-01'; TerritoryID = 1; TopCount = 100 }
+        [pscustomobject][ordered]@{ StartDate = '2019-01-01'; EndDateExclusive = '2020-01-01'; TerritoryID = $null; TopCount = 250 }
+        [pscustomobject][ordered]@{ StartDate = '2022-06-01'; EndDateExclusive = '2022-07-01'; TerritoryID = 4; TopCount = 100 }
+    )
+}
+
+function Get-WorkshopTrialSequence {
+    [CmdletBinding()]
+    param()
+
+    return @('A', 'B', 'B', 'A', 'B', 'A', 'A', 'B', 'A', 'B', 'B', 'A')
+}
+
+function Test-WorkshopPreflight {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [object] $Snapshot
+    )
+
+    $requiredHashes = @(
+        'ServerConfigurationHash', 'PoolConfigurationHash', 'DatabaseConfigurationHash',
+        'DataHash', 'IndexStatisticsHash', 'ProcedureHash'
+    )
+    $failures = [System.Collections.Generic.List[string]]::new()
+    if (-not $Snapshot.MarkerValid) { $failures.Add('The workshop marker is invalid.') }
+    if ([int] $Snapshot.SqlMajorVersion -ne 16) { $failures.Add('SQL Server major version 16 is required.') }
+    if ([string] $Snapshot.SqlEdition -notmatch 'Enterprise') { $failures.Add('SQL Server Enterprise edition is required.') }
+    if ([int64] $Snapshot.PhysicalMemoryMB -lt 63000 -or [int64] $Snapshot.PhysicalMemoryMB -gt 66000) {
+        $failures.Add('The 64 GB host memory profile is required.')
+    }
+    if ([string] $Snapshot.QueryStoreActualState -cne 'READ_WRITE') { $failures.Add('Query Store must be READ_WRITE.') }
+    if ([string] $Snapshot.ResourcePool -cne 'mcp_sql_workshop_pool') { $failures.Add('The exact workshop resource pool is required.') }
+    if ([string] $Snapshot.WorkloadGroup -cne 'mcp_sql_workshop_group') { $failures.Add('The exact workshop workload group is required.') }
+    if (-not $Snapshot.MemoryGrantFeedbackDisabled) { $failures.Add('Memory grant feedback must be disabled for the experiment.') }
+    if ([string]::IsNullOrWhiteSpace([string] $Snapshot.PriorMemoryGrantFeedbackState)) {
+        $failures.Add('The prior memory grant feedback state must be recorded.')
+    }
+    if (-not $Snapshot.ProceduresPresent) { $failures.Add('Both workload procedures must be present.') }
+    if (-not $Snapshot.EvidenceSchemaPresent) { $failures.Add('The evidence schema must be present.') }
+    $validationBatch = [guid]::Empty
+    if (-not $Snapshot.ValidationPassed -or
+        -not [guid]::TryParseExact([string] $Snapshot.ValidationBatchID, 'D', [ref] $validationBatch)) {
+        $failures.Add('A complete passing correctness validation batch is required.')
+    }
+    foreach ($name in $requiredHashes) {
+        if ([string] $Snapshot.$name -cnotmatch '^[a-f0-9]{64}$') {
+            $failures.Add("$name must be a lowercase SHA-256 fingerprint.")
+        }
+    }
+    if ($failures.Count -gt 0) {
+        throw "Workshop preflight failed: $($failures -join ' ')"
+    }
+    return $true
+}
+
+function Assert-WorkshopOperationSet {
+    param([Parameter(Mandatory)][System.Collections.IDictionary] $OperationSet)
+
+    $required = @('OpenConnection', 'StartWorker', 'Sample', 'StopWorker', 'KillTagged', 'Persist', 'Delay', 'Clock', 'Export')
+    $missing = @($required | Where-Object { -not $OperationSet.Contains($_) -or $OperationSet[$_] -isnot [scriptblock] })
+    if ($missing.Count -gt 0) {
+        throw "OperationSet is missing scriptblock operations: $($missing -join ', ')."
+    }
+}
+
+function Test-WorkshopFingerprintMatch {
+    param(
+        [Parameter(Mandatory)][object] $Expected,
+        [Parameter(Mandatory)][object] $Actual
+    )
+
+    foreach ($name in @(
+        'ServerConfigurationHash', 'PoolConfigurationHash', 'DatabaseConfigurationHash',
+        'DataHash', 'IndexStatisticsHash', 'ProcedureHash'
+    )) {
+        if ([string] $Expected.$name -cne [string] $Actual.$name) { return $false }
+    }
+    return $true
+}
+
+function Get-WorkshopTrialAssessment {
+    param([Parameter(Mandatory)][object[]] $Trials)
+
+    $baseline = @($Trials | Where-Object Phase -eq 'Baseline')
+    $optimized = @($Trials | Where-Object Phase -eq 'Optimized')
+    $correctnessPassed = @($Trials | Where-Object { -not $_.Correct }).Count -eq 0
+    $metrics = @('DurationMs', 'CpuMs', 'LogicalReads', 'GrantsKb', 'SpillsMb', 'WaitMs')
+    $improved = $false
+    $materialRegression = $false
+    foreach ($metric in $metrics) {
+        $baselineAverage = [decimal] (($baseline | Measure-Object -Property $metric -Average).Average)
+        $optimizedAverage = [decimal] (($optimized | Measure-Object -Property $metric -Average).Average)
+        if ($optimizedAverage -lt $baselineAverage) { $improved = $true }
+        if ($baselineAverage -gt 0 -and $optimizedAverage -gt ($baselineAverage * [decimal]'1.10')) {
+            $materialRegression = $true
+        }
+    }
+    return [pscustomobject]@{
+        CorrectnessPassed = $correctnessPassed
+        AdditionalMetricImproved = $improved
+        MaterialRegression = $materialRegression
+    }
+}
+
+function Invoke-WorkshopExperiment {
+    [CmdletBinding(SupportsShouldProcess)]
+    param(
+        [Parameter(Mandatory)]
+        [guid] $RunId,
+
+        [Parameter(Mandatory)]
+        [System.Collections.IDictionary] $OperationSet,
+
+        [Parameter()]
+        [ValidateRange(1, 4)]
+        [int] $MaximumWorkers = 4,
+
+        [Parameter()]
+        [ValidateRange(60, 600)]
+        [int] $MaximumDurationSeconds = 600,
+
+        [Parameter()]
+        [ValidateRange(5, 30)]
+        [int] $SampleIntervalSeconds = 5,
+
+        [Parameter()]
+        [ValidateRange(10, 60)]
+        [int] $WorkerRampSeconds = 20
+    )
+
+    Assert-WorkshopOperationSet $OperationSet
+    if (-not $PSCmdlet.ShouldProcess($RunId, 'Run bounded workshop memory-grant experiment')) { return }
+
+    $preflight = & $OperationSet.OpenConnection 'Preflight'
+    [void] (Test-WorkshopPreflight -Snapshot $preflight)
+    $scheduleObjects = @(Get-WorkshopParameterSchedule)
+    $schedule = @($scheduleObjects | ForEach-Object { ConvertTo-Json $_ -Compress })
+    $scheduleJson = ConvertTo-Json $schedule -Compress
+    $workers = [System.Collections.Generic.List[object]]::new()
+    $samples = [System.Collections.Generic.List[object]]::new()
+    $trials = [System.Collections.Generic.List[object]]::new()
+    $start = [datetimeoffset] (& $OperationSet.Clock)
+    $lastRamp = $start.AddSeconds(-$WorkerRampSeconds)
+    $consecutive = 0
+    $outcome = $null
+    $frozen = $null
+
+    try {
+        $applicationName = Get-WorkshopApplicationName -RunId $RunId -Phase Baseline -Worker 1
+        $workers.Add((& $OperationSet.StartWorker $RunId 'Baseline' 1 $applicationName $schedule))
+        while ($null -eq $outcome -and $null -eq $frozen) {
+            $now = [datetimeoffset] (& $OperationSet.Clock)
+            $elapsed = ($now - $start).TotalSeconds
+            $sample = & $OperationSet.Sample $RunId 'Baseline' 'Memory' $null $null
+            $samples.Add($sample)
+            $safety = Test-WorkshopSafetySample -HostUsedPercent $sample.HostUsedPercent `
+                -HostAvailableMB $sample.HostAvailableMB -ProcessPhysicalLow $sample.ProcessPhysicalLow `
+                -ProcessVirtualLow $sample.ProcessVirtualLow `
+                -ConsecutiveHealthFailures $(if ($sample.Healthy) { 0 } else { 2 }) `
+                -ElapsedSeconds $elapsed -MaximumDurationSeconds $MaximumDurationSeconds `
+                -Phase Baseline -ManualStop $sample.ManualStopRequested
+            if ($safety.Decision -eq 'Stop') { $outcome = $safety.Outcome; break }
+            if (Test-TargetBand $sample.GrantUtilizationPercent Baseline) { $consecutive++ } else { $consecutive = 0 }
+            if ($consecutive -ge 3) {
+                $frozen = [ordered]@{
+                    workers = $workers.Count
+                    maximumDurationSeconds = $MaximumDurationSeconds
+                    sampleIntervalSeconds = $SampleIntervalSeconds
+                    workerRampSeconds = $WorkerRampSeconds
+                    resourcePool = 'mcp_sql_workshop_pool'
+                    workloadGroup = 'mcp_sql_workshop_group'
+                    maxServerMemoryMB = 49152
+                    databaseScopedConfigurationHash = [string] $preflight.DatabaseConfigurationHash
+                    parameterSchedule = $schedule
+                    parameterScheduleHash = Get-Sha256 $scheduleJson
+                }
+                $frozenJson = ConvertTo-Json (ConvertTo-CanonicalValue $frozen) -Depth 20 -Compress
+                $frozenHash = Get-Sha256 $frozenJson
+                break
+            }
+            if ($sample.Healthy -and $sample.GrantUtilizationPercent -lt 75 -and
+                $sample.HostAvailableMB -gt 12288 -and $workers.Count -lt $MaximumWorkers -and
+                ($now - $lastRamp).TotalSeconds -ge $WorkerRampSeconds) {
+                $workerNumber = $workers.Count + 1
+                $applicationName = Get-WorkshopApplicationName -RunId $RunId -Phase Baseline -Worker $workerNumber
+                $workers.Add((& $OperationSet.StartWorker $RunId 'Baseline' $workerNumber $applicationName $schedule))
+                $lastRamp = $now
+            }
+            & $OperationSet.Delay $SampleIntervalSeconds
+        }
+
+        foreach ($worker in @($workers)) { & $OperationSet.StopWorker $worker }
+        foreach ($worker in @($workers)) { if ($worker -is [System.IDisposable] -or $worker.psobject.Methods['Dispose']) { $worker.Dispose() } }
+        $workers.Clear()
+
+        if ($null -ne $outcome) {
+            $result = [pscustomobject]@{ RunId = $RunId; Outcome = $outcome; FrozenSettings = $null; Samples = $samples.ToArray(); Trials = @() }
+            & $OperationSet.Persist $result
+            & $OperationSet.Export $result
+            return $result
+        }
+
+        $drainStart = [datetimeoffset] (& $OperationSet.Clock)
+        do {
+            $drain = & $OperationSet.Sample $RunId 'Baseline' 'Drain' $null $null
+            if ([int] $drain.ActiveGrantCount -eq 0) { break }
+            & $OperationSet.Delay $SampleIntervalSeconds
+        } while ((([datetimeoffset] (& $OperationSet.Clock)) - $drainStart).TotalSeconds -lt 60)
+        if ([int] $drain.ActiveGrantCount -ne 0) { throw 'Baseline grants did not drain within the bounded interval.' }
+
+        $optimizedFingerprint = & $OperationSet.Sample $RunId 'Optimized' 'Fingerprint' $null $null
+        if (-not (Test-WorkshopFingerprintMatch -Expected $preflight -Actual $optimizedFingerprint)) {
+            throw 'Optimized phase rejected because configuration or data drift was detected.'
+        }
+
+        $consecutive = 0
+        for ($index = 1; $index -le [int] $frozen.workers; $index++) {
+            $applicationName = Get-WorkshopApplicationName -RunId $RunId -Phase Optimized -Worker $index
+            $workers.Add((& $OperationSet.StartWorker $RunId 'Optimized' $index $applicationName $schedule))
+        }
+        while ($null -eq $outcome) {
+            $now = [datetimeoffset] (& $OperationSet.Clock)
+            $sample = & $OperationSet.Sample $RunId 'Optimized' 'Memory' $null $null
+            $samples.Add($sample)
+            $safety = Test-WorkshopSafetySample -HostUsedPercent $sample.HostUsedPercent `
+                -HostAvailableMB $sample.HostAvailableMB -ProcessPhysicalLow $sample.ProcessPhysicalLow `
+                -ProcessVirtualLow $sample.ProcessVirtualLow `
+                -ConsecutiveHealthFailures $(if ($sample.Healthy) { 0 } else { 2 }) `
+                -ElapsedSeconds (($now - $start).TotalSeconds) `
+                -MaximumDurationSeconds $MaximumDurationSeconds -Phase Optimized `
+                -ManualStop $sample.ManualStopRequested
+            if ($safety.Decision -eq 'Stop') { $outcome = $safety.Outcome; break }
+            if (Test-TargetBand $sample.GrantUtilizationPercent Optimized) { $consecutive++ } else { $consecutive = 0 }
+            if ($consecutive -ge 3) { break }
+            & $OperationSet.Delay $SampleIntervalSeconds
+        }
+
+        foreach ($worker in @($workers)) { & $OperationSet.StopWorker $worker }
+        foreach ($worker in @($workers)) { if ($worker -is [System.IDisposable] -or $worker.psobject.Methods['Dispose']) { $worker.Dispose() } }
+        $workers.Clear()
+
+        if ($null -eq $outcome) {
+            $sequence = @(Get-WorkshopTrialSequence)
+            for ($index = 0; $index -lt $sequence.Count; $index++) {
+                if ((([datetimeoffset] (& $OperationSet.Clock)) - $start).TotalSeconds -ge $MaximumDurationSeconds) {
+                    $outcome = 'NoMaterialImprovement'
+                    break
+                }
+                $trialPhase = if ($sequence[$index] -eq 'A') { 'Baseline' } else { 'Optimized' }
+                $entry = $schedule[$index % $schedule.Count]
+                $trials.Add((& $OperationSet.Sample $RunId 'Comparison' 'Trial' $trialPhase $entry))
+            }
+            $assessment = Get-WorkshopTrialAssessment -Trials $trials.ToArray()
+            $baselinePeak = [decimal] ((@($samples | Where-Object Phase -eq Baseline | Measure-Object GrantUtilizationPercent -Maximum).Maximum))
+            $optimizedPeak = [decimal] ((@($samples | Where-Object Phase -eq Optimized | Measure-Object GrantUtilizationPercent -Maximum).Maximum))
+            $outcome = Get-WorkshopOutcome -BaselinePeak $baselinePeak -OptimizedPeak $optimizedPeak `
+                -CorrectnessPassed $assessment.CorrectnessPassed `
+                -MaterialRegression $assessment.MaterialRegression `
+                -AdditionalMetricImproved $assessment.AdditionalMetricImproved
+        }
+
+        $result = [pscustomobject]@{
+            RunId = $RunId
+            Outcome = $outcome
+            ValidationBatchID = $preflight.ValidationBatchID
+            FrozenSettings = [pscustomobject] $frozen
+            FrozenSettingsJson = $frozenJson
+            FrozenSettingsHash = $frozenHash
+            BaselineFingerprint = $preflight
+            Samples = $samples.ToArray()
+            Trials = $trials.ToArray()
+        }
+        & $OperationSet.Persist $result
+        & $OperationSet.Export $result
+        return $result
+    }
+    finally {
+        foreach ($worker in @($workers)) {
+            try { & $OperationSet.StopWorker $worker } catch { Write-Verbose 'Worker stop failed during cleanup.' }
+            try { if ($worker -is [System.IDisposable] -or $worker.psobject.Methods['Dispose']) { $worker.Dispose() } } catch { Write-Verbose 'Worker disposal failed during cleanup.' }
+        }
+        if ($workers.Count -gt 0) { [void] (& $OperationSet.KillTagged $RunId) }
+    }
+}
+
+function Get-WorkshopKillPlan {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][guid] $RunId,
+        [Parameter(Mandatory)][object[]] $Sessions,
+        [Parameter(Mandatory)][ValidateRange(1, 32767)][int] $CurrentSessionId
+    )
+
+    $namePattern = '^MCP-SQL-Workshop-' + [regex]::Escape($RunId.ToString('D')) + '-(?:Baseline|Optimized)-[1-4]$'
+    $expectedBytes = $RunId.ToByteArray()
+    return @($Sessions | Where-Object {
+        $sessionId = 0
+        $validId = [int]::TryParse([string] $_.SessionId, [ref] $sessionId)
+        $context = [byte[]] $_.ContextInfo
+        $contextMatches = $context.Length -eq $expectedBytes.Length -and
+            [System.Linq.Enumerable]::SequenceEqual[byte]($context, $expectedBytes)
+        $validId -and $sessionId -gt 0 -and $sessionId -ne $CurrentSessionId -and
+            $_.IsUserProcess -and $_.IsActive -and
+            ([string] $_.ProgramName) -cmatch $namePattern -and
+            $contextMatches
+    } | Sort-Object SessionId | ForEach-Object {
+        $sessionId = [int] $_.SessionId
+        [pscustomobject][ordered]@{ SessionId = $sessionId; Statement = "KILL $sessionId;" }
+    })
+}
+
+function Export-WorkshopEvidenceFile {
+    [CmdletBinding(SupportsShouldProcess)]
+    param(
+        [Parameter(Mandatory)][string] $RunId,
+        [Parameter(Mandatory)][object] $Evidence,
+        [Parameter(Mandatory)][string] $RepositoryRoot,
+        [Parameter()][scriptblock] $SemanticValidator,
+        [Parameter()][switch] $AllowReplaceCompletedRun
+    )
+
+    $parsedRunId = [guid]::Empty
+    if (-not [guid]::TryParseExact($RunId, 'D', [ref] $parsedRunId) -or $parsedRunId.ToString('D') -cne $RunId) {
+        throw 'RunId must be a lowercase canonical GUID.'
+    }
+    Assert-NoSecretField -InputObject $Evidence
+    if ([string] (Get-ObjectValue $Evidence runId) -and [string] (Get-ObjectValue $Evidence runId) -cne $RunId) {
+        throw 'Evidence run ID does not match the output run ID.'
+    }
+    $runsRoot = [IO.Path]::GetFullPath((Join-Path $RepositoryRoot 'evidence/runs'))
+    $directory = [IO.Path]::GetFullPath((Join-Path $runsRoot $RunId))
+    if (-not $directory.StartsWith("$runsRoot$([IO.Path]::DirectorySeparatorChar)", [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Evidence output path escapes the runs directory.'
+    }
+    [void] (New-Item -ItemType Directory -Path $runsRoot -Force)
+    if (Test-Path -LiteralPath $directory) {
+        $directoryItem = Get-Item -LiteralPath $directory -Force
+        if (($directoryItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw 'Evidence output cannot be a reparse point or symbolic link.'
+        }
+    }
+    $jsonPath = Join-Path $directory 'evidence.json'
+    $csvPath = Join-Path $directory 'samples.csv'
+    if ((Test-Path -LiteralPath $jsonPath) -and -not $AllowReplaceCompletedRun) {
+        throw 'A completed run cannot be overwritten without the explicit safe replace flag.'
+    }
+    if ((Test-Path -LiteralPath $jsonPath) -and $AllowReplaceCompletedRun) {
+        $existing = Get-Content -LiteralPath $jsonPath -Raw | ConvertFrom-Json
+        if ([string] $existing.runId -cne $RunId) { throw 'Existing completed run identity does not match.' }
+    }
+    if (-not $PSCmdlet.ShouldProcess($directory, 'Write validated workshop evidence')) { return }
+
+    $utf8 = [Text.UTF8Encoding]::new($false)
+    $stagingDirectory = Join-Path $runsRoot ".$RunId.$([guid]::NewGuid().ToString('N')).tmp"
+    [void] (New-Item -ItemType Directory -Path $stagingDirectory)
+    $jsonTemp = Join-Path $stagingDirectory 'evidence.json'
+    $csvTemp = Join-Path $stagingDirectory 'samples.csv'
+    try {
+        [IO.File]::WriteAllText($jsonTemp, (ConvertTo-Json $Evidence -Depth 30), $utf8)
+        if ($SemanticValidator) {
+            if (-not (& $SemanticValidator $jsonTemp)) { throw 'Canonical semantic evidence validation failed.' }
+        }
+        else {
+            $python = Join-Path $RepositoryRoot '.venv/Scripts/python.exe'
+            $validator = Join-Path $RepositoryRoot 'evidence/validate_evidence.py'
+            $schema = Join-Path $RepositoryRoot 'evidence/evidence-schema.json'
+            & $python $validator --schema $schema $jsonTemp | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw 'Canonical semantic evidence validation failed.' }
+        }
+        $csv = @((Get-ObjectValue $Evidence samples)) | ConvertTo-Csv -NoTypeInformation
+        [IO.File]::WriteAllLines($csvTemp, [string[]] $csv, $utf8)
+        if (Test-Path -LiteralPath $directory) { Remove-Item -LiteralPath $directory -Recurse -Force }
+        Move-Item -LiteralPath $stagingDirectory -Destination $directory
+    }
+    finally {
+        Remove-Item -LiteralPath $stagingDirectory -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    return [pscustomobject]@{ Directory = $directory; JsonPath = $jsonPath; CsvPath = $csvPath }
+}
+
+function Get-WorkshopSqlOperationSet {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string] $Server,
+        [Parameter(Mandatory)][string] $Database,
+        [Parameter(Mandatory)][pscredential] $Credential,
+        [Parameter(Mandatory)][string] $HostNameInCertificate
+    )
+
+    try { Add-Type -AssemblyName Microsoft.Data.SqlClient -ErrorAction Stop } catch {
+        throw 'Microsoft.Data.SqlClient is required. Install it from NuGet (Microsoft.Data.SqlClient) before running the workshop; no insecure fallback is available.'
+    }
+    if ($Server -match '^\s*(?:localhost|\.|\d{1,3}(?:\.\d{1,3}){3})(?:,\d+)?\s*$' -or $Server -notmatch '\.') {
+        throw 'Server must be the SQL VM private DNS name.'
+    }
+    if ($HostNameInCertificate -cne $Server) {
+        throw 'HostNameInCertificate must exactly match the private DNS server name.'
+    }
+    Write-Verbose "Preparing SQL operations for database '$Database' and credential user '$($Credential.UserName)'."
+
+    $invokeTable = {
+        param([string] $ApplicationName, [string] $CommandText, [hashtable] $Parameters)
+        $builder = [Microsoft.Data.SqlClient.SqlConnectionStringBuilder]::new()
+        $builder.DataSource = $Server
+        $builder.InitialCatalog = $Database
+        $builder.Encrypt = $true
+        $builder.TrustServerCertificate = $false
+        $builder.HostNameInCertificate = $HostNameInCertificate
+        $builder.ApplicationName = $ApplicationName
+        $builder.UserID = $Credential.UserName
+        $bstr = [IntPtr]::Zero
+        $connection = $null
+        $command = $null
+        $reader = $null
+        try {
+            $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($Credential.Password)
+            $builder.Password = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
+            $connection = [Microsoft.Data.SqlClient.SqlConnection]::new($builder.ConnectionString)
+            $connection.Open()
+            $command = $connection.CreateCommand()
+            $command.CommandText = $CommandText
+            $command.CommandTimeout = 60
+            foreach ($name in @($Parameters.Keys)) {
+                $specification = $Parameters[$name]
+                $parameter = $command.Parameters.Add($name, $specification.Type)
+                if ($specification.ContainsKey('Size')) { $parameter.Size = $specification.Size }
+                $parameter.Value = if ($null -eq $specification.Value) { [DBNull]::Value } else { $specification.Value }
+            }
+            $reader = $command.ExecuteReader()
+            $rows = [System.Collections.Generic.List[object]]::new()
+            while ($reader.Read()) {
+                $row = [ordered]@{}
+                for ($index = 0; $index -lt $reader.FieldCount; $index++) {
+                    $row[$reader.GetName($index)] = if ($reader.IsDBNull($index)) { $null } else { $reader.GetValue($index) }
+                }
+                $rows.Add([pscustomobject] $row)
+            }
+            return $rows.ToArray()
+        }
+        finally {
+            $builder.Password = [string]::Empty
+            if ($bstr -ne [IntPtr]::Zero) { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr) }
+            if ($null -ne $reader) { $reader.Dispose() }
+            if ($null -ne $command) { $command.Dispose() }
+            if ($null -ne $connection) { $connection.Dispose() }
+        }
+    }.GetNewClosure()
+
+    $stopRequestPath = Join-Path (Split-Path -Parent $PSScriptRoot) "evidence/runs/{0}/stop.request"
+    $preflightSql = @'
+SELECT
+    CONVERT(bit, CASE WHEN DB_NAME() = N'AdventureWorks2022' AND EXISTS
+        (SELECT 1 FROM lab.WorkshopMarker WHERE MarkerId = '68A70D6E-62D8-4A77-8F0A-9DA7934DBA7C') THEN 1 ELSE 0 END) AS MarkerValid,
+    CONVERT(int, SERVERPROPERTY('ProductMajorVersion')) AS SqlMajorVersion,
+    CONVERT(nvarchar(128), SERVERPROPERTY('Edition')) AS SqlEdition,
+    CONVERT(bigint, memory.total_physical_memory_kb / 1024) AS PhysicalMemoryMB,
+    CONVERT(varchar(60), queryStore.actual_state_desc) AS QueryStoreActualState,
+    CONVERT(sysname, pool.name) AS ResourcePool,
+    CONVERT(sysname, workloadGroup.name) AS WorkloadGroup,
+    CONVERT(bit, CASE WHEN databaseConfig.value = 0 THEN 1 ELSE 0 END) AS MemoryGrantFeedbackDisabled,
+    CONVERT(nvarchar(60), backupState.PriorMemoryGrantFeedbackState) AS PriorMemoryGrantFeedbackState,
+    CONVERT(bit, CASE WHEN OBJECT_ID(N'lab.usp_MonthEndSalesBaseline', N'P') IS NOT NULL
+        AND OBJECT_ID(N'lab.usp_MonthEndSalesOptimized', N'P') IS NOT NULL THEN 1 ELSE 0 END) AS ProceduresPresent,
+    CONVERT(bit, CASE WHEN OBJECT_ID(N'lab.WorkshopRun', N'U') IS NOT NULL
+        AND OBJECT_ID(N'lab.WorkshopSample', N'U') IS NOT NULL
+        AND OBJECT_ID(N'lab.WorkshopRequestSample', N'U') IS NOT NULL THEN 1 ELSE 0 END) AS EvidenceSchemaPresent,
+    validation.ValidationBatchID,
+    CONVERT(bit, CASE WHEN validation.PassingCases = 11 AND validation.TotalCases = 11 THEN 1 ELSE 0 END) AS ValidationPassed,
+    LOWER(CONVERT(varchar(64), HASHBYTES('SHA2_256', CONCAT(SERVERPROPERTY('ProductVersion'), N'|', configuration.value_in_use)), 2)) AS ServerConfigurationHash,
+    LOWER(CONVERT(varchar(64), HASHBYTES('SHA2_256', CONCAT(pool.name, N'|', pool.max_memory_percent, N'|', workloadGroup.request_max_memory_grant_percent)), 2)) AS PoolConfigurationHash,
+    LOWER(CONVERT(varchar(64), HASHBYTES('SHA2_256', CONCAT(DATABASEPROPERTYEX(DB_NAME(), 'Updateability'), N'|', databaseConfig.value)), 2)) AS DatabaseConfigurationHash,
+    LOWER(CONVERT(varchar(64), HASHBYTES('SHA2_256', CONCAT((SELECT COUNT_BIG(*) FROM lab.FactSales), N'|', (SELECT CHECKSUM_AGG(BINARY_CHECKSUM(SyntheticSalesID)) FROM lab.FactSales))), 2)) AS DataHash,
+    LOWER(CONVERT(varchar(64), HASHBYTES('SHA2_256', CONCAT((SELECT COUNT_BIG(*) FROM sys.indexes WHERE object_id = OBJECT_ID(N'lab.FactSales')), N'|', (SELECT SUM(row_count) FROM sys.dm_db_partition_stats WHERE object_id = OBJECT_ID(N'lab.FactSales')))), 2)) AS IndexStatisticsHash,
+    LOWER(CONVERT(varchar(64), HASHBYTES('SHA2_256', CONCAT(OBJECT_DEFINITION(OBJECT_ID(N'lab.usp_MonthEndSalesBaseline')), OBJECT_DEFINITION(OBJECT_ID(N'lab.usp_MonthEndSalesOptimized')))), 2)) AS ProcedureHash
+FROM sys.dm_os_sys_memory AS memory
+CROSS JOIN sys.database_query_store_options AS queryStore
+INNER JOIN sys.dm_resource_governor_resource_pools AS pool ON pool.name = N'mcp_sql_workshop_pool'
+INNER JOIN sys.dm_resource_governor_workload_groups AS workloadGroup ON workloadGroup.pool_id = pool.pool_id AND workloadGroup.name = N'mcp_sql_workshop_group'
+INNER JOIN sys.database_scoped_configurations AS databaseConfig ON databaseConfig.name = N'ROW_MODE_MEMORY_GRANT_FEEDBACK'
+INNER JOIN sys.configurations AS configuration ON configuration.name = N'max server memory (MB)'
+OUTER APPLY (SELECT TOP (1) CONVERT(nvarchar(60), RowModeMemoryGrantFeedback) AS PriorMemoryGrantFeedbackState FROM WorkshopAdmin.dbo.DatabaseConfigurationBackup WHERE DatabaseName = DB_NAME() ORDER BY CapturedAtUtc DESC) AS backupState
+OUTER APPLY (SELECT TOP (1) ValidationBatchID, COUNT_BIG(*) AS TotalCases, SUM(CONVERT(bigint, Passed)) AS PassingCases FROM lab.ValidationRun GROUP BY ValidationBatchID HAVING COUNT_BIG(*) = 11 ORDER BY MAX(ValidatedAtUtc) DESC) AS validation;
+'@
+    $getPreflight = {
+        $rows = @(& $invokeTable 'MCP-SQL-Workshop-Controller-Preflight' $preflightSql @{})
+        if ($rows.Count -ne 1) { throw 'Workshop SQL preflight did not return exactly one row.' }
+        return $rows[0]
+    }.GetNewClosure()
+
+    $startWorker = {
+        param([guid] $RunId, [string] $Phase, [int] $Worker, [string] $ApplicationName, [object[]] $Schedule)
+        Write-Verbose "Starting workshop worker $Worker for $Phase."
+        $runspace = [runspacefactory]::CreateRunspace()
+        $runspace.Open()
+        $powerShell = [powershell]::Create()
+        $powerShell.Runspace = $runspace
+        [void] $powerShell.AddScript({
+            param($WorkerServer, $WorkerDatabase, [pscredential] $WorkerCredential, $WorkerCertificateName,
+                $WorkerRunId, $WorkerPhase, $WorkerApplicationName, $WorkerSchedule)
+            Add-Type -AssemblyName Microsoft.Data.SqlClient -ErrorAction Stop
+            $builder = [Microsoft.Data.SqlClient.SqlConnectionStringBuilder]::new()
+            $builder.DataSource = $WorkerServer
+            $builder.InitialCatalog = $WorkerDatabase
+            $builder.Encrypt = $true
+            $builder.TrustServerCertificate = $false
+            $builder.HostNameInCertificate = $WorkerCertificateName
+            $builder.ApplicationName = $WorkerApplicationName
+            $builder.UserID = $WorkerCredential.UserName
+            $bstr = [IntPtr]::Zero
+            $connection = $null
+            try {
+                $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($WorkerCredential.Password)
+                $builder.Password = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
+                $connection = [Microsoft.Data.SqlClient.SqlConnection]::new($builder.ConnectionString)
+                $connection.Open()
+                $tag = $connection.CreateCommand()
+                try {
+                    $tag.CommandText = "SET CONTEXT_INFO @RunBytes; EXEC sys.sp_set_session_context @key=N'WorkshopRunId', @value=@RunId; EXEC sys.sp_set_session_context @key=N'WorkshopPhase', @value=@Phase;"
+                    [void] $tag.Parameters.Add('@RunBytes', [Data.SqlDbType]::Binary, 16)
+                    $tag.Parameters['@RunBytes'].Value = ([guid] $WorkerRunId).ToByteArray()
+                    [void] $tag.Parameters.Add('@RunId', [Data.SqlDbType]::UniqueIdentifier)
+                    $tag.Parameters['@RunId'].Value = [guid] $WorkerRunId
+                    [void] $tag.Parameters.Add('@Phase', [Data.SqlDbType]::NVarChar, 16)
+                    $tag.Parameters['@Phase'].Value = $WorkerPhase
+                    [void] $tag.ExecuteNonQuery()
+                }
+                finally { $tag.Dispose() }
+
+                for ($iteration = 0; $iteration -lt 10000; $iteration++) {
+                    $entry = $WorkerSchedule[$iteration % $WorkerSchedule.Count] | ConvertFrom-Json
+                    $command = $connection.CreateCommand()
+                    try {
+                        $procedure = if ($WorkerPhase -eq 'Baseline') { 'lab.usp_MonthEndSalesBaseline' } else { 'lab.usp_MonthEndSalesOptimized' }
+                        $command.CommandText = "EXEC $procedure @StartDate=@StartDate, @EndDateExclusive=@EndDateExclusive, @TerritoryID=@TerritoryID, @TopCount=@TopCount;"
+                        $command.CommandTimeout = 600
+                        [void] $command.Parameters.Add('@StartDate', [Data.SqlDbType]::Date)
+                        $command.Parameters['@StartDate'].Value = [datetime] $entry.StartDate
+                        [void] $command.Parameters.Add('@EndDateExclusive', [Data.SqlDbType]::Date)
+                        $command.Parameters['@EndDateExclusive'].Value = [datetime] $entry.EndDateExclusive
+                        [void] $command.Parameters.Add('@TerritoryID', [Data.SqlDbType]::Int)
+                        $command.Parameters['@TerritoryID'].Value = if ($null -eq $entry.TerritoryID) { [DBNull]::Value } else { [int] $entry.TerritoryID }
+                        [void] $command.Parameters.Add('@TopCount', [Data.SqlDbType]::Int)
+                        $command.Parameters['@TopCount'].Value = [int] $entry.TopCount
+                        [void] $command.ExecuteNonQuery()
+                    }
+                    finally { $command.Dispose() }
+                }
+            }
+            finally {
+                $builder.Password = [string]::Empty
+                if ($bstr -ne [IntPtr]::Zero) { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr) }
+                if ($null -ne $connection) { $connection.Dispose() }
+            }
+        }).AddArgument($Server).AddArgument($Database).AddArgument($Credential).AddArgument($HostNameInCertificate).AddArgument($RunId).AddArgument($Phase).AddArgument($ApplicationName).AddArgument($Schedule)
+        try { $asyncResult = $powerShell.BeginInvoke() }
+        catch {
+            $powerShell.Dispose()
+            $runspace.Dispose()
+            throw
+        }
+        $handle = [pscustomobject]@{
+            PowerShell = $powerShell
+            Runspace = $runspace
+            AsyncResult = $asyncResult
+            Disposed = $false
+        }
+        $handle | Add-Member ScriptMethod Dispose {
+            if ($this.Disposed) { return }
+            try {
+                if (-not $this.AsyncResult.IsCompleted) { $this.PowerShell.Stop() }
+                try { [void] $this.PowerShell.EndInvoke($this.AsyncResult) } catch { Write-Verbose 'Worker ended after cancellation.' }
+            }
+            finally {
+                $this.PowerShell.Dispose()
+                $this.Runspace.Dispose()
+                $this.Disposed = $true
+            }
+        }
+        return $handle
+    }.GetNewClosure()
+
+    $sample = {
+        param([guid] $RunId, [string] $Phase, [string] $Kind, [string] $TrialPhase, [string] $ScheduleEntry)
+        if ($Kind -eq 'Fingerprint') { return (& $getPreflight) }
+        if ($Kind -eq 'Memory' -or $Kind -eq 'Drain') {
+            $rows = @(& $invokeTable 'MCP-SQL-Workshop-Controller-Sample' 'EXEC lab.usp_GetMemorySnapshot;' @{})
+            if ($rows.Count -ne 1) { throw 'Memory snapshot did not return exactly one row.' }
+            $row = $rows[0]
+            $totalHost = [decimal] $row.HostAvailableMemoryKB + [decimal] $row.HostUsedMemoryKB
+            return [pscustomobject]@{
+                Phase = $Phase; GrantedKb = $row.PoolGrantedMemoryKB; TotalKb = $row.PoolTotalMemoryKB
+                GrantUtilizationPercent = $row.GrantUtilizationPercent
+                HostUsedPercent = if ($totalHost -eq 0) { 100 } else { 100 * [decimal] $row.HostUsedMemoryKB / $totalHost }
+                HostAvailableMB = [decimal] $row.HostAvailableMemoryKB / 1024
+                ProcessPhysicalLow = [bool] $row.ProcessLowMemorySignal
+                ProcessVirtualLow = [bool] $row.SystemLowMemorySignal
+                Healthy = $true; ActiveGrantCount = [int] $row.GranteeCount + [int] $row.WaiterCount
+                ManualStopRequested = Test-Path -LiteralPath ($stopRequestPath -f $RunId.ToString('D'))
+            }
+        }
+        if ($Kind -eq 'Trial') {
+            $entry = $ScheduleEntry | ConvertFrom-Json
+            $procedure = if ($TrialPhase -eq 'Baseline') { 'lab.usp_MonthEndSalesBaseline' } else { 'lab.usp_MonthEndSalesOptimized' }
+            $sql = "SET NOCOUNT ON; DECLARE @Started datetime2(7)=SYSUTCDATETIME(), @Cpu bigint=(SELECT cpu_time FROM sys.dm_exec_sessions WHERE session_id=@@SPID), @Reads bigint=(SELECT logical_reads FROM sys.dm_exec_sessions WHERE session_id=@@SPID), @Wait bigint=(SELECT COALESCE(SUM(wait_time_ms),0) FROM sys.dm_exec_session_wait_stats WHERE session_id=@@SPID); EXEC $procedure @StartDate=@StartDate, @EndDateExclusive=@EndDateExclusive, @TerritoryID=@TerritoryID, @TopCount=@TopCount; SELECT CONVERT(bigint,DATEDIFF_BIG(microsecond,@Started,SYSUTCDATETIME())/1000) AS DurationMs, CONVERT(bigint,s.cpu_time-@Cpu) AS CpuMs, CONVERT(bigint,s.logical_reads-@Reads) AS LogicalReads, CONVERT(bigint,COALESCE(p.last_grant_kb,0)) AS GrantsKb, CONVERT(decimal(19,2),COALESCE(p.last_spills,0)*8.0/1024) AS SpillsMb, CONVERT(bigint,(SELECT COALESCE(SUM(wait_time_ms),0) FROM sys.dm_exec_session_wait_stats WHERE session_id=@@SPID)-@Wait) AS WaitMs, CONVERT(bit,@Correct) AS Correct FROM sys.dm_exec_sessions AS s OUTER APPLY (SELECT TOP (1) last_grant_kb,last_spills FROM sys.dm_exec_query_stats CROSS APPLY sys.dm_exec_sql_text(sql_handle) AS t WHERE t.objectid=OBJECT_ID(N'$procedure') ORDER BY last_execution_time DESC) AS p WHERE s.session_id=@@SPID;"
+            $parameters = @{
+                '@StartDate' = @{ Type = [Data.SqlDbType]::Date; Value = [datetime] $entry.StartDate }
+                '@EndDateExclusive' = @{ Type = [Data.SqlDbType]::Date; Value = [datetime] $entry.EndDateExclusive }
+                '@TerritoryID' = @{ Type = [Data.SqlDbType]::Int; Value = $entry.TerritoryID }
+                '@TopCount' = @{ Type = [Data.SqlDbType]::Int; Value = [int] $entry.TopCount }
+                '@Correct' = @{ Type = [Data.SqlDbType]::Bit; Value = $true }
+            }
+            $rows = @(& $invokeTable "MCP-SQL-Workshop-$($RunId.ToString('D'))-$TrialPhase-1" $sql $parameters)
+            $rows[0] | Add-Member NoteProperty Phase $TrialPhase -PassThru
+        }
+    }.GetNewClosure()
+
+    $stopWorker = {
+        param($Handle)
+        if ($null -ne $Handle -and $Handle.psobject.Methods['Dispose']) { $Handle.Dispose() }
+    }
+
+    $killTagged = {
+        param([guid] $RunId)
+        $sessionSql = "SELECT CONVERT(int,s.session_id) AS SessionId, CONVERT(bit,s.is_user_process) AS IsUserProcess, CONVERT(bit,CASE WHEN r.session_id IS NOT NULL THEN 1 ELSE 0 END) AS IsActive, CONVERT(nvarchar(128),s.program_name) AS ProgramName, CONVERT(varbinary(128),s.context_info) AS ContextInfo, CONVERT(int,@@SPID) AS CurrentSessionId FROM sys.dm_exec_sessions AS s LEFT JOIN sys.dm_exec_requests AS r ON r.session_id=s.session_id WHERE s.program_name LIKE @Prefix;"
+        $parameters = @{ '@Prefix' = @{ Type = [Data.SqlDbType]::NVarChar; Size = 128; Value = "MCP-SQL-Workshop-$($RunId.ToString('D'))-%" } }
+        $sessions = @(& $invokeTable 'MCP-SQL-Workshop-Controller-Stop' $sessionSql $parameters)
+        if ($sessions.Count -eq 0) { return @() }
+        $plan = @(Get-WorkshopKillPlan -RunId $RunId -Sessions $sessions -CurrentSessionId $sessions[0].CurrentSessionId)
+        foreach ($entry in $plan) {
+            # Persist the exact captured row before executing a KILL generated solely from a validated integer SPID.
+            [void] (& $invokeTable 'MCP-SQL-Workshop-Controller-Stop' $entry.Statement @{})
+        }
+        return @($plan.SessionId)
+    }.GetNewClosure()
+
+    $persist = {
+        param($Record)
+        if ($null -eq $Record.FrozenSettingsJson -or $null -eq $Record.FrozenSettingsHash) {
+            Write-Verbose "Run $($Record.RunId) terminated before frozen conditions existed; terminal evidence remains file-backed."
+            return
+        }
+        $hashBytes = [Convert]::FromHexString([string] $Record.FrozenSettingsHash)
+        $sql = @'
+SET XACT_ABORT ON;
+BEGIN TRANSACTION;
+IF NOT EXISTS (SELECT 1 FROM lab.WorkshopRun WITH (UPDLOCK, HOLDLOCK) WHERE RunID=@RunId)
+    INSERT lab.WorkshopRun
+        (RunID, ParentComparisonID, EvidenceClassification, Phase, RunStatus, Outcome,
+         StartedAtUtc, CompletedAtUtc, FrozenSettingsHash, FrozenSettingsJson)
+    VALUES
+        (@RunId, NULL, 'LAB-MEASURED', 'Comparison', 'Completed', @Outcome,
+         @CompletedAtUtc, @CompletedAtUtc, @FrozenSettingsHash, @FrozenSettingsJson);
+COMMIT TRANSACTION;
+'@
+        [void] (& $invokeTable 'MCP-SQL-Workshop-Controller-Persist' $sql @{
+            '@RunId' = @{ Type = [Data.SqlDbType]::UniqueIdentifier; Value = $Record.RunId }
+            '@Outcome' = @{ Type = [Data.SqlDbType]::NVarChar; Size = 24; Value = $Record.Outcome }
+            '@CompletedAtUtc' = @{ Type = [Data.SqlDbType]::DateTime2; Value = [datetime]::UtcNow }
+            '@FrozenSettingsHash' = @{ Type = [Data.SqlDbType]::Binary; Size = 32; Value = $hashBytes }
+            '@FrozenSettingsJson' = @{ Type = [Data.SqlDbType]::NVarChar; Size = 4000; Value = $Record.FrozenSettingsJson }
+        })
+    }.GetNewClosure()
+
+    return @{
+        OpenConnection = { param($Purpose) Write-Verbose "Opening $Purpose controller connection."; & $getPreflight }.GetNewClosure()
+        StartWorker = $startWorker
+        Sample = $sample
+        StopWorker = $stopWorker
+        KillTagged = $killTagged
+        Persist = $persist
+        Delay = { param([int] $Seconds) [Threading.Tasks.Task]::Delay([TimeSpan]::FromSeconds($Seconds)).GetAwaiter().GetResult() }
+        Clock = { [datetimeoffset]::UtcNow }
+        Export = { param($Result) if ($Result.psobject.Properties['Evidence']) { Export-WorkshopEvidenceFile -RunId $Result.RunId.ToString('D') -Evidence $Result.Evidence -RepositoryRoot (Split-Path -Parent $PSScriptRoot) -Confirm:$false } else { Write-Verbose "Run $($Result.RunId) persisted; canonical evidence is exported after evidence conversion." } }
+    }
+}
+
 Export-ModuleMember -Function @(
     'Get-GrantUtilization',
     'Test-TargetBand',
     'Test-WorkshopSafetySample',
     'Get-WorkshopOutcome',
     'New-WorkshopRunRecord',
-    'ConvertTo-WorkshopEvidence'
+    'ConvertTo-WorkshopEvidence',
+    'Get-WorkshopApplicationName',
+    'Get-WorkshopParameterSchedule',
+    'Get-WorkshopTrialSequence',
+    'Test-WorkshopPreflight',
+    'Invoke-WorkshopExperiment',
+    'Get-WorkshopKillPlan',
+    'Export-WorkshopEvidenceFile',
+    'Get-WorkshopSqlOperationSet'
 )

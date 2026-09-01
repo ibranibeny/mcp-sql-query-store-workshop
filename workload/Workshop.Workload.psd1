@@ -14,6 +14,14 @@
         'Get-WorkshopOutcome'
         'New-WorkshopRunRecord'
         'ConvertTo-WorkshopEvidence'
+        'Get-WorkshopApplicationName'
+        'Get-WorkshopParameterSchedule'
+        'Get-WorkshopTrialSequence'
+        'Test-WorkshopPreflight'
+        'Invoke-WorkshopExperiment'
+        'Get-WorkshopKillPlan'
+        'Export-WorkshopEvidenceFile'
+        'Get-WorkshopSqlOperationSet'
     )
     CmdletsToExport = @()
     VariablesToExport = @()

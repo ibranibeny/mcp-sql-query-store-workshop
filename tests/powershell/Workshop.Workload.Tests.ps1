@@ -85,14 +85,22 @@ BeforeAll {
 }
 
 Describe 'Workshop workload module contract' {
-    It 'exports exactly the six pure functions' {
+    It 'exports the workload decision, orchestration, stop, and export functions' {
         $manifest = Test-ModuleManifest $ModulePath
         @($manifest.ExportedFunctions.Keys | Sort-Object) | Should -Be @(
             'ConvertTo-WorkshopEvidence'
+            'Export-WorkshopEvidenceFile'
             'Get-GrantUtilization'
+            'Get-WorkshopApplicationName'
+            'Get-WorkshopKillPlan'
             'Get-WorkshopOutcome'
+            'Get-WorkshopParameterSchedule'
+            'Get-WorkshopSqlOperationSet'
+            'Get-WorkshopTrialSequence'
+            'Invoke-WorkshopExperiment'
             'New-WorkshopRunRecord'
             'Test-TargetBand'
+            'Test-WorkshopPreflight'
             'Test-WorkshopSafetySample'
         )
         $manifest.PowerShellVersion | Should -Be ([version]'7.4')
@@ -684,5 +692,301 @@ Describe 'ConvertTo-WorkshopEvidence' {
                 -RequestSamples (Get-ValidRequestSample) -Validation (Get-ValidValidation) `
                 -Outcome TargetMet
         } | Should -Throw
+    }
+}
+
+Describe 'Task 12 workload orchestration' {
+    BeforeAll {
+        function Get-TestPreflight {
+            param([string] $Hash = ('a' * 64))
+            [pscustomobject]@{
+                MarkerValid = $true
+                SqlMajorVersion = 16
+                SqlEdition = 'Enterprise Edition (64-bit)'
+                PhysicalMemoryMB = 65536
+                QueryStoreActualState = 'READ_WRITE'
+                ResourcePool = 'mcp_sql_workshop_pool'
+                WorkloadGroup = 'mcp_sql_workshop_group'
+                MemoryGrantFeedbackDisabled = $true
+                PriorMemoryGrantFeedbackState = 'ON'
+                ProceduresPresent = $true
+                EvidenceSchemaPresent = $true
+                ValidationBatchID = '11111111-1111-1111-1111-111111111111'
+                ValidationPassed = $true
+                ServerConfigurationHash = $Hash
+                PoolConfigurationHash = $Hash
+                DatabaseConfigurationHash = $Hash
+                DataHash = $Hash
+                IndexStatisticsHash = $Hash
+                ProcedureHash = $Hash
+            }
+        }
+
+        function Get-TestSample {
+            param([string] $Phase, [decimal] $Utilization, [int] $ActiveGrants = 1)
+            [pscustomobject]@{
+                Phase = $Phase
+                GrantedKb = [int64] ($Utilization * 10)
+                TotalKb = [int64] 1000
+                GrantUtilizationPercent = $Utilization
+                HostUsedPercent = [decimal] 70
+                HostAvailableMB = [decimal] 16000
+                ProcessPhysicalLow = $false
+                ProcessVirtualLow = $false
+                Healthy = $true
+                ActiveGrantCount = $ActiveGrants
+                ManualStopRequested = $false
+            }
+        }
+
+        function Get-TestOperationSet {
+            param(
+                [object[]] $Baseline = @(
+                    (Get-TestSample Baseline 60),
+                    (Get-TestSample Baseline 70),
+                    (Get-TestSample Baseline 75),
+                    (Get-TestSample Baseline 80),
+                    (Get-TestSample Baseline 82)
+                ),
+                [object[]] $Optimized = @(
+                    (Get-TestSample Optimized 35),
+                    (Get-TestSample Optimized 40),
+                    (Get-TestSample Optimized 42)
+                ),
+                [object] $Preflight = (Get-TestPreflight)
+            )
+            Write-Verbose "Creating fixture with $($Baseline.Count) baseline and $($Optimized.Count) optimized samples."
+            $state = [pscustomobject]@{
+                Now = [datetimeoffset]'2026-09-01T10:00:00Z'
+                BaselineIndex = 0
+                OptimizedIndex = 0
+                Starts = [System.Collections.Generic.List[object]]::new()
+                Stops = [System.Collections.Generic.List[object]]::new()
+                Trials = [System.Collections.Generic.List[object]]::new()
+                Persisted = [System.Collections.Generic.List[object]]::new()
+                Exported = $false
+                Preflight = $Preflight
+            }
+            $operations = @{
+                OpenConnection = { param($Purpose) Write-Verbose $Purpose; $state.Preflight }
+                StartWorker = {
+                    param($RunId, $Phase, $Worker, $ApplicationName, $Schedule)
+                    $handle = [pscustomobject]@{ RunId = $RunId; Phase = $Phase; Worker = $Worker; ApplicationName = $ApplicationName; Schedule = @($Schedule); Disposed = $false }
+                    $handle | Add-Member ScriptMethod Dispose { $this.Disposed = $true }
+                    $state.Starts.Add($handle)
+                    $handle
+                }
+                Sample = {
+                    param($RunId, $Phase, $Kind, $TrialPhase, $ScheduleEntry)
+                    Write-Verbose $RunId
+                    if ($Kind -eq 'Fingerprint') { return $state.Preflight }
+                    if ($Kind -eq 'Trial') {
+                        $optimizedTrial = $TrialPhase -eq 'Optimized'
+                        $trial = [pscustomobject]@{ Phase = $TrialPhase; DurationMs = if ($optimizedTrial) { 70 } else { 100 }; CpuMs = if ($optimizedTrial) { 35 } else { 50 }; LogicalReads = if ($optimizedTrial) { 700 } else { 1000 }; GrantsKb = if ($optimizedTrial) { 200 } else { 400 }; SpillsMb = 0; WaitMs = if ($optimizedTrial) { 2 } else { 5 }; Correct = $true; ScheduleEntry = $ScheduleEntry }
+                        $state.Trials.Add($trial)
+                        return $trial
+                    }
+                    if ($Kind -eq 'Drain') {
+                        return [pscustomobject]@{ Phase = $Phase; GrantedKb = 0; TotalKb = 1000; GrantUtilizationPercent = 0; HostUsedPercent = 70; HostAvailableMB = 16000; ProcessPhysicalLow = $false; ProcessVirtualLow = $false; Healthy = $true; ActiveGrantCount = 0; ManualStopRequested = $false }
+                    }
+                    if ($Phase -eq 'Baseline') {
+                        $result = $Baseline[[math]::Min($state.BaselineIndex, $Baseline.Count - 1)]
+                        $state.BaselineIndex++
+                        return $result
+                    }
+                    $result = $Optimized[[math]::Min($state.OptimizedIndex, $Optimized.Count - 1)]
+                    $state.OptimizedIndex++
+                    return $result
+                }
+                StopWorker = { param($Handle) $state.Stops.Add($Handle) }
+                KillTagged = { param($RunId) Write-Verbose $RunId; @() }
+                Persist = { param($Record) $state.Persisted.Add($Record) }
+                Delay = { param([int] $Seconds) $state.Now = $state.Now.AddSeconds($Seconds) }
+                Clock = { $state.Now }
+                Export = { param($Result) Write-Verbose $Result.Outcome; $state.Exported = $true }
+            }
+            foreach ($name in @($operations.Keys)) {
+                $operations[$name] = $operations[$name].GetNewClosure()
+            }
+            [pscustomobject]@{ State = $state; Operations = $operations }
+        }
+    }
+
+    It 'uses exact application names and a fixed parameterized schedule' {
+        $run = [guid]'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
+        Get-WorkshopApplicationName -RunId $run -Phase Baseline -Worker 1 |
+            Should -BeExactly 'MCP-SQL-Workshop-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa-Baseline-1'
+        { Get-WorkshopApplicationName -RunId $run -Phase Optimized -Worker 5 } | Should -Throw
+
+        $schedule = Get-WorkshopParameterSchedule
+        $schedule.Count | Should -BeGreaterThan 1
+        foreach ($entry in $schedule) {
+            $entry.psobject.Properties.Name | Should -Be @('StartDate', 'EndDateExclusive', 'TerritoryID', 'TopCount')
+        }
+    }
+
+    It 'ramps one worker at a time, freezes after three baseline samples, and reuses exact conditions' {
+        $fixture = Get-TestOperationSet
+        $result = Invoke-WorkshopExperiment -RunId ([guid]'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa') `
+            -OperationSet $fixture.Operations -MaximumWorkers 4 -MaximumDurationSeconds 600 `
+            -SampleIntervalSeconds 5 -WorkerRampSeconds 10
+
+        $result.Outcome | Should -Be 'TargetMet'
+        $result.FrozenSettings.Workers | Should -Be 2
+        @($fixture.State.Starts | Where-Object Phase -eq Baseline).Count | Should -Be 2
+        @($fixture.State.Starts | Where-Object Phase -eq Optimized).Count | Should -Be 2
+        @($fixture.State.Starts | Where-Object Phase -eq Optimized) | ForEach-Object {
+            ($_.Schedule | ConvertTo-Json -Compress) | Should -Be ($result.FrozenSettings.ParameterSchedule | ConvertTo-Json -Compress)
+        }
+        $fixture.State.Exported | Should -BeTrue
+        @($fixture.State.Starts | Where-Object Disposed -eq $false).Count | Should -Be 0
+    }
+
+    It 'requires exact unchanged optimized fingerprints' {
+        $fixture = Get-TestOperationSet
+        $sampleOperation = $fixture.Operations.Sample
+        $drift = Get-TestPreflight -Hash ('a' * 64)
+        $drift.DataHash = ('b' * 64)
+        $fixture.Operations.Sample = {
+            param($RunId, $Phase, $Kind, $TrialPhase, $ScheduleEntry)
+            if ($Kind -eq 'Fingerprint') { return $drift }
+            & $sampleOperation $RunId $Phase $Kind $TrialPhase $ScheduleEntry
+        }.GetNewClosure()
+        { Invoke-WorkshopExperiment -RunId ([guid]::NewGuid()) -OperationSet $fixture.Operations } |
+            Should -Throw '*configuration or data drift*'
+    }
+
+    It 'never claims optimized success when baseline cannot reach target' {
+        $baseline = 1..130 | ForEach-Object { Get-TestSample Baseline 70 }
+        $fixture = Get-TestOperationSet -Baseline $baseline
+        $result = Invoke-WorkshopExperiment -RunId ([guid]::NewGuid()) -OperationSet $fixture.Operations `
+            -MaximumWorkers 4 -MaximumDurationSeconds 60 -SampleIntervalSeconds 5 -WorkerRampSeconds 10
+        $result.Outcome | Should -Be 'BaselineTargetNotReached'
+        @($fixture.State.Starts | Where-Object Phase -eq Optimized).Count | Should -Be 0
+        $fixture.State.Exported | Should -BeTrue
+    }
+
+    It 'stops immediately for safety with manual stop precedence' {
+        $unsafe = Get-TestSample Baseline 60
+        $unsafe.HostUsedPercent = 90
+        $fixture = Get-TestOperationSet -Baseline @($unsafe)
+        (Invoke-WorkshopExperiment -RunId ([guid]::NewGuid()) -OperationSet $fixture.Operations).Outcome |
+            Should -Be 'SafetyStop'
+
+        $manual = Get-TestSample Baseline 60
+        $manual.HostAvailableMB = 100
+        $manual.ManualStopRequested = $true
+        $fixture = Get-TestOperationSet -Baseline @($manual)
+        (Invoke-WorkshopExperiment -RunId ([guid]::NewGuid()) -OperationSet $fixture.Operations).Outcome |
+            Should -Be 'ManualStop'
+    }
+
+    It 'runs the exact twelve interleaved ABBA BAAB ABBA trials and records all metrics' {
+        Get-WorkshopTrialSequence | Should -BeExactly @('A','B','B','A','B','A','A','B','A','B','B','A')
+        $fixture = Get-TestOperationSet
+        $result = Invoke-WorkshopExperiment -RunId ([guid]::NewGuid()) -OperationSet $fixture.Operations `
+            -WorkerRampSeconds 10
+        $result.Trials.Count | Should -Be 12
+        $result.Trials.Phase | Should -BeExactly @('Baseline','Optimized','Optimized','Baseline','Optimized','Baseline','Baseline','Optimized','Baseline','Optimized','Optimized','Baseline')
+        foreach ($metric in @('DurationMs','CpuMs','LogicalReads','GrantsKb','SpillsMb','WaitMs')) {
+            $result.Trials[0].psobject.Properties.Name | Should -Contain $metric
+        }
+    }
+
+    It 'rejects incomplete preflight including SQL, memory, Query Store, MGF, objects, and validation' -ForEach @(
+        @{ Property = 'MarkerValid'; Value = $false }
+        @{ Property = 'SqlMajorVersion'; Value = 15 }
+        @{ Property = 'SqlEdition'; Value = 'Standard Edition' }
+        @{ Property = 'PhysicalMemoryMB'; Value = 32768 }
+        @{ Property = 'QueryStoreActualState'; Value = 'READ_ONLY' }
+        @{ Property = 'ResourcePool'; Value = 'default' }
+        @{ Property = 'WorkloadGroup'; Value = 'default' }
+        @{ Property = 'MemoryGrantFeedbackDisabled'; Value = $false }
+        @{ Property = 'PriorMemoryGrantFeedbackState'; Value = $null }
+        @{ Property = 'ProceduresPresent'; Value = $false }
+        @{ Property = 'EvidenceSchemaPresent'; Value = $false }
+        @{ Property = 'ValidationPassed'; Value = $false }
+    ) {
+        $preflight = Get-TestPreflight
+        $preflight.$Property = $Value
+        { Test-WorkshopPreflight -Snapshot $preflight } | Should -Throw
+    }
+}
+
+Describe 'Task 12 stop and export safety' {
+    It 'builds KILL only for active, exact doubly tagged user sessions' {
+        $run = [guid]'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
+        $rows = @(
+            [pscustomobject]@{ SessionId = 51; IsUserProcess = $true; IsActive = $true; ProgramName = "MCP-SQL-Workshop-$run-Baseline-1"; ContextInfo = $run.ToByteArray() }
+            [pscustomobject]@{ SessionId = 52; IsUserProcess = $true; IsActive = $true; ProgramName = "MCP-SQL-Workshop-$run-Optimized-1"; ContextInfo = ([guid]::NewGuid()).ToByteArray() }
+            [pscustomobject]@{ SessionId = 53; IsUserProcess = $true; IsActive = $false; ProgramName = "MCP-SQL-Workshop-$run-Baseline-2"; ContextInfo = $run.ToByteArray() }
+            [pscustomobject]@{ SessionId = 54; IsUserProcess = $false; IsActive = $true; ProgramName = "MCP-SQL-Workshop-$run-Baseline-3"; ContextInfo = $run.ToByteArray() }
+        )
+        $plan = @(Get-WorkshopKillPlan -RunId $run -Sessions $rows -CurrentSessionId 99)
+        $plan.Count | Should -Be 1
+        $plan[0].SessionId | Should -Be 51
+        $plan[0].Statement | Should -BeExactly 'KILL 51;'
+    }
+
+    It 'rejects noncanonical run paths and reparse-point output' {
+        { Export-WorkshopEvidenceFile -RunId '../escape' -Evidence @{} -RepositoryRoot $TestDrive } | Should -Throw
+        $link = Join-Path $TestDrive 'evidence/runs/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
+        $target = Join-Path $TestDrive 'junction-target'
+        New-Item -ItemType Directory -Path $target -Force | Out-Null
+        New-Item -ItemType Junction -Path $link -Target $target -Force | Out-Null
+        { Export-WorkshopEvidenceFile -RunId 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa' -Evidence @{} -RepositoryRoot $TestDrive } |
+            Should -Throw '*reparse*'
+    }
+
+    It 'writes UTF-8 JSON and CSV atomically, redacts secrets, and protects completed runs' {
+        $run = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb'
+        $evidence = [ordered]@{ runId = $run; outcome = 'TargetMet'; samples = @([pscustomobject]@{ sequence = 1; phase = 'Baseline' }) }
+        $result = Export-WorkshopEvidenceFile -RunId $run -Evidence $evidence -RepositoryRoot $TestDrive `
+            -SemanticValidator { param($JsonPath) Write-Verbose $JsonPath; $true }
+        Test-Path -LiteralPath $result.JsonPath | Should -BeTrue
+        Test-Path -LiteralPath $result.CsvPath | Should -BeTrue
+        [IO.File]::ReadAllBytes($result.JsonPath)[0..2] | Should -Not -Be @(0xEF,0xBB,0xBF)
+        @(Get-ChildItem $result.Directory -Filter '*.tmp').Count | Should -Be 0
+        { Export-WorkshopEvidenceFile -RunId $run -Evidence $evidence -RepositoryRoot $TestDrive `
+                -SemanticValidator { $true } } | Should -Throw '*completed run*'
+
+        $secretName = -join @([char]80,[char]97,[char]115,[char]115,[char]119,[char]111,[char]114,[char]100)
+        $secretEvidence = [ordered]@{ runId = ([guid]::NewGuid().ToString()); outcome = 'Failed'; samples = @(); note = "$secretName=canary" }
+        { Export-WorkshopEvidenceFile -RunId $secretEvidence.runId -Evidence $secretEvidence `
+                -RepositoryRoot $TestDrive -SemanticValidator { $true } } | Should -Throw '*Secret-shaped*'
+    }
+
+    It 'declares strict entry bounds, ShouldProcess, and no insecure SQL fallback or Start-Sleep' {
+        $start = Get-Content (Join-Path $PSScriptRoot '../../workload/Start-MemoryGrantLab.ps1') -Raw
+        $stop = Get-Content (Join-Path $PSScriptRoot '../../workload/Stop-MemoryGrantLab.ps1') -Raw
+        $export = Get-Content (Join-Path $PSScriptRoot '../../workload/Export-WorkshopEvidence.ps1') -Raw
+        $module = Get-Content (Join-Path $PSScriptRoot '../../workload/Workshop.Workload.psm1') -Raw
+        $start | Should -Match 'ValidateRange\(1,\s*4\)'
+        $start | Should -Match 'ValidateRange\(60,\s*600\)'
+        $start | Should -Match 'ValidateRange\(5,\s*30\)'
+        $start | Should -Match 'ValidateRange\(10,\s*60\)'
+        $stop | Should -Match 'SupportsShouldProcess'
+        $export | Should -Match 'SupportsShouldProcess'
+        "$start`n$stop`n$export`n$module" | Should -Not -Match 'System\.Data\.SqlClient'
+        $module | Should -Not -Match 'Start-Sleep'
+        $module | Should -Match 'Microsoft\.Data\.SqlClient'
+        $module | Should -Match 'ZeroFreeBSTR'
+        $module | Should -Match 'TrustServerCertificate\s*=\s*\$false'
+        $module | Should -Match 'HostNameInCertificate'
+    }
+
+    It 'implements exact tagged parameterized SQL workers in disposable async runspaces' {
+        $module = Get-Content (Join-Path $PSScriptRoot '../../workload/Workshop.Workload.psm1') -Raw
+        $module | Should -Match 'SET\s+CONTEXT_INFO\s+@RunBytes'
+        $module | Should -Match "sp_set_session_context.+WorkshopRunId"
+        $module | Should -Match "sp_set_session_context.+WorkshopPhase"
+        $module | Should -Match 'lab\.usp_MonthEndSalesBaseline'
+        $module | Should -Match 'lab\.usp_MonthEndSalesOptimized'
+        $module | Should -Match 'Parameters\.Add'
+        $module | Should -Match 'RunspaceFactory'
+        $module | Should -Match 'BeginInvoke'
+        $module | Should -Match 'EndInvoke'
+        $module | Should -Match '\.Dispose\(\)'
+        $module | Should -Not -Match 'AddWithValue'
     }
 }
