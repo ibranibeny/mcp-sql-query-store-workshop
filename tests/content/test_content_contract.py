@@ -13,6 +13,13 @@ from web.build_site import build_site, render_markdown
 ROOT = Path(__file__).resolve().parents[2]
 MANIFEST_PATH = ROOT / "web" / "site-manifest.json"
 SCREENSHOT_MANIFEST_PATH = ROOT / "docs" / "images" / "screenshot-manifest.json"
+DAB_AUTHORIZATION_URL = (
+    "https://learn.microsoft.com/en-us/azure/data-api-builder/"
+    "concept/security/authorization-overview"
+)
+OFFICIAL_EXTERNAL_LINK_ALLOWLIST = {
+    DAB_AUTHORIZATION_URL,
+}
 
 MODULES = [
     "workshop/00-orientation.md",
@@ -212,6 +219,23 @@ def test_sources_are_official_mapped_and_verified_on_required_date() -> None:
     for label in ("DOC-VERIFIED", "SUBSCRIPTION-VALIDATED", "LAB-MEASURED", "TARGET", "ASSUMPTION"):
         assert label in sources
     assert "Claim" in sources and "Official source" in sources
+
+
+def test_dab_authorization_uses_canonical_official_url_without_network_access(
+    tmp_path: Path,
+) -> None:
+    assert DAB_AUTHORIZATION_URL in OFFICIAL_EXTERNAL_LINK_ALLOWLIST
+    assert DAB_AUTHORIZATION_URL in read("workshop/01-mcp-and-copilot.md")
+    assert DAB_AUTHORIZATION_URL in read("docs/evidence-and-sources.md")
+
+    build_site(ROOT, tmp_path)
+    generated = "\n".join(
+        path.read_text(encoding="utf-8") for path in sorted(tmp_path.glob("*.html"))
+    )
+    assert generated.count(DAB_AUTHORIZATION_URL) == 2
+    assert "/azure/data-api-builder/concept/authorization" not in generated.replace(
+        DAB_AUTHORIZATION_URL, ""
+    )
 
 
 def test_screenshot_manifest_is_truthful_and_complete() -> None:

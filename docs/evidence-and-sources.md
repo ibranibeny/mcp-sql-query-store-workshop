@@ -19,7 +19,7 @@
 | SQL MCP exposes configured database capabilities through DAB | [SQL MCP overview](https://learn.microsoft.com/en-us/azure/data-api-builder/mcp/overview) |
 | Local VS Code can launch SQL MCP over stdio | [SQL MCP VS Code quickstart](https://learn.microsoft.com/en-us/azure/data-api-builder/mcp/quickstart-visual-studio-code) |
 | Generic DML tool availability is configured and permission constrained | [SQL MCP DML tools](https://learn.microsoft.com/en-us/azure/data-api-builder/mcp/data-manipulation-language-tools) |
-| DAB roles and permissions authorize entity actions | [DAB authorization](https://learn.microsoft.com/en-us/azure/data-api-builder/concept/authorization) |
+| DAB roles and permissions authorize entity actions | [DAB authorization](https://learn.microsoft.com/en-us/azure/data-api-builder/concept/security/authorization-overview) |
 | SQL Server permissions remain authoritative | [Database Engine permissions](https://learn.microsoft.com/en-us/sql/relational-databases/security/authentication-access/getting-started-with-database-engine-permissions) |
 | MSSQL Copilot provides connected database assistance | [GitHub Copilot for MSSQL](https://learn.microsoft.com/en-us/sql/tools/visual-studio-code-extensions/github-copilot/overview?view=sql-server-ver17) |
 | MSSQL supports query optimization assistance | [Query optimizer assistant](https://learn.microsoft.com/en-us/sql/tools/visual-studio-code-extensions/github-copilot/query-optimizer-assistant?view=sql-server-ver17) |

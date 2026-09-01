@@ -4,10 +4,17 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="description" content="An evidence-driven L400 workshop for optimizing a SQL Server stored procedure with GitHub Copilot and Microsoft SQL MCP.">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'sha256-n2HSwPq71BFLjgICami4p3JNMXLLnlGn5P5K8dJEyHk=' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https://cdn.jsdelivr.net; object-src 'none'; base-uri 'none'; form-action 'self'; upgrade-insecure-requests">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'sha256-b5MeUJifSKSfTMPMddrS1DZR/PfSzDiMsbc0XtGwWLc=' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https://cdn.jsdelivr.net; object-src 'none'; base-uri 'none'; form-action 'self'; upgrade-insecure-requests">
   <title>Optimize and prove | MCP SQL Query Store Workshop</title>
   <link rel="stylesheet" href="assets/styles.css">
-  <script>(() => { const param = new URLSearchParams(window.location.search).get("scoutTheme"); const theme = param || (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"); document.documentElement.setAttribute("data-theme", theme); })();</script>
+  <script>
+  (() => {
+    const param = new URLSearchParams(window.location.search).get("scoutTheme");
+    const theme =
+      param || (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+    document.documentElement.setAttribute("data-theme", theme);
+  })();
+</script>
   <script type="module" src="assets/app.js"></script>
 </head>
 <body data-page-route="06-optimize-and-prove.html">
