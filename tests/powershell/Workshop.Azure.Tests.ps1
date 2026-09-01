@@ -1112,6 +1112,25 @@ Describe 'Static safety and module contract' {
         }
     }
 
+    It 'recognizes ResourceNotFound in an Az NetworkCloudException inner body' {
+        InModuleScope Workshop.Azure {
+            $inner = [System.Exception]::new('network resource absent')
+            $inner | Add-Member -NotePropertyName Body -NotePropertyValue ([pscustomobject]@{
+                Code = 'ResourceNotFound'
+                Message = 'The requested network resource was not found.'
+            })
+            $outer = [System.Exception]::new('network operation failed', $inner)
+            $record = [System.Management.Automation.ErrorRecord]::new(
+                $outer,
+                'Microsoft.Azure.Commands.Network.GetAzureRmApplicationSecurityGroup',
+                [System.Management.Automation.ErrorCategory]::NotSpecified,
+                'asg-test'
+            )
+
+            (Test-WorkshopAzureNotFound -ErrorRecord $record) | Should -BeTrue
+        }
+    }
+
     It 'exports only the intended functions and requires PowerShell 7.4' {
         $manifest = Test-ModuleManifest $script:ModulePath
         $manifest.PowerShellVersion | Should -Be ([version]'7.4')

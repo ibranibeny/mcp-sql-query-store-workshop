@@ -624,14 +624,30 @@ function Test-WorkshopAzureNotFound {
         $codes.Add($ErrorRecord.FullyQualifiedErrorId)
     }
     $exception = $ErrorRecord.Exception
-    foreach ($propertyName in @('Code', 'ErrorCode')) {
-        if ($null -ne $exception -and $exception.PSObject.Properties.Name -contains $propertyName) {
-            $codes.Add([string] $exception.$propertyName)
+    $exceptionCandidates = [System.Collections.Generic.List[object]]::new()
+    $candidate = $exception
+    while ($null -ne $candidate -and $exceptionCandidates.Count -lt 8) {
+        $exceptionCandidates.Add($candidate)
+        $candidate = if ($candidate.PSObject.Properties.Name -contains 'InnerException') {
+            $candidate.InnerException
+        }
+        else {
+            $null
         }
     }
-    if ($null -ne $exception -and $exception.PSObject.Properties.Name -contains 'Error' -and
-        $null -ne $exception.Error -and $exception.Error.PSObject.Properties.Name -contains 'Code') {
-        $codes.Add([string] $exception.Error.Code)
+    foreach ($exceptionCandidate in $exceptionCandidates) {
+        foreach ($propertyName in @('Code', 'ErrorCode')) {
+            if ($exceptionCandidate.PSObject.Properties.Name -contains $propertyName) {
+                $codes.Add([string] $exceptionCandidate.$propertyName)
+            }
+        }
+        foreach ($containerName in @('Error', 'Body')) {
+            if ($exceptionCandidate.PSObject.Properties.Name -contains $containerName -and
+                $null -ne $exceptionCandidate.$containerName -and
+                $exceptionCandidate.$containerName.PSObject.Properties.Name -contains 'Code') {
+                $codes.Add([string] $exceptionCandidate.$containerName.Code)
+            }
+        }
     }
     foreach ($code in $codes) {
         if ($code -match '(^|,|\.)Resource(Group)?NotFound($|,|\.)') {
@@ -644,16 +660,19 @@ function Test-WorkshopAzureNotFound {
         $exception.Message -match '^\d{2}:\d{2}:\d{2} - Provided resource group does not exist\.$') {
         return $true
     }
-    $response = if ($null -ne $exception -and $exception.PSObject.Properties.Name -contains 'Response') {
-        $exception.Response
-    }
-    else {
-        $null
-    }
-    foreach ($candidate in @($exception, $response)) {
-        if ($null -ne $candidate -and $candidate.PSObject.Properties.Name -contains 'StatusCode' -and
-            [int] $candidate.StatusCode -eq 404) {
-            return $true
+    foreach ($exceptionCandidate in $exceptionCandidates) {
+        $response = if ($exceptionCandidate.PSObject.Properties.Name -contains 'Response') {
+            $exceptionCandidate.Response
+        }
+        else {
+            $null
+        }
+        foreach ($responseCandidate in @($exceptionCandidate, $response)) {
+            if ($null -ne $responseCandidate -and
+                $responseCandidate.PSObject.Properties.Name -contains 'StatusCode' -and
+                [string] $responseCandidate.StatusCode -in @('404', 'NotFound')) {
+                return $true
+            }
         }
     }
     return $false
