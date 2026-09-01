@@ -379,6 +379,9 @@
         "workloadGroup",
         "maxServerMemoryMB",
         "databaseScopedConfigurationHash",
+        "dataHash",
+        "indexStatisticsHash",
+        "procedureHash",
         "validationBatchHash",
         "parameterSchedule",
         "parameterScheduleHash"
@@ -392,6 +395,9 @@
         "workloadGroup": { "type": "string", "minLength": 1 },
         "maxServerMemoryMB": { "type": "integer", "minimum": 1 },
         "databaseScopedConfigurationHash": { "$ref": "#/$defs/sha256" },
+        "dataHash": { "$ref": "#/$defs/sha256" },
+        "indexStatisticsHash": { "$ref": "#/$defs/sha256" },
+        "procedureHash": { "$ref": "#/$defs/sha256" },
         "validationBatchHash": { "$ref": "#/$defs/sha256" },
         "parameterSchedule": {
           "type": "array",

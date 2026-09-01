@@ -77,7 +77,16 @@ BEGIN
                 'BaselineTargetNotReached', 'SafetyStop', 'ManualStop', 'Failed')),
         CONSTRAINT CK_WorkshopRun_Timestamps CHECK (CompletedAtUtc IS NULL OR CompletedAtUtc >= StartedAtUtc),
         CONSTRAINT CK_WorkshopRun_FrozenSettingsJson CHECK
-            (LEN(FrozenSettingsJson) BETWEEN 2 AND 4000 AND ISJSON(FrozenSettingsJson) = 1),
+            (LEN(FrozenSettingsJson) BETWEEN 2 AND 4000 AND ISJSON(FrozenSettingsJson) = 1
+             AND JSON_VALUE(FrozenSettingsJson, '$.dataHash') IS NOT NULL
+             AND LEN(JSON_VALUE(FrozenSettingsJson, '$.dataHash')) = 64
+             AND JSON_VALUE(FrozenSettingsJson, '$.dataHash') COLLATE Latin1_General_100_BIN2 NOT LIKE '%[^0-9a-f]%'
+             AND JSON_VALUE(FrozenSettingsJson, '$.indexStatisticsHash') IS NOT NULL
+             AND LEN(JSON_VALUE(FrozenSettingsJson, '$.indexStatisticsHash')) = 64
+             AND JSON_VALUE(FrozenSettingsJson, '$.indexStatisticsHash') COLLATE Latin1_General_100_BIN2 NOT LIKE '%[^0-9a-f]%'
+             AND JSON_VALUE(FrozenSettingsJson, '$.procedureHash') IS NOT NULL
+             AND LEN(JSON_VALUE(FrozenSettingsJson, '$.procedureHash')) = 64
+             AND JSON_VALUE(FrozenSettingsJson, '$.procedureHash') COLLATE Latin1_General_100_BIN2 NOT LIKE '%[^0-9a-f]%'),
         CONSTRAINT CK_WorkshopRun_BaselineIdentifiers CHECK
             ((BaselineQueryID IS NULL AND BaselinePlanID IS NULL) OR (BaselineQueryID > 0 AND BaselinePlanID > 0)),
         CONSTRAINT CK_WorkshopRun_OptimizedIdentifiers CHECK
@@ -755,7 +764,16 @@ BEGIN TRY
                 'BaselineTargetNotReached', 'SafetyStop', 'ManualStop', 'Failed')),
         CONSTRAINT CK_WorkshopRun_Timestamps CHECK (CompletedAtUtc IS NULL OR CompletedAtUtc >= StartedAtUtc),
         CONSTRAINT CK_WorkshopRun_FrozenSettingsJson CHECK
-            (LEN(FrozenSettingsJson) BETWEEN 2 AND 4000 AND ISJSON(FrozenSettingsJson) = 1),
+            (LEN(FrozenSettingsJson) BETWEEN 2 AND 4000 AND ISJSON(FrozenSettingsJson) = 1
+             AND JSON_VALUE(FrozenSettingsJson, '$.dataHash') IS NOT NULL
+             AND LEN(JSON_VALUE(FrozenSettingsJson, '$.dataHash')) = 64
+             AND JSON_VALUE(FrozenSettingsJson, '$.dataHash') COLLATE Latin1_General_100_BIN2 NOT LIKE '%[^0-9a-f]%'
+             AND JSON_VALUE(FrozenSettingsJson, '$.indexStatisticsHash') IS NOT NULL
+             AND LEN(JSON_VALUE(FrozenSettingsJson, '$.indexStatisticsHash')) = 64
+             AND JSON_VALUE(FrozenSettingsJson, '$.indexStatisticsHash') COLLATE Latin1_General_100_BIN2 NOT LIKE '%[^0-9a-f]%'
+             AND JSON_VALUE(FrozenSettingsJson, '$.procedureHash') IS NOT NULL
+             AND LEN(JSON_VALUE(FrozenSettingsJson, '$.procedureHash')) = 64
+             AND JSON_VALUE(FrozenSettingsJson, '$.procedureHash') COLLATE Latin1_General_100_BIN2 NOT LIKE '%[^0-9a-f]%'),
         CONSTRAINT CK_WorkshopRun_BaselineIdentifiers CHECK
             ((BaselineQueryID IS NULL AND BaselinePlanID IS NULL) OR (BaselineQueryID > 0 AND BaselinePlanID > 0)),
         CONSTRAINT CK_WorkshopRun_OptimizedIdentifiers CHECK

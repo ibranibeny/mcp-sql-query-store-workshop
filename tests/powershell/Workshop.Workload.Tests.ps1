@@ -14,6 +14,9 @@ BeforeAll {
             workloadGroup = 'mcp_sql_workshop_group'
             maxServerMemoryMB = 49152
             databaseScopedConfigurationHash = 'f17f4c4220d254854e22408ef682ff809567b66df49560b17a21169614ee0dc4'
+            dataHash = ('a' * 64)
+            indexStatisticsHash = ('b' * 64)
+            procedureHash = ('c' * 64)
             validationBatchHash = ('d' * 64)
             parameterSchedule = @('2025-01-01/2025-02-01', '2025-02-01/2025-03-01')
             parameterScheduleHash = '095562b669618122fb74005f471f9c67e41e88a1e8ad0398ef0cc593170b1bb1'
@@ -358,6 +361,40 @@ Describe 'New-WorkshopRunRecord' {
         { $recordA.FrozenSettings.workers = 4 } | Should -Throw
     }
 
+    It 'changes the canonical frozen settings hash when any database fingerprint changes' -ForEach @(
+        @{ Field = 'dataHash' }
+        @{ Field = 'indexStatisticsHash' }
+        @{ Field = 'procedureHash' }
+    ) {
+        $original = Get-TestSetting
+        $changed = Get-TestSetting
+        $changed[$Field] = ('e' * 64)
+
+        $recordA = New-WorkshopRunRecord -Phase Baseline -Status Planned `
+            -EvidenceClassification TARGET -FrozenSettings $original `
+            -EnvironmentFingerprint (Get-TestEnvironment) -TargetBands (Get-TestTargetBand)
+        $recordB = New-WorkshopRunRecord -Phase Baseline -Status Planned `
+            -EvidenceClassification TARGET -FrozenSettings $changed `
+            -EnvironmentFingerprint (Get-TestEnvironment) -TargetBands (Get-TestTargetBand)
+
+        $recordA.FrozenSettingsHash | Should -Not -BeExactly $recordB.FrozenSettingsHash
+        $recordB.FrozenSettingsJson | Should -Match ('"' + $Field + '":"' + ('e' * 64) + '"')
+    }
+
+    It 'rejects missing and malformed frozen database fingerprints' -ForEach @(
+        @{ Field = 'dataHash'; Value = $null }
+        @{ Field = 'indexStatisticsHash'; Value = ('A' * 64) }
+        @{ Field = 'procedureHash'; Value = ('f' * 63) }
+    ) {
+        $settings = Get-TestSetting
+        if ($null -eq $Value) { $settings.Remove($Field) } else { $settings[$Field] = $Value }
+        {
+            New-WorkshopRunRecord -Phase Baseline -Status Planned `
+                -EvidenceClassification TARGET -FrozenSettings $settings `
+                -EnvironmentFingerprint (Get-TestEnvironment) -TargetBands (Get-TestTargetBand)
+        } | Should -Throw
+    }
+
     It 'rejects secret-shaped fields recursively' {
         $settings = Get-TestSetting
         $secretKey = -join @(112, 97, 115, 115, 119, 111, 114, 100 | ForEach-Object { [char] $_ })
@@ -483,6 +520,9 @@ Describe 'ConvertTo-WorkshopEvidence' {
             ($second | ConvertTo-Json -Depth 20 -Compress)
         $first.measuredPeaks.baseline | Should -Be 80
         $first.measuredPeaks.optimized | Should -Be 40
+        $first.frozenSettings.dataHash | Should -BeExactly ('a' * 64)
+        $first.frozenSettings.indexStatisticsHash | Should -BeExactly ('b' * 64)
+        $first.frozenSettings.procedureHash | Should -BeExactly ('c' * 64)
         $first.targetBands.baseline.minimum | Should -Be 75
         $first.terminationEvidence | ConvertTo-Json -Compress | Should -Be `
             '{"manualStopRequested":false,"safetyStopTriggered":false,"safetyReasons":[],"timeout":false}'
@@ -1359,11 +1399,15 @@ Describe 'Task 12 workload orchestration' {
         $mismatchingResult.Validation.validationHash | Should -Not -BeExactly $matchingResult.Validation.validationHash
     }
 
-    It 'requires exact unchanged optimized fingerprints' {
+    It 'rejects each frozen fingerprint drift before optimized workers start' -ForEach @(
+        @{ Field = 'DataHash' }
+        @{ Field = 'IndexStatisticsHash' }
+        @{ Field = 'ProcedureHash' }
+    ) {
         $fixture = Get-TestOperationSet
         $sampleOperation = $fixture.Operations.Sample
         $drift = Get-TestPreflight -Hash ('a' * 64)
-        $drift.DataHash = ('b' * 64)
+        $drift.$Field = ('b' * 64)
         $fixture.Operations.Sample = {
             param($RunId, $Phase, $Kind, $TrialPhase, $ScheduleEntry, $RemainingSeconds)
             if ($Kind -eq 'Fingerprint') { return $drift }
@@ -1372,6 +1416,7 @@ Describe 'Task 12 workload orchestration' {
         $result = Invoke-WorkshopExperiment -RunId ([guid]::NewGuid()) -OperationSet $fixture.Operations
         $result.Outcome | Should -BeExactly 'Failed'
         $result.Validation.Passed | Should -BeFalse
+        @($fixture.State.Starts | Where-Object Phase -eq Optimized).Count | Should -Be 0
         $fixture.State.KillCalls | Should -BeGreaterOrEqual 1
         $fixture.State.Persisted.Count | Should -Be 1
         $fixture.State.Exported | Should -BeTrue
@@ -1455,6 +1500,9 @@ Describe 'Task 12 workload orchestration' {
         @{ Property = 'ValidationPassed'; Value = $false }
         @{ Property = 'ValidationValidatedAtUtc'; Value = ([datetimeoffset]::UtcNow.AddHours(-25)) }
         @{ Property = 'ValidationBatchHash'; Value = ('z' * 64) }
+        @{ Property = 'DataHash'; Value = ('a' * 63) }
+        @{ Property = 'IndexStatisticsHash'; Value = ('A' * 64) }
+        @{ Property = 'ProcedureHash'; Value = $null }
     ) {
         $preflight = Get-TestPreflight
         $preflight.$Property = $Value
@@ -1807,6 +1855,13 @@ Describe 'Task 12 remaining blocker contracts' {
         $module | Should -Match 'DATEADD\(hour,\s*-24,\s*SYSUTCDATETIME\(\)\)'
         $module | Should -Match 'AS\s+ValidationBatchHash'
         $module | Should -Match 'ValidationValidatedAtUtc'
+        foreach ($fingerprint in @('dataHash','indexStatisticsHash','procedureHash')) {
+            $module | Should -Match $fingerprint
+        }
+        $module | Should -Match '(?s)STRING_AGG.+WITHIN GROUP \(ORDER BY SyntheticSalesID\)'
+        $module | Should -Match 'sys\.dm_db_stats_properties'
+        $module | Should -Match 'OBJECT_DEFINITION'
+        $module | Should -Match 'FrozenSettingsJson=@FrozenSettingsJson'
     }
 
     It 'caches the production preflight snapshot used for trial validation linkage' {

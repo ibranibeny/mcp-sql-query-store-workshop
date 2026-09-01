@@ -383,7 +383,8 @@ function Assert-FrozenSetting {
     $names = @(
         'workers', 'maximumDurationSeconds', 'sampleIntervalSeconds', 'workerRampSeconds',
         'resourcePool', 'workloadGroup', 'maxServerMemoryMB',
-        'databaseScopedConfigurationHash', 'validationBatchHash',
+        'databaseScopedConfigurationHash', 'dataHash', 'indexStatisticsHash', 'procedureHash',
+        'validationBatchHash',
         'parameterSchedule', 'parameterScheduleHash'
     )
     Assert-ExactProperty -InputObject $Settings -RequiredNames $names -Context 'Frozen settings'
@@ -416,7 +417,10 @@ function Assert-FrozenSetting {
             throw "$name must be a nonempty string."
         }
     }
-    foreach ($name in @('databaseScopedConfigurationHash', 'validationBatchHash', 'parameterScheduleHash')) {
+    foreach ($name in @(
+        'databaseScopedConfigurationHash', 'dataHash', 'indexStatisticsHash', 'procedureHash',
+        'validationBatchHash', 'parameterScheduleHash'
+    )) {
         if ((Get-ObjectValue $Settings $name -Required) -cnotmatch '^[a-f0-9]{64}$') {
             throw "$name must be a SHA-256 hash."
         }
@@ -1603,7 +1607,9 @@ function Test-WorkshopFingerprintMatch {
     }
     catch { return $false }
     foreach ($name in @('DataHash', 'IndexStatisticsHash', 'ProcedureHash')) {
-        if ([string] $Expected.$name -cne [string] $Actual.$name) { return $false }
+        if ([string] $Expected.$name -cnotmatch '^[a-f0-9]{64}$' -or
+            [string] $Actual.$name -cnotmatch '^[a-f0-9]{64}$' -or
+            [string] $Expected.$name -cne [string] $Actual.$name) { return $false }
     }
     return $true
 }
@@ -1703,6 +1709,9 @@ function Build-WorkshopExperimentResult {
             workloadGroup = 'mcp_sql_workshop_group'
             maxServerMemoryMB = 49152
             databaseScopedConfigurationHash = Get-WorkshopConfigurationFingerprint $Preflight
+            dataHash = [string]$Preflight.DataHash
+            indexStatisticsHash = [string]$Preflight.IndexStatisticsHash
+            procedureHash = [string]$Preflight.ProcedureHash
             validationBatchHash = [string]$Preflight.ValidationBatchHash
             parameterSchedule = $Schedule
             parameterScheduleHash = Get-Sha256 $scheduleJson
@@ -1965,6 +1974,9 @@ function Invoke-WorkshopExperiment {
                     workloadGroup = 'mcp_sql_workshop_group'
                     maxServerMemoryMB = 49152
                     databaseScopedConfigurationHash = [string] $preflight.CanonicalConfigurationFingerprint
+                    dataHash = [string]$preflight.DataHash
+                    indexStatisticsHash = [string]$preflight.IndexStatisticsHash
+                    procedureHash = [string]$preflight.ProcedureHash
                     validationBatchHash = [string]$preflight.ValidationBatchHash
                     parameterSchedule = $schedule
                     parameterScheduleHash = Get-Sha256 $scheduleJson

@@ -235,6 +235,13 @@ def test_root_trials_property_is_required(schema: dict, target: dict) -> None:
 def test_target_example_frozen_hashes_are_reproducible(target: dict) -> None:
     settings = target["frozenSettings"]
     assert settings["validationBatchHash"] == "d" * 64
+    expected_placeholders = {
+        "dataHash": "TARGET-CONFIG-DATA-HASH-NOT-MEASURED",
+        "indexStatisticsHash": "TARGET-CONFIG-INDEX-STATISTICS-HASH-NOT-MEASURED",
+        "procedureHash": "TARGET-CONFIG-PROCEDURE-HASH-NOT-MEASURED",
+    }
+    for field, label in expected_placeholders.items():
+        assert settings[field] == hashlib.sha256(label.encode()).hexdigest()
     assert json.loads(target["frozenSettingsJson"]) == settings
     assert hashlib.sha256(target["frozenSettingsJson"].encode()).hexdigest() == target[
         "frozenSettingsHash"
@@ -272,6 +279,46 @@ def test_frozen_settings_require_validation_batch_hash(schema: dict, target: dic
     ).hexdigest()
 
     assert_invalid(schema, missing)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("dataHash", None),
+        ("indexStatisticsHash", "A" * 64),
+        ("procedureHash", "f" * 63),
+    ),
+)
+def test_frozen_settings_require_valid_database_fingerprints(
+    schema: dict, target: dict, field: str, value: str | None
+) -> None:
+    invalid = copy.deepcopy(target)
+    if value is None:
+        invalid["frozenSettings"].pop(field, None)
+    else:
+        invalid["frozenSettings"][field] = value
+    invalid["frozenSettingsJson"] = json.dumps(
+        invalid["frozenSettings"], separators=(",", ":"), sort_keys=True
+    )
+    invalid["frozenSettingsHash"] = hashlib.sha256(
+        invalid["frozenSettingsJson"].encode()
+    ).hexdigest()
+
+    assert_invalid(schema, invalid)
+
+
+@pytest.mark.parametrize("field", ("dataHash", "indexStatisticsHash", "procedureHash"))
+def test_canonical_frozen_hash_changes_with_each_database_fingerprint(
+    target: dict, field: str
+) -> None:
+    settings = copy.deepcopy(target["frozenSettings"])
+    original = json.dumps(settings, separators=(",", ":"), sort_keys=True)
+    settings[field] = "e" * 64
+    changed = json.dumps(settings, separators=(",", ":"), sort_keys=True)
+
+    assert hashlib.sha256(original.encode()).hexdigest() != hashlib.sha256(
+        changed.encode()
+    ).hexdigest()
 
 
 def test_target_rejects_measured_fields(

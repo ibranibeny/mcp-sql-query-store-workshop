@@ -14,6 +14,8 @@
   },
   "frozenSettings": {
     "databaseScopedConfigurationHash": "f17f4c4220d254854e22408ef682ff809567b66df49560b17a21169614ee0dc4",
+    "dataHash": "cfdf7fbf50b489e7a8eb9784abf2993d5f9580f02dc515e4ec7c6017991abb42",
+    "indexStatisticsHash": "591a6f2d33d1a0ac7ef2523fbc251a8f813c8907691d7b0b92fb31e62a848955",
     "maximumDurationSeconds": 300,
     "maxServerMemoryMB": 49152,
     "parameterSchedule": [
@@ -21,6 +23,7 @@
       "2025-02-01/2025-03-01"
     ],
     "parameterScheduleHash": "095562b669618122fb74005f471f9c67e41e88a1e8ad0398ef0cc593170b1bb1",
+    "procedureHash": "850d4ad628f4c74c0e44a727458b58b18e29f9a90d33e38d8cf6df9bef62212a",
     "resourcePool": "mcp_sql_workshop_pool",
     "sampleIntervalSeconds": 5,
     "validationBatchHash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
@@ -28,8 +31,8 @@
     "workers": 2,
     "workloadGroup": "mcp_sql_workshop_group"
   },
-  "frozenSettingsJson": "{\"databaseScopedConfigurationHash\":\"f17f4c4220d254854e22408ef682ff809567b66df49560b17a21169614ee0dc4\",\"maxServerMemoryMB\":49152,\"maximumDurationSeconds\":300,\"parameterSchedule\":[\"2025-01-01/2025-02-01\",\"2025-02-01/2025-03-01\"],\"parameterScheduleHash\":\"095562b669618122fb74005f471f9c67e41e88a1e8ad0398ef0cc593170b1bb1\",\"resourcePool\":\"mcp_sql_workshop_pool\",\"sampleIntervalSeconds\":5,\"validationBatchHash\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\",\"workerRampSeconds\":20,\"workers\":2,\"workloadGroup\":\"mcp_sql_workshop_group\"}",
-  "frozenSettingsHash": "981519e72874d3e6f925a40a867be89213d55017364d2184220a441681e371ab",
+  "frozenSettingsJson": "{\"dataHash\":\"cfdf7fbf50b489e7a8eb9784abf2993d5f9580f02dc515e4ec7c6017991abb42\",\"databaseScopedConfigurationHash\":\"f17f4c4220d254854e22408ef682ff809567b66df49560b17a21169614ee0dc4\",\"indexStatisticsHash\":\"591a6f2d33d1a0ac7ef2523fbc251a8f813c8907691d7b0b92fb31e62a848955\",\"maxServerMemoryMB\":49152,\"maximumDurationSeconds\":300,\"parameterSchedule\":[\"2025-01-01/2025-02-01\",\"2025-02-01/2025-03-01\"],\"parameterScheduleHash\":\"095562b669618122fb74005f471f9c67e41e88a1e8ad0398ef0cc593170b1bb1\",\"procedureHash\":\"850d4ad628f4c74c0e44a727458b58b18e29f9a90d33e38d8cf6df9bef62212a\",\"resourcePool\":\"mcp_sql_workshop_pool\",\"sampleIntervalSeconds\":5,\"validationBatchHash\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\",\"workerRampSeconds\":20,\"workers\":2,\"workloadGroup\":\"mcp_sql_workshop_group\"}",
+  "frozenSettingsHash": "e3297460f4452d15a90806a7835a918e76fa53f4a78fa2f5402563670bd26a24",
   "targetBands": {
     "baseline": {
       "minimum": 75,
