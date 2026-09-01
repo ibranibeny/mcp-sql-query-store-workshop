@@ -136,10 +136,59 @@
           "correctness": { "$ref": "#/$defs/correctness" },
           "outcome": { "$ref": "#/$defs/outcome" }
         },
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "samples": { "contains": { "$ref": "#/$defs/baselineSample" } }
+              }
+            },
+            "then": {
+              "properties": {
+                "measuredPeaks": { "properties": { "baseline": { "type": "number" } } }
+              }
+            },
+            "else": {
+              "properties": {
+                "measuredPeaks": { "properties": { "baseline": { "type": "null" } } }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "samples": { "contains": { "$ref": "#/$defs/optimizedSample" } }
+              }
+            },
+            "then": {
+              "properties": {
+                "measuredPeaks": { "properties": { "optimized": { "type": "number" } } }
+              }
+            },
+            "else": {
+              "properties": {
+                "measuredPeaks": { "properties": { "optimized": { "type": "null" } } }
+              }
+            }
+          }
+        ],
         "oneOf": [
           {
             "properties": {
               "status": { "const": "Completed" },
+              "phase": { "const": "Comparison" },
+              "samples": {
+                "allOf": [
+                  { "contains": { "$ref": "#/$defs/baselineSample" }, "minContains": 1 },
+                  { "contains": { "$ref": "#/$defs/optimizedSample" }, "minContains": 1 }
+                ]
+              },
+              "measuredPeaks": {
+                "properties": {
+                  "baseline": { "type": "number", "minimum": 0, "maximum": 100 },
+                  "optimized": { "type": "number", "minimum": 0, "maximum": 100 }
+                }
+              },
               "terminationEvidence": {
                 "properties": {
                   "manualStopRequested": { "const": false },
@@ -167,7 +216,19 @@
           {
             "properties": {
               "status": { "const": "BaselineTargetNotReached" },
+              "phase": { "const": "Baseline" },
               "outcome": { "const": "BaselineTargetNotReached" },
+              "samples": {
+                "contains": { "$ref": "#/$defs/baselineSample" },
+                "minContains": 1,
+                "not": { "contains": { "$ref": "#/$defs/optimizedSample" } }
+              },
+              "measuredPeaks": {
+                "properties": {
+                  "baseline": { "type": "number", "minimum": 0, "maximum": 100 },
+                  "optimized": { "type": "null" }
+                }
+              },
               "terminationEvidence": {
                 "properties": {
                   "manualStopRequested": { "const": false },
@@ -180,6 +241,7 @@
           {
             "properties": {
               "status": { "const": "SafetyStop" },
+              "phase": { "enum": ["Baseline", "Optimized"] },
               "outcome": { "const": "SafetyStop" },
               "terminationEvidence": {
                 "properties": {
@@ -193,6 +255,7 @@
           {
             "properties": {
               "status": { "const": "ManualStop" },
+              "phase": { "enum": ["Baseline", "Optimized"] },
               "outcome": { "const": "ManualStop" },
               "terminationEvidence": {
                 "properties": {
@@ -326,6 +389,18 @@
         "processPhysicalLow": { "type": "boolean" },
         "processVirtualLow": { "type": "boolean" }
       }
+    },
+    "baselineSample": {
+      "allOf": [
+        { "$ref": "#/$defs/sample" },
+        { "properties": { "phase": { "const": "Baseline" } } }
+      ]
+    },
+    "optimizedSample": {
+      "allOf": [
+        { "$ref": "#/$defs/sample" },
+        { "properties": { "phase": { "const": "Optimized" } } }
+      ]
     },
     "requestSample": {
       "type": "object",

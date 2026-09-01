@@ -35,6 +35,45 @@ def assert_invalid(validator: Draft202012Validator, instance: dict) -> None:
         validator.validate(instance)
 
 
+def measured_sample(sequence: int, phase: str, utilization: int) -> dict:
+    return {
+        "sequence": sequence,
+        "timestampUtc": f"2026-09-01T10:00:{sequence * 5:02d}.0000000Z",
+        "phase": phase,
+        "grantedKb": utilization * 10,
+        "totalKb": 1000,
+        "grantUtilizationPercent": utilization,
+        "hostUsedPercent": 70,
+        "hostAvailableMB": 12000,
+        "processPhysicalLow": False,
+        "processVirtualLow": False,
+    }
+
+
+def measured_evidence(target: dict, *, outcome: str = "TargetMet") -> dict:
+    measured = copy.deepcopy(target)
+    measured.update(
+        evidenceClassification="LAB-MEASURED",
+        disclaimer="LAB-MEASURED evidence captured from the identified workshop environment.",
+        phase="Comparison",
+        status="Completed",
+        endUtc="2026-09-01T10:01:00.0000000Z",
+        samples=[
+            measured_sample(1, "Baseline", 80),
+            measured_sample(2, "Optimized", 40),
+        ],
+        measuredPeaks={"baseline": 80, "optimized": 40},
+        correctness={
+            "passed": True,
+            "materialRegression": False,
+            "additionalMetricImproved": True,
+            "validationHash": "c" * 64,
+        },
+        outcome=outcome,
+    )
+    return measured
+
+
 def test_target_example_is_valid_and_truthfully_unmeasured(
     validator: Draft202012Validator, target: dict
 ) -> None:
@@ -187,10 +226,101 @@ def test_lab_measured_requires_samples_end_outcome_and_correctness(
             "processVirtualLow": False,
         }
     ]
+    assert_invalid(validator, measured)
+
+    measured["samples"].append(measured_sample(2, "Optimized", 40))
     validator.validate(measured)
 
     measured["status"] = "SafetyStop"
     assert_invalid(validator, measured)
+
+
+@pytest.mark.parametrize(
+    "outcome", ["TargetMet", "ImprovedOutsideTarget", "NoMaterialImprovement"]
+)
+def test_completed_outcomes_require_both_sample_phases_and_nonnull_peaks(
+    validator: Draft202012Validator, target: dict, outcome: str
+) -> None:
+    measured = measured_evidence(target, outcome=outcome)
+    validator.validate(measured)
+
+    for missing_phase, peak_name in (
+        ("Baseline", "baseline"),
+        ("Optimized", "optimized"),
+    ):
+        mutation = copy.deepcopy(measured)
+        mutation["samples"] = [
+            sample for sample in mutation["samples"] if sample["phase"] != missing_phase
+        ]
+        assert_invalid(validator, mutation)
+
+        mutation = copy.deepcopy(measured)
+        mutation["measuredPeaks"][peak_name] = None
+        assert_invalid(validator, mutation)
+
+
+def test_baseline_target_not_reached_forbids_optimized_claims(
+    validator: Draft202012Validator, target: dict
+) -> None:
+    measured = measured_evidence(target)
+    measured.update(
+        phase="Baseline",
+        status="BaselineTargetNotReached",
+        samples=[measured_sample(1, "Baseline", 70)],
+        measuredPeaks={"baseline": 70, "optimized": None},
+        outcome="BaselineTargetNotReached",
+    )
+    validator.validate(measured)
+
+    mutation = copy.deepcopy(measured)
+    mutation["samples"].append(measured_sample(2, "Optimized", 40))
+    assert_invalid(validator, mutation)
+
+    mutation = copy.deepcopy(measured)
+    mutation["measuredPeaks"]["optimized"] = 40
+    assert_invalid(validator, mutation)
+
+    mutation = copy.deepcopy(measured)
+    mutation["samples"] = []
+    assert_invalid(validator, mutation)
+
+
+@pytest.mark.parametrize("outcome", ["SafetyStop", "ManualStop"])
+@pytest.mark.parametrize("sample_phase", ["Baseline", "Optimized"])
+def test_stop_outcomes_allow_either_phase_but_peaks_must_match_samples(
+    validator: Draft202012Validator,
+    target: dict,
+    outcome: str,
+    sample_phase: str,
+) -> None:
+    measured = measured_evidence(target)
+    peak_name = sample_phase.lower()
+    other_peak = "optimized" if peak_name == "baseline" else "baseline"
+    measured.update(
+        phase=sample_phase,
+        status=outcome,
+        samples=[measured_sample(1, sample_phase, 80 if sample_phase == "Baseline" else 40)],
+        measuredPeaks={
+            "baseline": 80 if sample_phase == "Baseline" else None,
+            "optimized": 40 if sample_phase == "Optimized" else None,
+        },
+        terminationEvidence={
+            "manualStopRequested": outcome == "ManualStop",
+            "safetyStopTriggered": outcome == "SafetyStop",
+            "safetyReasons": ["pressure"] if outcome == "SafetyStop" else [],
+            "timeout": False,
+        },
+        outcome=outcome,
+    )
+    validator.validate(measured)
+
+    mutation = copy.deepcopy(measured)
+    mutation["measuredPeaks"][peak_name] = None
+    assert_invalid(validator, mutation)
+
+    mutation = copy.deepcopy(measured)
+    mutation["measuredPeaks"][other_peak] = 50
+    assert_invalid(validator, mutation)
 
 
 def test_schema_requires_independent_consistent_termination_evidence(
@@ -214,7 +344,7 @@ def test_schema_requires_independent_consistent_termination_evidence(
     safety.update(
         evidenceClassification="LAB-MEASURED",
         disclaimer="LAB-MEASURED evidence captured from the identified workshop environment.",
-        phase="Comparison",
+        phase="Baseline",
         status="SafetyStop",
         endUtc="2026-09-01T10:01:00.0000000Z",
         samples=[

@@ -10,6 +10,19 @@ $script:OutcomeValues = @(
     'Failed'
 )
 $script:SecretNamePattern = '(?i)(password|passwd|pwd|secret|token|credential|connection.?string|private.?key)'
+$script:SecretAssignmentPattern = @'
+(?ix)
+(?:
+    ["']?\s*
+    (?:
+        password|passwd|pwd|token|access[_\s-]?token|refresh[_\s-]?token|
+        client[_\s-]?secret|secret|account[_\s-]?key|shared[_\s-]?access[_\s-]?key|
+        shared[_\s-]?access[_\s-]?signature|user\s+id|uid
+    )
+    \s*["']?\s*[:=]
+)
+|(?:-----BEGIN\s+.*PRIVATE\s+KEY-----)
+'@
 
 function Resolve-CanonicalEnum {
     param(
@@ -169,7 +182,7 @@ function Assert-NoSecretField {
     )
 
     if ($InputObject -is [string]) {
-        if ($InputObject -match '(?i)(?:password|pwd)\s*=|(?:user\s+id|uid)\s*=|-----BEGIN .*PRIVATE KEY-----') {
+        if ($InputObject -match $script:SecretAssignmentPattern) {
             throw "Secret-shaped value at '$Path' is not allowed in evidence."
         }
         return
@@ -939,6 +952,37 @@ function ConvertTo-WorkshopEvidence {
             throw 'validationHash must be a SHA-256 hash.'
         }
         $Outcome = Resolve-CanonicalEnum $Outcome $script:OutcomeValues 'outcome'
+        $baselineSamples = @($Samples | Where-Object {
+            (Get-ObjectValue $_ phase -Required) -ceq 'Baseline'
+        })
+        $optimizedSamples = @($Samples | Where-Object {
+            (Get-ObjectValue $_ phase -Required) -ceq 'Optimized'
+        })
+        if ($Outcome -in @('TargetMet', 'ImprovedOutsideTarget', 'NoMaterialImprovement') -and
+            ($baselineSamples.Count -eq 0 -or $optimizedSamples.Count -eq 0 -or
+                $null -eq $baselinePeak -or $null -eq $optimizedPeak)) {
+            throw "Outcome '$Outcome' requires measured Baseline and Optimized samples and peaks."
+        }
+        if ($Outcome -ceq 'BaselineTargetNotReached' -and
+            ($phase -cne 'Baseline' -or $baselineSamples.Count -eq 0 -or
+                $optimizedSamples.Count -ne 0 -or $null -eq $baselinePeak -or
+                $null -ne $optimizedPeak)) {
+            throw 'BaselineTargetNotReached requires only Baseline samples and a null Optimized peak.'
+        }
+        if ($Outcome -in @('SafetyStop', 'ManualStop')) {
+            $terminationPhaseSamples = if ($phase -ceq 'Baseline') {
+                $baselineSamples
+            }
+            elseif ($phase -ceq 'Optimized') {
+                $optimizedSamples
+            }
+            else {
+                @()
+            }
+            if (@($terminationPhaseSamples).Count -eq 0) {
+                throw "Outcome '$Outcome' requires a sample matching termination phase '$phase'."
+            }
+        }
         if ($termination.manualStopRequested -and $Outcome -cne 'ManualStop') {
             throw 'A manual stop flag requires the ManualStop outcome.'
         }

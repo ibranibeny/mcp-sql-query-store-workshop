@@ -340,6 +340,43 @@ Describe 'New-WorkshopRunRecord' {
         } | Should -Throw
     }
 
+    It 'rejects assignment-shaped token and secret values recursively without echoing them' -ForEach @(
+        @{ Prefix = 'token'; Separator = '=' }
+        @{ Prefix = 'access_token'; Separator = ':' }
+        @{ Prefix = 'refresh_token'; Separator = '=' }
+        @{ Prefix = 'client_secret'; Separator = ':' }
+        @{ Prefix = 'secret'; Separator = '=' }
+        @{ Prefix = 'AccountKey'; Separator = '=' }
+    ) {
+        $settings = Get-TestSetting
+        $canary = 'do-not-echo-canary'
+        $settings.parameterSchedule = @(
+            'words such as token and secret are safe in prose',
+            @("$Prefix$Separator$canary")
+        )
+        $caught = $null
+        try {
+            New-WorkshopRunRecord -Phase Baseline -Status Planned `
+                -EvidenceClassification TARGET -FrozenSettings $settings `
+                -EnvironmentFingerprint (Get-TestEnvironment) -TargetBands (Get-TestTargetBand)
+        }
+        catch {
+            $caught = $_
+        }
+        $caught | Should -Not -BeNullOrEmpty
+        $caught.Exception.Message | Should -Not -Match $canary
+    }
+
+    It 'allows credential words in prose when they are not assignment-shaped' {
+        $settings = Get-TestSetting
+        $settings.resourcePool = 'Token rotation and password guidance are documented here'
+        {
+            New-WorkshopRunRecord -Phase Baseline -Status Planned `
+                -EvidenceClassification TARGET -FrozenSettings $settings `
+                -EnvironmentFingerprint (Get-TestEnvironment) -TargetBands (Get-TestTargetBand)
+        } | Should -Not -Throw
+    }
+
     It 'accepts a single frozen parameter schedule entry' {
         $settings = Get-TestSetting
         $settings.parameterSchedule = @('2025-01-01/2025-02-01')
@@ -412,6 +449,7 @@ Describe 'ConvertTo-WorkshopEvidence' {
 
     It 'requires independent safety termination evidence for SafetyStop' {
         $run = Get-MeasuredRun
+        $run.Phase = 'Optimized'
         $run.Status = 'SafetyStop'
         $termination = [ordered]@{
             manualStopRequested = $false
@@ -434,6 +472,7 @@ Describe 'ConvertTo-WorkshopEvidence' {
 
     It 'requires independent manual termination evidence for ManualStop' {
         $run = Get-MeasuredRun
+        $run.Phase = 'Optimized'
         $run.Status = 'ManualStop'
         $termination = [ordered]@{
             manualStopRequested = $true
@@ -549,6 +588,82 @@ Describe 'ConvertTo-WorkshopEvidence' {
                 -RequestSamples (Get-ValidRequestSample) -Validation (Get-ValidValidation) `
                 -Outcome TargetMet
         } | Should -Throw
+    }
+
+    It 'requires both baseline and optimized samples for measured comparison outcomes' -ForEach @(
+        @{ KeepPhase = 'Baseline'; Outcome = 'TargetMet' }
+        @{ KeepPhase = 'Optimized'; Outcome = 'TargetMet' }
+        @{ KeepPhase = 'Baseline'; Outcome = 'ImprovedOutsideTarget' }
+        @{ KeepPhase = 'Optimized'; Outcome = 'NoMaterialImprovement' }
+    ) {
+        $run = Get-MeasuredRun
+        $samples = @(Get-ValidSample | Where-Object phase -eq $KeepPhase)
+        $samples[0].sequence = 1
+        {
+            ConvertTo-WorkshopEvidence -RunRecord $run -Samples $samples `
+                -RequestSamples @() -Validation (Get-ValidValidation) -Outcome $Outcome
+        } | Should -Throw
+    }
+
+    It 'computes each measured peak as the exact maximum sample utilization' {
+        $samples = @(
+            [ordered]@{ sequence = 1; timestampUtc = '2026-09-01T10:00:05.0000000Z'; phase = 'Baseline'; grantedKb = 750; totalKb = 1000; grantUtilizationPercent = 75; hostUsedPercent = 70; hostAvailableMB = 12000; processPhysicalLow = $false; processVirtualLow = $false }
+            [ordered]@{ sequence = 2; timestampUtc = '2026-09-01T10:00:10.0000000Z'; phase = 'Optimized'; grantedKb = 350; totalKb = 1000; grantUtilizationPercent = 35; hostUsedPercent = 70; hostAvailableMB = 12000; processPhysicalLow = $false; processVirtualLow = $false }
+            [ordered]@{ sequence = 3; timestampUtc = '2026-09-01T10:00:15.0000000Z'; phase = 'Baseline'; grantedKb = 850; totalKb = 1000; grantUtilizationPercent = 85; hostUsedPercent = 70; hostAvailableMB = 12000; processPhysicalLow = $false; processVirtualLow = $false }
+            [ordered]@{ sequence = 4; timestampUtc = '2026-09-01T10:00:20.0000000Z'; phase = 'Optimized'; grantedKb = 450; totalKb = 1000; grantUtilizationPercent = 45; hostUsedPercent = 70; hostAvailableMB = 12000; processPhysicalLow = $false; processVirtualLow = $false }
+        )
+
+        $result = ConvertTo-WorkshopEvidence -RunRecord (Get-MeasuredRun) -Samples $samples `
+            -RequestSamples @() -Validation (Get-ValidValidation) -Outcome TargetMet
+
+        $result.measuredPeaks.baseline | Should -BeExactly ([decimal]85)
+        $result.measuredPeaks.optimized | Should -BeExactly ([decimal]45)
+    }
+
+    It 'allows BaselineTargetNotReached only with baseline samples and a null optimized peak' {
+        $run = Get-MeasuredRun
+        $run.Phase = 'Baseline'
+        $run.Status = 'BaselineTargetNotReached'
+        $samples = @(Get-ValidSample | Where-Object phase -eq 'Baseline')
+        $samples[0].grantedKb = 700
+        $samples[0].grantUtilizationPercent = 70
+
+        $result = ConvertTo-WorkshopEvidence -RunRecord $run -Samples $samples `
+            -RequestSamples @() -Validation (Get-ValidValidation) `
+            -Outcome BaselineTargetNotReached
+        $result.measuredPeaks.baseline | Should -BeExactly ([decimal]70)
+        $result.measuredPeaks.optimized | Should -BeNullOrEmpty
+
+        { ConvertTo-WorkshopEvidence -RunRecord $run -Samples (Get-ValidSample) `
+                -RequestSamples @() -Validation (Get-ValidValidation) `
+                -Outcome BaselineTargetNotReached } | Should -Throw
+    }
+
+    It 'allows independently evidenced stops in either sampled phase' -ForEach @(
+        @{ Phase = 'Baseline'; Outcome = 'SafetyStop' }
+        @{ Phase = 'Optimized'; Outcome = 'SafetyStop' }
+        @{ Phase = 'Baseline'; Outcome = 'ManualStop' }
+        @{ Phase = 'Optimized'; Outcome = 'ManualStop' }
+    ) {
+        $run = Get-MeasuredRun
+        $run.Phase = $Phase
+        $run.Status = $Outcome
+        $samples = @(Get-ValidSample | Where-Object phase -eq $Phase)
+        $samples[0].sequence = 1
+        $termination = [ordered]@{
+            manualStopRequested = $Outcome -eq 'ManualStop'
+            safetyStopTriggered = $Outcome -eq 'SafetyStop'
+            safetyReasons = @(if ($Outcome -eq 'SafetyStop') { 'pressure' })
+            timeout = $false
+        }
+
+        $result = ConvertTo-WorkshopEvidence -RunRecord $run -Samples $samples `
+            -RequestSamples @() -Validation (Get-ValidValidation) `
+            -TerminationEvidence $termination -Outcome $Outcome
+
+        $result.measuredPeaks.$($Phase.ToLowerInvariant()) | Should -Not -BeNullOrEmpty
+        $otherPhase = if ($Phase -eq 'Baseline') { 'optimized' } else { 'baseline' }
+        $result.measuredPeaks.$otherPhase | Should -BeNullOrEmpty
     }
 
     It 'rejects mutated run phase and status values before serialization' {
