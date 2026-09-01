@@ -26,6 +26,13 @@ DECLARE @MinimumFreeSpaceValue sql_variant = SESSION_CONTEXT(N'MinimumFreeSpaceM
 DECLARE @MinimumFreeSpaceMB bigint = COALESCE(TRY_CONVERT(bigint, @MinimumFreeSpaceValue), 0);
 DECLARE @WorkshopMarker uniqueidentifier = '68A70D6E-62D8-4A77-8F0A-9DA7934DBA7C';
 DECLARE @WorkshopSchemaVersion int = 1;
+DECLARE @WorkshopSetupName sysname = N'MCP SQL Query Store Workshop';
+DECLARE @WorkshopSetupHash varbinary(32) = 0xADA06F206D3DB321527A5AAB390FC814E28EBB59791967EB99841BF669E1B16B;
+DECLARE @ServerMarkerId uniqueidentifier = NULL;
+DECLARE @DatabaseMarkerId uniqueidentifier = NULL;
+DECLARE @DatabaseSchemaVersion int = NULL;
+DECLARE @DatabaseSetupName sysname = NULL;
+DECLARE @DatabaseSetupHash varbinary(32) = NULL;
 
 IF @PreflightPhase IS NULL OR @PreflightPhase NOT IN (N'INFRASTRUCTURE', N'LAB')
     THROW 51000, 'PreflightPhase must be Infrastructure or Lab.', 1;
@@ -124,37 +131,37 @@ BEGIN
     IF DB_ID(@DatabaseName) IS NULL
         THROW 51013, 'Lab preflight requires the target database to exist.', 1;
 
-    IF NOT EXISTS
-    (
-        SELECT 1
+        SELECT @ServerMarkerId = TRY_CONVERT(uniqueidentifier, value)
         FROM master.sys.extended_properties
-        WHERE class = 0
-          AND name = N'MCP_SQL_WORKSHOP'
-          AND TRY_CONVERT(uniqueidentifier, value) = @WorkshopMarker
-    )
+        WHERE class = 0 AND name = N'MCP_SQL_WORKSHOP';
+
+        IF @ServerMarkerId <> @WorkshopMarker
         THROW 51014, 'The SQL instance workshop marker is absent or invalid.', 1;
 
-    DECLARE @DatabaseMarkerValid bit = 0;
     DECLARE @MarkerSql nvarchar(max) =
         N'USE ' + QUOTENAME(@DatabaseName) + N';
           IF OBJECT_ID(N''lab.WorkshopMarker'', N''U'') IS NOT NULL
-             AND EXISTS
-             (
-                 SELECT 1
-                 FROM lab.WorkshopMarker
-                 WHERE MarkerId = @MarkerId
-                   AND SchemaVersion = @SchemaVersion
-             )
-              SET @Valid = 1;';
+                      SELECT
+                            @DatabaseMarkerId = MarkerId,
+                            @DatabaseSchemaVersion = SchemaVersion,
+                            @DatabaseSetupName = SetupName,
+                            @DatabaseSetupHash = SetupHash
+                    FROM lab.WorkshopMarker
+                    ORDER BY MarkerId, SchemaVersion, SetupName, SetupHash;';
 
     EXEC sys.sp_executesql
         @MarkerSql,
-        N'@MarkerId uniqueidentifier, @SchemaVersion int, @Valid bit OUTPUT',
-        @MarkerId = @WorkshopMarker,
-        @SchemaVersion = @WorkshopSchemaVersion,
-        @Valid = @DatabaseMarkerValid OUTPUT;
+                N'@DatabaseMarkerId uniqueidentifier OUTPUT, @DatabaseSchemaVersion int OUTPUT,
+                    @DatabaseSetupName sysname OUTPUT, @DatabaseSetupHash varbinary(32) OUTPUT',
+                @DatabaseMarkerId = @DatabaseMarkerId OUTPUT,
+                @DatabaseSchemaVersion = @DatabaseSchemaVersion OUTPUT,
+                @DatabaseSetupName = @DatabaseSetupName OUTPUT,
+                @DatabaseSetupHash = @DatabaseSetupHash OUTPUT;
 
-    IF @DatabaseMarkerValid <> 1
+        IF @DatabaseMarkerId <> @WorkshopMarker
+             OR @DatabaseSchemaVersion <> @WorkshopSchemaVersion
+             OR @DatabaseSetupName <> @WorkshopSetupName
+             OR @DatabaseSetupHash <> @WorkshopSetupHash
         THROW 51015, 'The target database workshop marker is absent or invalid.', 1;
 END;
 
@@ -171,5 +178,10 @@ SELECT N'PreflightPassed' AS PreflightStatus,
        @ProductMajorVersion AS ProductMajorVersion,
        @Edition AS Edition,
        @PhysicalMemoryMB AS PhysicalMemoryMB,
-       @DatabaseName AS DatabaseName;
+    @DatabaseName AS DatabaseName,
+    @DatabaseMarkerId AS MarkerId,
+    @DatabaseSchemaVersion AS SchemaVersion,
+    @DatabaseSetupName AS SetupName,
+    LOWER(CONVERT(varchar(64), @DatabaseSetupHash, 2)) AS SetupHash,
+    @ServerMarkerId AS ServerMarkerId;
 GO

@@ -1155,6 +1155,10 @@ BEGIN
         CONVERT(bigint, counters.TargetServerMemoryKB) AS TargetServerMemoryKB,
         CONVERT(bit, host.system_low_memory_signal_state) AS SystemLowMemorySignal,
         CONVERT(bit, process.process_physical_memory_low) AS ProcessLowMemorySignal,
+        CONVERT(bit, process.process_physical_memory_low) AS ProcessPhysicalMemoryLow,
+        CONVERT(bit, process.process_virtual_memory_low) AS ProcessVirtualMemoryLow,
+        CONVERT(bit, host.system_low_memory_signal_state) AS SystemPhysicalMemoryLow,
+        CONVERT(bit, host.system_high_memory_signal_state) AS SystemPhysicalMemoryHigh,
         SYSUTCDATETIME() AS SampledAtUtc
     FROM sys.dm_resource_governor_resource_pools AS rp
     INNER JOIN sys.dm_exec_query_resource_semaphores AS rs

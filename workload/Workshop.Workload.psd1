@@ -22,6 +22,7 @@
         'Test-WorkshopFingerprintMatch'
         'Test-WorkshopPreflight'
         'Invoke-WorkshopExperiment'
+        'Invoke-WorkshopStartup'
         'Get-WorkshopKillPlan'
         'Export-WorkshopEvidenceFile'
         'Resolve-WorkshopSqlClientProvider'

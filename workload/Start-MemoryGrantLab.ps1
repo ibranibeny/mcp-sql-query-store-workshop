@@ -39,17 +39,14 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 Import-Module (Join-Path $PSScriptRoot 'Workshop.Workload.psd1') -Force
 
-if (-not $OperationSet) {
-    if ([string]::IsNullOrWhiteSpace($Server) -or $null -eq $Credential) {
+if ($PSCmdlet.ShouldProcess($RunId, 'Start bounded memory-grant workshop lab')) {
+    if (-not $OperationSet -and ([string]::IsNullOrWhiteSpace($Server) -or $null -eq $Credential)) {
         throw 'Server and Credential are required unless a complete test OperationSet is injected.'
     }
-    $OperationSet = Get-WorkshopSqlOperationSet -Server $Server -Database $Database `
-        -Credential $Credential -HostNameInCertificate $HostNameInCertificate
-}
-
-if ($PSCmdlet.ShouldProcess($RunId, 'Start bounded memory-grant workshop lab')) {
-    Invoke-WorkshopExperiment -RunId $RunId -OperationSet $OperationSet `
+    $operationFactory = if ($OperationSet) { { $OperationSet }.GetNewClosure() } else { $null }
+    Invoke-WorkshopStartup -RunId $RunId -Server $Server -Database $Database `
+        -Credential $Credential -HostNameInCertificate $HostNameInCertificate `
+        -OperationFactory $operationFactory `
         -MaximumWorkers $MaximumWorkers -MaximumDurationSeconds $MaximumDurationSeconds `
-        -SampleIntervalSeconds $SampleIntervalSeconds -WorkerRampSeconds $WorkerRampSeconds `
-        -Confirm:$false
+        -SampleIntervalSeconds $SampleIntervalSeconds -WorkerRampSeconds $WorkerRampSeconds
 }

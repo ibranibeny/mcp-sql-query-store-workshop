@@ -457,6 +457,14 @@ function Assert-EnvironmentFingerprint {
     if ('sqlClientProvider' -in $actualNames -or 'warnings' -in $actualNames) {
         $names += @('sqlClientProvider', 'warnings')
     }
+    $markerNames = @(
+        'markerId', 'markerSchemaVersion', 'markerSetupName', 'markerSetupHash',
+        'serverMarkerId', 'configurationFingerprint'
+    )
+    if (@($actualNames | Where-Object { $_ -in $markerNames }).Count -gt 0) {
+        $names += $markerNames
+    }
+    if ('captureStatus' -in $actualNames) { $names += 'captureStatus' }
     Assert-ExactProperty -InputObject $Environment -RequiredNames $names -Context 'Environment fingerprint'
     Assert-NoSecretField -InputObject $Environment
     foreach ($name in @('sqlVersion', 'sqlEdition')) {
@@ -484,6 +492,27 @@ function Assert-EnvironmentFingerprint {
         foreach ($warning in $warnings) {
             if ($warning -isnot [string] -or [string]::IsNullOrWhiteSpace($warning) -or $warning.Length -gt 256) {
                 throw 'Environment warnings must be nonempty strings no longer than 256 characters.'
+            }
+        }
+    }
+    if ('captureStatus' -in $names -and
+        (Get-ObjectValue $Environment captureStatus -Required) -cnotin @('Captured', 'Unavailable')) {
+        throw 'Environment captureStatus must be Captured or Unavailable.'
+    }
+    if ($markerNames[0] -in $names) {
+        foreach ($name in @('markerId', 'serverMarkerId')) {
+            $marker = [guid]::Empty
+            if (-not [guid]::TryParseExact([string](Get-ObjectValue $Environment $name -Required), 'D', [ref]$marker)) {
+                throw "Environment field '$name' must be a canonical GUID."
+            }
+        }
+        if ((Get-ObjectValue $Environment markerSchemaVersion -Required) -ne 1 -or
+            (Get-ObjectValue $Environment markerSetupName -Required) -cne 'MCP SQL Query Store Workshop') {
+            throw 'Environment marker version and setup name are invalid.'
+        }
+        foreach ($name in @('markerSetupHash', 'configurationFingerprint')) {
+            if ((Get-ObjectValue $Environment $name -Required) -cnotmatch '^[a-f0-9]{64}$') {
+                throw "Environment field '$name' must be a lowercase SHA-256 hash."
             }
         }
     }
@@ -1496,6 +1525,11 @@ function Get-WorkshopConfigurationFingerprint {
     param([Parameter(Mandatory)][object] $Snapshot)
 
     $configuration = [ordered]@{
+        MarkerId = [string] $Snapshot.MarkerId
+        SchemaVersion = [int] $Snapshot.SchemaVersion
+        SetupName = [string] $Snapshot.SetupName
+        SetupHash = [string] $Snapshot.SetupHash
+        ServerMarkerId = [string] $Snapshot.ServerMarkerId
         SqlMajorVersion = [int] $Snapshot.SqlMajorVersion
         SqlProductVersion = [string] $Snapshot.SqlProductVersion
         SqlEdition = [string] $Snapshot.SqlEdition
@@ -1534,7 +1568,19 @@ function Test-WorkshopPreflight {
 
     $requiredHashes = @('DataHash', 'IndexStatisticsHash', 'ProcedureHash')
     $failures = [System.Collections.Generic.List[string]]::new()
-    if (-not $Snapshot.MarkerValid) { $failures.Add('The workshop marker is invalid.') }
+    $expectedMarker = '68a70d6e-62d8-4a77-8f0a-9da7934dba7c'
+    $expectedSetupHash = 'ada06f206d3db321527a5aab390fc814e28ebb59791967eb99841bf669e1b16b'
+    try {
+        if (-not (Get-ObjectValue $Snapshot MarkerValid -Required) -or
+            [string](Get-ObjectValue $Snapshot MarkerId -Required) -cne $expectedMarker -or
+            [int](Get-ObjectValue $Snapshot SchemaVersion -Required) -ne 1 -or
+            [string](Get-ObjectValue $Snapshot SetupName -Required) -cne 'MCP SQL Query Store Workshop' -or
+            [string](Get-ObjectValue $Snapshot SetupHash -Required) -cne $expectedSetupHash -or
+            [string](Get-ObjectValue $Snapshot ServerMarkerId -Required) -cne $expectedMarker) {
+            $failures.Add('The complete workshop marker contract is invalid.')
+        }
+    }
+    catch { $failures.Add('The complete workshop marker contract is missing or invalid.') }
     if ([int] $Snapshot.SqlMajorVersion -ne 16) { $failures.Add('SQL Server major version 16 is required.') }
     if ([string]::IsNullOrWhiteSpace([string] $Snapshot.SqlProductVersion)) {
         $failures.Add('The concrete SQL product version is required.')
@@ -1612,7 +1658,7 @@ function Test-WorkshopPreflight {
 function Assert-WorkshopOperationSet {
     param([Parameter(Mandatory)][System.Collections.IDictionary] $OperationSet)
 
-    $required = @('OpenConnection', 'StartWorker', 'TestWorkerHealth', 'Sample', 'StopWorker', 'KillTagged', 'Persist', 'Delay', 'Clock', 'Export')
+    $required = @('OpenConnection', 'CaptureEnvironment', 'InitializePersistence', 'StartWorker', 'TestWorkerHealth', 'Sample', 'StopWorker', 'KillTagged', 'Persist', 'Delay', 'Clock', 'Export')
     $missing = @($required | Where-Object { -not $OperationSet.Contains($_) -or $OperationSet[$_] -isnot [scriptblock] })
     if ($missing.Count -gt 0) {
         throw "OperationSet is missing scriptblock operations: $($missing -join ', ')."
@@ -1746,6 +1792,13 @@ function Build-WorkshopExperimentResult {
         sqlVersion = [string]$Preflight.SqlProductVersion
         sqlEdition = [string]$Preflight.SqlEdition
         physicalMemoryMB = [int64]$Preflight.PhysicalMemoryMB
+        captureStatus = 'Captured'
+        markerId = [string]$Preflight.MarkerId
+        markerSchemaVersion = [int]$Preflight.SchemaVersion
+        markerSetupName = [string]$Preflight.SetupName
+        markerSetupHash = [string]$Preflight.SetupHash
+        serverMarkerId = [string]$Preflight.ServerMarkerId
+        configurationFingerprint = [string]$Preflight.CanonicalConfigurationFingerprint
     }
     if ($Preflight.psobject.Properties['SqlClientProvider'] -or
         $Preflight.psobject.Properties['EnvironmentWarnings']) {
@@ -1872,8 +1925,6 @@ function Invoke-WorkshopExperiment {
     Assert-WorkshopOperationSet $OperationSet
     if (-not $PSCmdlet.ShouldProcess($RunId, 'Run bounded workshop memory-grant experiment')) { return }
 
-    $preflight = & $OperationSet.OpenConnection 'Preflight'
-    [void] (Test-WorkshopPreflight -Snapshot $preflight)
     $scheduleObjects = @(Get-WorkshopParameterSchedule)
     $schedule = @($scheduleObjects | ForEach-Object { ConvertTo-Json $_ -Compress })
     $scheduleJson = ConvertTo-Json $schedule -Compress
@@ -1881,7 +1932,7 @@ function Invoke-WorkshopExperiment {
     $samples = [System.Collections.Generic.List[object]]::new()
     $requestSamples = [System.Collections.Generic.List[object]]::new()
     $trials = [System.Collections.Generic.List[object]]::new()
-    $start = [datetimeoffset] (& $OperationSet.Clock)
+    $start = [datetimeoffset]::UtcNow
     $lastRamp = $null
     $consecutive = 0
     $outcome = $null
@@ -1892,13 +1943,15 @@ function Invoke-WorkshopExperiment {
     $safetyReasons = @()
     $timeout = $false
     $result = $null
-    $operationState = [pscustomobject]@{ Stage = 'StartWorker' }
+    $operationState = [pscustomobject]@{ Stage = 'OpenConnection' }
     $sampleClockState = [pscustomobject]@{ Last = $start.AddTicks(-1) }
     $workerCountStarted = 0
     $healthState = [pscustomobject]@{ ConsecutiveFailures = 0 }
     $deadline = $start.AddSeconds($MaximumDurationSeconds)
+    $preflight = $null
+    $runtimeState = [pscustomobject]@{ Deadline = $deadline; Preflight = $null }
     $getRemainingSeconds = {
-        $remaining = ($deadline - [datetimeoffset] (& $OperationSet.Clock)).TotalSeconds
+        $remaining = ($runtimeState.Deadline - [datetimeoffset] (& $OperationSet.Clock)).TotalSeconds
         if ($remaining -le 0) { return 0 }
         return [math]::Max(1, [int][math]::Ceiling($remaining))
     }.GetNewClosure()
@@ -1922,7 +1975,7 @@ function Invoke-WorkshopExperiment {
     }.GetNewClosure()
     $assertFrozenFingerprint = {
         $actual = & $invokeBoundedSample 'Optimized' 'Fingerprint' $null $null
-        if ($null -eq $actual -or -not (Test-WorkshopFingerprintMatch -Expected $preflight -Actual $actual)) {
+        if ($null -eq $actual -or -not (Test-WorkshopFingerprintMatch -Expected $runtimeState.Preflight -Actual $actual)) {
             throw 'Optimized phase rejected because configuration or data drift was detected.'
         }
     }.GetNewClosure()
@@ -1962,6 +2015,19 @@ function Invoke-WorkshopExperiment {
         return $sample
     }.GetNewClosure()
     try {
+        $start = [datetimeoffset] (& $OperationSet.Clock)
+        $sampleClockState.Last = $start.AddTicks(-1)
+        $deadline = $start.AddSeconds($MaximumDurationSeconds)
+        $runtimeState.Deadline = $deadline
+        $operationState.Stage = 'OpenConnection'
+        [void](& $OperationSet.OpenConnection 'Preflight')
+        $operationState.Stage = 'CaptureEnvironment'
+        $preflight = & $OperationSet.CaptureEnvironment
+        $runtimeState.Preflight = $preflight
+        $operationState.Stage = 'Preflight'
+        [void] (Test-WorkshopPreflight -Snapshot $preflight)
+        $operationState.Stage = 'InitializePersistence'
+        [void](& $OperationSet.InitializePersistence)
         $operationState.Stage = 'StartWorker'
         $applicationName = Get-WorkshopApplicationName -RunId $RunId -Phase Baseline -Worker 1
         $workerHandle = & $OperationSet.StartWorker $RunId 'Baseline' 1 $applicationName $schedule $deadline
@@ -2263,17 +2329,34 @@ function Invoke-WorkshopExperiment {
                 $completedAt = [datetimeoffset] (& $OperationSet.Clock)
                 if ($completedAt -lt $start) { $completedAt = $start }
                 if ($completedAt -lt $sampleClockState.Last) { $completedAt = $sampleClockState.Last }
-                $failure = ConvertTo-WorkshopFailureEvidence -Code 'WORKSHOP_OPERATION_FAILED' `
+                $failureCode = switch ($operationState.Stage) {
+                    'OpenConnection' { 'CONNECTION_OPEN_FAILED' }
+                    'CaptureEnvironment' { 'ENVIRONMENT_CAPTURE_FAILED' }
+                    'Preflight' { 'PREFLIGHT_FAILED' }
+                    'InitializePersistence' { 'PERSISTENCE_INITIALIZATION_FAILED' }
+                    'StartWorker' { 'WORKER_START_FAILED' }
+                    default { 'WORKSHOP_OPERATION_FAILED' }
+                }
+                $failure = ConvertTo-WorkshopFailureEvidence -Code $failureCode `
                     -Stage $operationState.Stage -Message $originalText `
                     -StartupFailure ($samples.Count -eq 0)
-                $result = Build-WorkshopExperimentResult -RunId $RunId -Outcome Failed `
-                    -TerminalPhase $terminalPhase -FrozenSettings $frozen -Preflight $preflight `
-                    -Samples $samples.ToArray() -RequestSamples $requestSamples.ToArray() -Trials $trials.ToArray() `
-                    -StartedAtUtc $start -CompletedAtUtc $completedAt `
-                    -ManualStopRequested $false -SafetyStopTriggered $false -SafetyReasons @() `
-                    -Timeout $false -Workers $workerCountStarted -Schedule $schedule `
-                    -MaximumDurationSeconds $MaximumDurationSeconds -SampleIntervalSeconds $SampleIntervalSeconds `
-                    -WorkerRampSeconds $WorkerRampSeconds -Failure $failure
+                if ($null -eq $preflight -or
+                    ($samples.Count -eq 0 -and $operationState.Stage -in @('OpenConnection','CaptureEnvironment','Preflight','InitializePersistence'))) {
+                    $result = Build-WorkshopStartupFailureResult -RunId $RunId -Failure $failure `
+                        -StartedAtUtc $start -CompletedAtUtc $completedAt -MaximumWorkers $MaximumWorkers `
+                        -MaximumDurationSeconds $MaximumDurationSeconds -SampleIntervalSeconds $SampleIntervalSeconds `
+                        -WorkerRampSeconds $WorkerRampSeconds
+                }
+                else {
+                    $result = Build-WorkshopExperimentResult -RunId $RunId -Outcome Failed `
+                        -TerminalPhase $terminalPhase -FrozenSettings $frozen -Preflight $preflight `
+                        -Samples $samples.ToArray() -RequestSamples $requestSamples.ToArray() -Trials $trials.ToArray() `
+                        -StartedAtUtc $start -CompletedAtUtc $completedAt `
+                        -ManualStopRequested $false -SafetyStopTriggered $false -SafetyReasons @() `
+                        -Timeout $false -Workers $workerCountStarted -Schedule $schedule `
+                        -MaximumDurationSeconds $MaximumDurationSeconds -SampleIntervalSeconds $SampleIntervalSeconds `
+                        -WorkerRampSeconds $WorkerRampSeconds -Failure $failure
+                }
             }
             catch {
                 $finalizationText = [string]$_.Exception.Message
@@ -2299,8 +2382,10 @@ function Invoke-WorkshopExperiment {
                 $persistenceFailure = ConvertTo-WorkshopFailureEvidence -Code 'PERSISTENCE_FAILED' `
                     -Stage 'Persistence' -Message $_.Exception.Message `
                     -StartupFailure ($samples.Count -eq 0)
-                Copy-WorkshopFailureEvidence $result.TerminationEvidence $persistenceFailure
-                Copy-WorkshopFailureEvidence $result.Evidence.terminationEvidence $persistenceFailure
+                if ($samples.Count -gt 0) {
+                    Copy-WorkshopFailureEvidence $result.TerminationEvidence $persistenceFailure
+                    Copy-WorkshopFailureEvidence $result.Evidence.terminationEvidence $persistenceFailure
+                }
             }
             try {
                 $operationState.Stage = 'Export'
@@ -2335,6 +2420,122 @@ function Invoke-WorkshopExperiment {
             try { if ($worker -is [System.IDisposable] -or $worker.psobject.Methods['Dispose']) { $worker.Dispose() } } catch { Write-Verbose 'Worker disposal failed during cleanup.' }
         }
         if ($workers.Count -gt 0) { [void] (& $OperationSet.KillTagged $RunId) }
+    }
+}
+
+function Build-WorkshopStartupFailureResult {
+    param(
+        [Parameter(Mandatory)][guid]$RunId,
+        [Parameter(Mandatory)][object]$Failure,
+        [Parameter(Mandatory)][datetimeoffset]$StartedAtUtc,
+        [Parameter(Mandatory)][datetimeoffset]$CompletedAtUtc,
+        [Parameter(Mandatory)][int]$MaximumWorkers,
+        [Parameter(Mandatory)][int]$MaximumDurationSeconds,
+        [Parameter(Mandatory)][int]$SampleIntervalSeconds,
+        [Parameter(Mandatory)][int]$WorkerRampSeconds
+    )
+
+    $schedule = @(Get-WorkshopParameterSchedule | ForEach-Object { ConvertTo-Json $_ -Compress })
+    $scheduleJson = ConvertTo-Json $schedule -Compress
+    $unavailableHash = Get-Sha256 'UNAVAILABLE-BEFORE-SQL-ENVIRONMENT-CAPTURE'
+    $settings = [ordered]@{
+        workers = [math]::Max(1, $MaximumWorkers)
+        maximumDurationSeconds = $MaximumDurationSeconds
+        sampleIntervalSeconds = $SampleIntervalSeconds
+        workerRampSeconds = $WorkerRampSeconds
+        resourcePool = 'mcp_sql_workshop_pool'
+        workloadGroup = 'mcp_sql_workshop_group'
+        maxServerMemoryMB = 49152
+        databaseScopedConfigurationHash = $unavailableHash
+        dataHash = $unavailableHash
+        indexStatisticsHash = $unavailableHash
+        procedureHash = $unavailableHash
+        validationBatchHash = $unavailableHash
+        parameterSchedule = $schedule
+        parameterScheduleHash = Get-Sha256 $scheduleJson
+    }
+    $environment = [ordered]@{
+        sqlVersion = 'Unavailable before SQL environment capture'
+        sqlEdition = 'Unavailable before SQL environment capture'
+        physicalMemoryMB = 1
+        captureStatus = 'Unavailable'
+    }
+    $runRecord = New-WorkshopRunRecord -RunId $RunId -Phase Baseline -Status Failed `
+        -EvidenceClassification LAB-MEASURED -FrozenSettings $settings `
+        -EnvironmentFingerprint $environment -TargetBands ([ordered]@{
+            baseline = [ordered]@{ minimum = 75; maximum = 85 }
+            optimized = [ordered]@{ minimum = 35; maximum = 45 }
+        }) -StartUtc $StartedAtUtc -EndUtc $CompletedAtUtc
+    $termination = [ordered]@{
+        manualStopRequested = $false
+        safetyStopTriggered = $false
+        safetyReasons = @()
+        timeout = $false
+        failure = $Failure
+    }
+    $evidence = ConvertTo-WorkshopEvidence -RunRecord $runRecord -Samples @() -RequestSamples @() `
+        -Trials @() -Validation $null -Outcome Failed -TerminationEvidence $termination
+    return [pscustomobject]@{
+        RunId = $RunId
+        Outcome = 'Failed'
+        Phase = 'Baseline'
+        RunStatus = 'Failed'
+        StartedAtUtc = $StartedAtUtc
+        CompletedAtUtc = $CompletedAtUtc
+        FrozenSettings = [pscustomobject]$settings
+        Samples = @()
+        RequestSamples = @()
+        Trials = @()
+        Validation = $null
+        TerminationEvidence = [pscustomobject]$termination
+        Evidence = $evidence
+    }
+}
+
+function Invoke-WorkshopStartup {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][guid]$RunId,
+        [Parameter()][string]$Server,
+        [Parameter()][string]$Database = 'AdventureWorks2022',
+        [Parameter()][pscredential]$Credential,
+        [Parameter()][string]$HostNameInCertificate = $Server,
+        [Parameter()][ValidateRange(1,4)][int]$MaximumWorkers = 4,
+        [Parameter()][ValidateRange(60,600)][int]$MaximumDurationSeconds = 600,
+        [Parameter()][ValidateRange(5,30)][int]$SampleIntervalSeconds = 5,
+        [Parameter()][ValidateRange(20,60)][int]$WorkerRampSeconds = 20,
+        [Parameter()][string]$RepositoryRoot = (Split-Path -Parent $PSScriptRoot),
+        [Parameter()][scriptblock]$OperationFactory,
+        [Parameter()][scriptblock]$SemanticValidator
+    )
+
+    $startedAt = [datetimeoffset]::UtcNow
+    try {
+        if ($null -eq $OperationFactory) {
+            $operationSet = Get-WorkshopSqlOperationSet -Server $Server -Database $Database `
+                -Credential $Credential -HostNameInCertificate $HostNameInCertificate
+        }
+        else {
+            $operationSet = & $OperationFactory
+        }
+        return Invoke-WorkshopExperiment -RunId $RunId -OperationSet $operationSet `
+            -MaximumWorkers $MaximumWorkers -MaximumDurationSeconds $MaximumDurationSeconds `
+            -SampleIntervalSeconds $SampleIntervalSeconds -WorkerRampSeconds $WorkerRampSeconds -Confirm:$false
+    }
+    catch {
+        $completedAt = [datetimeoffset]::UtcNow
+        $failure = ConvertTo-WorkshopFailureEvidence -Code 'PROVIDER_RESOLUTION_FAILED' `
+            -Stage 'ProviderResolution' -Message $_.Exception.Message -StartupFailure $true
+        $result = Build-WorkshopStartupFailureResult -RunId $RunId -Failure $failure `
+            -StartedAtUtc $startedAt -CompletedAtUtc $completedAt -MaximumWorkers $MaximumWorkers `
+            -MaximumDurationSeconds $MaximumDurationSeconds -SampleIntervalSeconds $SampleIntervalSeconds `
+            -WorkerRampSeconds $WorkerRampSeconds
+        Export-WorkshopEvidenceFile -RunId $RunId.ToString('D') -Evidence $result.Evidence `
+            -RepositoryRoot $RepositoryRoot -SemanticValidator $SemanticValidator -Confirm:$false | Out-Null
+        return $result
+    }
+    finally {
+        Write-Verbose "Startup envelope completed for run $($RunId.ToString('D'))."
     }
 }
 
@@ -2750,8 +2951,18 @@ FROM lab.FactSales
 GROUP BY (SyntheticSalesID - 1) / 10000;
 
 SELECT
-    CONVERT(bit, CASE WHEN DB_NAME() = N'AdventureWorks2022' AND EXISTS
-        (SELECT 1 FROM lab.WorkshopMarker WHERE MarkerId = '68A70D6E-62D8-4A77-8F0A-9DA7934DBA7C') THEN 1 ELSE 0 END) AS MarkerValid,
+    CONVERT(bit, CASE WHEN DB_NAME() = N'AdventureWorks2022'
+        AND marker.MarkerId = '68A70D6E-62D8-4A77-8F0A-9DA7934DBA7C'
+        AND marker.SchemaVersion = 1
+        AND marker.SetupName = N'MCP SQL Query Store Workshop'
+        AND marker.SetupHash = 0xADA06F206D3DB321527A5AAB390FC814E28EBB59791967EB99841BF669E1B16B
+        AND serverMarker.ServerMarkerId = '68A70D6E-62D8-4A77-8F0A-9DA7934DBA7C'
+        THEN 1 ELSE 0 END) AS MarkerValid,
+    LOWER(CONVERT(char(36), marker.MarkerId)) AS MarkerId,
+    CONVERT(int, marker.SchemaVersion) AS SchemaVersion,
+    CONVERT(nvarchar(128), marker.SetupName) AS SetupName,
+    LOWER(CONVERT(varchar(64), marker.SetupHash, 2)) AS SetupHash,
+    LOWER(CONVERT(char(36), serverMarker.ServerMarkerId)) AS ServerMarkerId,
     CONVERT(int, SERVERPROPERTY('ProductMajorVersion')) AS SqlMajorVersion,
     CONVERT(nvarchar(128), SERVERPROPERTY('ProductVersion')) AS SqlProductVersion,
     CONVERT(nvarchar(128), SERVERPROPERTY('Edition')) AS SqlEdition,
@@ -2849,6 +3060,18 @@ INNER JOIN sys.database_scoped_configurations AS batchFeedback ON batchFeedback.
 INNER JOIN sys.configurations AS maxMemory ON maxMemory.name = N'max server memory (MB)'
 INNER JOIN sys.configurations AS minMemory ON minMemory.name = N'min server memory (MB)'
 INNER JOIN sys.dm_exec_sessions AS controller ON controller.session_id = @@SPID
+OUTER APPLY
+(
+    SELECT TOP (1) MarkerId, SchemaVersion, SetupName, SetupHash
+    FROM lab.WorkshopMarker
+    ORDER BY MarkerId, SchemaVersion, SetupName, SetupHash
+) AS marker
+OUTER APPLY
+(
+    SELECT TRY_CONVERT(uniqueidentifier, value) AS ServerMarkerId
+    FROM master.sys.extended_properties
+    WHERE class = 0 AND name = N'MCP_SQL_WORKSHOP'
+) AS serverMarker
 OUTER APPLY (SELECT TOP (1) CONVERT(nvarchar(60), RowModeMemoryGrantFeedback) AS PriorMemoryGrantFeedbackState FROM WorkshopAdmin.dbo.DatabaseConfigurationBackup WHERE DatabaseName = DB_NAME() ORDER BY CapturedAtUtc DESC) AS backupState
 OUTER APPLY
 (
@@ -3083,8 +3306,10 @@ OUTER APPLY
                 GrantUtilizationPercent = $row.GrantUtilizationPercent
                 HostUsedPercent = if ($totalHost -eq 0) { 100 } else { 100 * [decimal] $row.HostUsedMemoryKB / $totalHost }
                 HostAvailableMB = [decimal] $row.HostAvailableMemoryKB / 1024
-                ProcessPhysicalLow = [bool] $row.ProcessLowMemorySignal
-                ProcessVirtualLow = [bool] $row.SystemLowMemorySignal
+                ProcessPhysicalLow = [bool] $row.ProcessPhysicalMemoryLow
+                ProcessVirtualLow = [bool] $row.ProcessVirtualMemoryLow
+                SystemPhysicalMemoryLow = [bool] $row.SystemPhysicalMemoryLow
+                SystemPhysicalMemoryHigh = [bool] $row.SystemPhysicalMemoryHigh
                 Healthy = $true; ActiveGrantCount = [int] $row.GranteeCount + [int] $row.WaiterCount
                 ManualStopRequested = Test-Path -LiteralPath ($stopRequestPath -f $RunId.ToString('D'))
                 SampledAtUtc = $row.SampledAtUtc
@@ -3489,7 +3714,30 @@ END CATCH;
             SqlClientProvider = $provider.Name
             Warnings = [string[]]$provider.Warnings
         }
-        OpenConnection = { param($Purpose) Write-Verbose "Opening $Purpose controller connection."; & $getPreflight }.GetNewClosure()
+        OpenConnection = {
+            param($Purpose)
+            Write-Verbose "Opening $Purpose controller connection."
+            $rows = @(& $invokeTable 'MCP-SQL-Workshop-Controller-Open' 'SELECT CONVERT(bit,1) AS ConnectionReady;' @{} $null 60)
+            if ($rows.Count -ne 1 -or -not [bool]$rows[0].ConnectionReady) {
+                throw 'Workshop SQL connection readiness check failed.'
+            }
+        }.GetNewClosure()
+        CaptureEnvironment = { & $getPreflight }.GetNewClosure()
+        InitializePersistence = {
+            $persistenceReadinessSql = @'
+SELECT CONVERT(bit, CASE WHEN
+    OBJECT_ID(N'lab.WorkshopRun', N'U') IS NOT NULL
+    AND OBJECT_ID(N'lab.WorkshopSample', N'U') IS NOT NULL
+    AND OBJECT_ID(N'lab.WorkshopRequestSample', N'U') IS NOT NULL
+    AND OBJECT_ID(N'lab.WorkshopTrial', N'U') IS NOT NULL
+    THEN 1 ELSE 0 END) AS PersistenceReady;
+'@
+            $rows = @(& $invokeTable 'MCP-SQL-Workshop-Controller-Persistence' `
+                $persistenceReadinessSql @{} $null 60)
+            if ($rows.Count -ne 1 -or -not [bool]$rows[0].PersistenceReady) {
+                throw 'Workshop SQL persistence initialization failed.'
+            }
+        }.GetNewClosure()
         StartWorker = $startWorker
         TestWorkerHealth = $testWorkerHealth
         Sample = $sample
@@ -3517,6 +3765,7 @@ Export-ModuleMember -Function @(
     'Test-WorkshopFingerprintMatch',
     'Test-WorkshopPreflight',
     'Invoke-WorkshopExperiment',
+    'Invoke-WorkshopStartup',
     'Get-WorkshopKillPlan',
     'Export-WorkshopEvidenceFile',
     'Resolve-WorkshopSqlClientProvider',

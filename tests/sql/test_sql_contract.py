@@ -95,6 +95,26 @@ def test_preflight_has_explicit_infrastructure_and_lab_paths() -> None:
     assert re.search(r"PREFLIGHTPHASE.*?=\s*N'INFRASTRUCTURE'", text)
 
 
+def test_preflight_requires_the_complete_database_and_server_marker_contract() -> None:
+    text = normalized("00-Preflight.sql")
+    for constant in (
+        "68A70D6E-62D8-4A77-8F0A-9DA7934DBA7C",
+        "MCP SQL QUERY STORE WORKSHOP",
+        "ADA06F206D3DB321527A5AAB390FC814E28EBB59791967EB99841BF669E1B16B",
+    ):
+        assert constant in text
+    comparisons = {
+        "MARKERID": "WORKSHOPMARKER",
+        "SCHEMAVERSION": "WORKSHOPSCHEMAVERSION",
+        "SETUPNAME": "WORKSHOPSETUPNAME",
+        "SETUPHASH": "WORKSHOPSETUPHASH",
+    }
+    for field, expected in comparisons.items():
+        assert re.search(rf"@DATABASE{field}\s*<>\s*@{expected}", text)
+    assert "@SERVERMARKERID" in text
+    assert re.search(r"@SERVERMARKERID\s*<>\s*@WORKSHOPMARKER", text)
+
+
 def test_preflight_checks_optional_restore_and_data_path_free_space() -> None:
     text = normalized("00-Preflight.sql")
     assert "PLANNEDRESTOREPATH" in text and "PLANNEDDATAPATH" in text
@@ -1431,6 +1451,22 @@ def test_live_memory_diagnostics_are_bounded_filtered_and_secret_free() -> None:
     assert "SYS.DM_OS_PERFORMANCE_COUNTERS" in snapshot
     assert "THROW" in snapshot and "POOL" in snapshot
     assert "MEMORY SNAPSHOT SOURCES ARE UNAVAILABLE" in snapshot
+    assert re.search(
+        r"PROCESS\.PROCESS_PHYSICAL_MEMORY_LOW\) AS PROCESSPHYSICALMEMORYLOW",
+        snapshot,
+    )
+    assert re.search(
+        r"PROCESS\.PROCESS_VIRTUAL_MEMORY_LOW\) AS PROCESSVIRTUALMEMORYLOW",
+        snapshot,
+    )
+    assert re.search(
+        r"HOST\.SYSTEM_LOW_MEMORY_SIGNAL_STATE\) AS SYSTEMPHYSICALMEMORYLOW",
+        snapshot,
+    )
+    assert re.search(
+        r"HOST\.SYSTEM_HIGH_MEMORY_SIGNAL_STATE\) AS SYSTEMPHYSICALMEMORYHIGH",
+        snapshot,
+    )
 
     grants = re.sub(r"\s+", " ", diagnostic_batch("lab.usp_GetActiveWorkshopGrants")).upper()
     assert "@TOP INT = 20" in grants and "@TOP NOT BETWEEN 1 AND 100" in grants

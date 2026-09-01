@@ -55,6 +55,35 @@ def test_environment_provider_readiness_fields_are_copresent(
     assert_invalid(schema, document)
 
 
+@pytest.mark.parametrize(
+    "field",
+    (
+        "markerId",
+        "markerSchemaVersion",
+        "markerSetupName",
+        "markerSetupHash",
+        "serverMarkerId",
+        "configurationFingerprint",
+    ),
+)
+def test_captured_environment_marker_and_fingerprint_fields_are_copresent(
+    schema: dict, target: dict, field: str
+) -> None:
+    document = copy.deepcopy(target)
+    document["environment"].update(
+        markerId="68a70d6e-62d8-4a77-8f0a-9da7934dba7c",
+        markerSchemaVersion=1,
+        markerSetupName="MCP SQL Query Store Workshop",
+        markerSetupHash="ada06f206d3db321527a5aab390fc814e28ebb59791967eb99841bf669e1b16b",
+        serverMarkerId="68a70d6e-62d8-4a77-8f0a-9da7934dba7c",
+        configurationFingerprint="a" * 64,
+    )
+    validate_evidence(document, schema)
+    document["environment"].pop(field)
+
+    assert_invalid(schema, document)
+
+
 def measured_sample(sequence: int, phase: str, utilization: int) -> dict:
     return {
         "sequence": sequence,

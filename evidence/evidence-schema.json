@@ -359,7 +359,13 @@
       "required": ["sqlVersion", "sqlEdition", "physicalMemoryMB"],
       "dependentRequired": {
         "sqlClientProvider": ["warnings"],
-        "warnings": ["sqlClientProvider"]
+        "warnings": ["sqlClientProvider"],
+        "markerId": ["markerSchemaVersion", "markerSetupName", "markerSetupHash", "serverMarkerId", "configurationFingerprint"],
+        "markerSchemaVersion": ["markerId", "markerSetupName", "markerSetupHash", "serverMarkerId", "configurationFingerprint"],
+        "markerSetupName": ["markerId", "markerSchemaVersion", "markerSetupHash", "serverMarkerId", "configurationFingerprint"],
+        "markerSetupHash": ["markerId", "markerSchemaVersion", "markerSetupName", "serverMarkerId", "configurationFingerprint"],
+        "serverMarkerId": ["markerId", "markerSchemaVersion", "markerSetupName", "markerSetupHash", "configurationFingerprint"],
+        "configurationFingerprint": ["markerId", "markerSchemaVersion", "markerSetupName", "markerSetupHash", "serverMarkerId"]
       },
       "properties": {
         "sqlVersion": { "type": "string", "minLength": 1 },
@@ -377,7 +383,14 @@
           "type": "integer",
           "minimum": 1,
           "maximum": 4294967296
-        }
+        },
+        "captureStatus": { "enum": ["Captured", "Unavailable"] },
+        "markerId": { "type": "string", "format": "uuid" },
+        "markerSchemaVersion": { "const": 1 },
+        "markerSetupName": { "const": "MCP SQL Query Store Workshop" },
+        "markerSetupHash": { "$ref": "#/$defs/sha256" },
+        "serverMarkerId": { "type": "string", "format": "uuid" },
+        "configurationFingerprint": { "$ref": "#/$defs/sha256" }
       }
     },
     "frozenSettings": {

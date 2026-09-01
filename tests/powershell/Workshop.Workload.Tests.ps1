@@ -140,6 +140,7 @@ Describe 'Workshop workload module contract' {
             'Get-WorkshopTrialAssessment'
             'Get-WorkshopTrialSequence'
             'Invoke-WorkshopExperiment'
+            'Invoke-WorkshopStartup'
             'New-WorkshopRunRecord'
             'Resolve-WorkshopSqlClientProvider'
             'Test-TargetBand'
@@ -976,6 +977,11 @@ Describe 'Task 12 workload orchestration' {
             param([string] $Hash = ('a' * 64))
             [pscustomobject]@{
                 MarkerValid = $true
+                MarkerId = '68a70d6e-62d8-4a77-8f0a-9da7934dba7c'
+                SchemaVersion = 1
+                SetupName = 'MCP SQL Query Store Workshop'
+                SetupHash = 'ada06f206d3db321527a5aab390fc814e28ebb59791967eb99841bf669e1b16b'
+                ServerMarkerId = '68a70d6e-62d8-4a77-8f0a-9da7934dba7c'
                 SqlMajorVersion = 16
                 SqlProductVersion = '16.0.1135.2'
                 SqlEdition = 'Enterprise Edition (64-bit)'
@@ -1068,7 +1074,9 @@ Describe 'Task 12 workload orchestration' {
                 HealthChecks = 0
             }
             $operations = @{
-                OpenConnection = { param($Purpose) Write-Verbose $Purpose; $state.Preflight }
+                OpenConnection = { param($Purpose) Write-Verbose $Purpose; $true }
+                CaptureEnvironment = { $state.Preflight }
+                InitializePersistence = { $true }
                 StartWorker = {
                     param($RunId, $Phase, $Worker, $ApplicationName, $Schedule, $Deadline)
                     $handle = [pscustomobject]@{ RunId = $RunId; Phase = $Phase; Worker = $Worker; ApplicationName = $ApplicationName; Schedule = @($Schedule); Deadline = $Deadline; StartedAt = $state.Now; Disposed = $false }
@@ -1216,6 +1224,14 @@ Describe 'Task 12 workload orchestration' {
         $result.Evidence.environment.sqlClientProvider | Should -BeExactly 'System.Data.SqlClient'
         $result.Evidence.environment.warnings | Should -Contain `
             'System.Data.SqlClient fallback active; install Microsoft.Data.SqlClient before production use.'
+        $result.Evidence.environment.markerId | Should -BeExactly '68a70d6e-62d8-4a77-8f0a-9da7934dba7c'
+        $result.Evidence.environment.markerSchemaVersion | Should -BeExactly 1
+        $result.Evidence.environment.markerSetupName | Should -BeExactly 'MCP SQL Query Store Workshop'
+        $result.Evidence.environment.markerSetupHash | Should -BeExactly `
+            'ada06f206d3db321527a5aab390fc814e28ebb59791967eb99841bf669e1b16b'
+        $result.Evidence.environment.serverMarkerId | Should -BeExactly `
+            '68a70d6e-62d8-4a77-8f0a-9da7934dba7c'
+        $result.Evidence.environment.configurationFingerprint | Should -Match '^[a-f0-9]{64}$'
     }
 
     It 'sets the first ramp clock when worker one starts and never starts worker two before the exact ramp' {
@@ -1414,13 +1430,25 @@ Describe 'Task 12 workload orchestration' {
     }
 
     It 'persists and atomically exports truthful failure evidence before the first sample' -ForEach @(
+        @{ FailurePoint = 'OpenConnection' }
+        @{ FailurePoint = 'CaptureEnvironment' }
+        @{ FailurePoint = 'InitializePersistence' }
         @{ FailurePoint = 'StartWorker' }
         @{ FailurePoint = 'Sample' }
     ) {
         $fixture = Get-TestOperationSet
         $runId = [guid]::NewGuid()
         $canary = 'startup-secret-canary'
-        if ($FailurePoint -eq 'StartWorker') {
+        if ($FailurePoint -eq 'OpenConnection') {
+            $fixture.Operations.OpenConnection = { throw "Password=$canary" }.GetNewClosure()
+        }
+        elseif ($FailurePoint -eq 'CaptureEnvironment') {
+            $fixture.Operations.CaptureEnvironment = { throw "Password=$canary" }.GetNewClosure()
+        }
+        elseif ($FailurePoint -eq 'InitializePersistence') {
+            $fixture.Operations.InitializePersistence = { throw "Password=$canary" }.GetNewClosure()
+        }
+        elseif ($FailurePoint -eq 'StartWorker') {
             $fixture.Operations.StartWorker = { throw "Password=$canary" }.GetNewClosure()
         }
         else {
@@ -1456,6 +1484,60 @@ Describe 'Task 12 workload orchestration' {
         $schema = Join-Path $PSScriptRoot '../../evidence/evidence-schema.json'
         $validationOutput = & $python $validator --schema $schema $jsonPath
         $LASTEXITCODE | Should -Be 0 -Because ($validationOutput -join '; ')
+    }
+
+    It 'fails closed for every missing or mismatched complete marker field' -ForEach @(
+        @{ Property = 'MarkerId'; Value = $null }
+        @{ Property = 'MarkerId'; Value = '11111111-1111-1111-1111-111111111111' }
+        @{ Property = 'SchemaVersion'; Value = 2 }
+        @{ Property = 'SetupName'; Value = 'Other setup' }
+        @{ Property = 'SetupHash'; Value = ('0' * 64) }
+        @{ Property = 'ServerMarkerId'; Value = '11111111-1111-1111-1111-111111111111' }
+    ) {
+        $preflight = Get-TestPreflight
+        if ($null -eq $Value) { $preflight.psobject.Properties.Remove($Property) } else { $preflight.$Property = $Value }
+
+        { Test-WorkshopPreflight -Snapshot $preflight } | Should -Throw '*marker*'
+    }
+
+    It 'aborts invalid or missing markers before workers and exports Failed evidence' -ForEach @(
+        @{ Property = 'SetupHash'; Remove = $false }
+        @{ Property = 'ServerMarkerId'; Remove = $true }
+    ) {
+        $preflight = Get-TestPreflight
+        if ($Remove) { $preflight.psobject.Properties.Remove($Property) } else { $preflight.$Property = ('0' * 64) }
+        $fixture = Get-TestOperationSet -Preflight $preflight
+
+        $result = Invoke-WorkshopExperiment -RunId ([guid]::NewGuid()) -OperationSet $fixture.Operations
+
+        $result.Outcome | Should -BeExactly 'Failed'
+        $result.Evidence.terminationEvidence.failure.stage | Should -BeExactly 'Preflight'
+        $result.Evidence.terminationEvidence.failure.startupFailure | Should -BeTrue
+        $fixture.State.Starts.Count | Should -Be 0
+        $fixture.State.Exported | Should -BeTrue
+    }
+
+    It 'maps process virtual pressure only from the process virtual SQL result column' {
+        $moduleText = Get-Content -LiteralPath (Join-Path $PSScriptRoot '../../workload/Workshop.Workload.psm1') -Raw
+        $moduleText | Should -Match 'ProcessVirtualLow\s*=\s*\[bool\]\s*\$row\.ProcessVirtualMemoryLow'
+        $moduleText | Should -Not -Match 'ProcessVirtualLow\s*=\s*\[bool\]\s*\$row\.SystemLowMemorySignal'
+        $moduleText | Should -Match 'SystemPhysicalMemoryLow\s*=\s*\[bool\]\s*\$row\.SystemPhysicalMemoryLow'
+        $moduleText | Should -Match 'SystemPhysicalMemoryHigh\s*=\s*\[bool\]\s*\$row\.SystemPhysicalMemoryHigh'
+    }
+
+    It 'exports schema-valid local Failed evidence when provider resolution fails before an operation set exists' {
+        $runId = [guid]::NewGuid()
+        $canary = 'provider-secret-canary'
+        $result = Invoke-WorkshopStartup -RunId $runId -RepositoryRoot $TestDrive `
+            -OperationFactory { throw "Password=$canary" } -SemanticValidator { $true }
+
+        $result.Outcome | Should -BeExactly 'Failed'
+        $result.Evidence.terminationEvidence.failure.stage | Should -BeExactly 'ProviderResolution'
+        $result.Evidence.terminationEvidence.failure.code | Should -BeExactly 'PROVIDER_RESOLUTION_FAILED'
+        ($result.Evidence | ConvertTo-Json -Depth 30) | Should -Not -Match $canary
+        $jsonPath = Join-Path $TestDrive "evidence/runs/$($runId.ToString('D'))/evidence.json"
+        Test-Path -LiteralPath $jsonPath | Should -BeTrue
+        @(Get-ChildItem (Join-Path $TestDrive 'evidence/runs') -Filter '*.tmp' -Directory).Count | Should -Be 0
     }
 
     It 'exports sanitized local failure evidence when SQL failure persistence also fails' {
@@ -1832,7 +1914,11 @@ Describe 'Task 12 remaining blocker contracts' {
 
                     function Get-ConcreteTestPreflight {
                         [pscustomobject]@{
-                            MarkerValid=$true; SqlMajorVersion=16; SqlEdition='Enterprise Edition (64-bit)'
+                            MarkerValid=$true; MarkerId='68a70d6e-62d8-4a77-8f0a-9da7934dba7c'
+                            SchemaVersion=1; SetupName='MCP SQL Query Store Workshop'
+                            SetupHash='ada06f206d3db321527a5aab390fc814e28ebb59791967eb99841bf669e1b16b'
+                            ServerMarkerId='68a70d6e-62d8-4a77-8f0a-9da7934dba7c'
+                            SqlMajorVersion=16; SqlEdition='Enterprise Edition (64-bit)'
                             SqlProductVersion='16.0.1135.2'; VmSku='Standard_E8s_v5'
                             Region='indonesiacentral'; ImageVersion='16.0.2026.801'
                             PhysicalMemoryMB=65536; QueryStoreActualState='READ_WRITE'
