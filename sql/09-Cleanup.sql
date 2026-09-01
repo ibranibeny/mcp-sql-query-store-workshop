@@ -696,13 +696,18 @@ END;';
             (N'ValidationRun', 'U'), (N'WorkshopSample', 'U'), (N'WorkshopRun', 'U'),
             (N'DataGenerationLog', 'U'), (N'FactSales', 'U'), (N'Numbers', 'U'),
             (N'WorkshopMarker', 'U');
+
+           /* Inventory every user-created top-level object in lab, not merely the types this
+             workshop happens to create. Constraints and triggers are verified separately as
+             children of exact owned tables. S and IT are engine-owned/internal object types. */
         IF EXISTS
         (
             SELECT object_entry.name, object_entry.type
             FROM sys.objects AS object_entry
             INNER JOIN sys.schemas AS object_schema ON object_schema.schema_id = object_entry.schema_id
             WHERE object_schema.name = N'lab' AND object_entry.is_ms_shipped = 0
-              AND object_entry.type IN ('U', 'V', 'P')
+                            AND object_entry.parent_object_id = 0
+                            AND object_entry.type NOT IN ('S', 'IT')
             EXCEPT SELECT ObjectName, ObjectType FROM @ExpectedLabObjects
         )
         OR EXISTS
@@ -713,9 +718,72 @@ END;';
             FROM sys.objects AS object_entry
             INNER JOIN sys.schemas AS object_schema ON object_schema.schema_id = object_entry.schema_id
             WHERE object_schema.name = N'lab' AND object_entry.is_ms_shipped = 0
-              AND object_entry.type IN ('U', 'V', 'P')
+              AND object_entry.parent_object_id = 0
+              AND object_entry.type NOT IN ('S', 'IT')
         )
-            THROW 51926, 'Unexpected or drifted lab object found; refusing optional lab deletion.', 1;
+                OR EXISTS
+                (
+            SELECT 1
+            FROM sys.objects AS object_entry
+            INNER JOIN sys.schemas AS object_schema ON object_schema.schema_id = object_entry.schema_id
+            WHERE object_schema.name = N'lab' AND object_entry.is_ms_shipped = 0
+              AND object_entry.parent_object_id <> 0
+              AND object_entry.type NOT IN ('PK', 'UQ', 'C', 'D', 'F', 'TR')
+                )
+            THROW 51926, 'Unrecognized lab schema-scoped object found; refusing optional lab deletion.', 1;
+
+        DECLARE @OwnedLabObjectIds table
+        (
+            ObjectId int NOT NULL PRIMARY KEY,
+            ObjectName sysname NOT NULL,
+            ObjectType char(2) NOT NULL
+        );
+        INSERT @OwnedLabObjectIds (ObjectId, ObjectName, ObjectType)
+        SELECT object_entry.object_id, object_entry.name, object_entry.type
+        FROM sys.objects AS object_entry
+        INNER JOIN @ExpectedLabObjects AS expected
+            ON expected.ObjectName = object_entry.name AND expected.ObjectType = object_entry.type
+        WHERE object_entry.schema_id = SCHEMA_ID(N'lab')
+          AND object_entry.is_ms_shipped = 0;
+
+          /* Synonyms do not reliably appear in the dependency DMV. Reject every lab synonym,
+              plus synonyms in any schema whose base target names an owned lab object. */
+        IF EXISTS
+        (
+            SELECT 1
+            FROM sys.synonyms AS synonym_entry
+            WHERE synonym_entry.schema_id = SCHEMA_ID(N'lab')
+               OR
+               (
+                (PARSENAME(synonym_entry.base_object_name, 3) IS NULL
+                OR PARSENAME(synonym_entry.base_object_name, 3) = DB_NAME())
+                   AND PARSENAME(synonym_entry.base_object_name, 2) = N'lab'
+                   AND EXISTS
+                   (
+                       SELECT 1 FROM @OwnedLabObjectIds AS owned
+                       WHERE owned.ObjectName = PARSENAME(synonym_entry.base_object_name, 1)
+                   )
+               )
+        )
+            THROW 51944, 'Unrecognized lab synonym or synonym targeting an owned lab object found; refusing optional lab deletion.', 1;
+
+        /* These schema-scoped catalogs are checked explicitly because not every entry is
+           represented consistently by sys.objects across SQL Server feature families. */
+        IF EXISTS (SELECT 1 FROM sys.sequences WHERE schema_id = SCHEMA_ID(N'lab'))
+           OR EXISTS (SELECT 1 FROM sys.types WHERE schema_id = SCHEMA_ID(N'lab') AND is_user_defined = 1)
+           OR EXISTS
+              (
+                  SELECT 1 FROM sys.xml_schema_collections
+                  WHERE schema_id = SCHEMA_ID(N'lab') AND xml_collection_id <> 1
+              )
+           OR EXISTS
+              (
+                  SELECT 1 FROM sys.fulltext_indexes AS fulltext_index
+                  INNER JOIN sys.tables AS parent_table ON parent_table.object_id = fulltext_index.object_id
+                  WHERE parent_table.schema_id = SCHEMA_ID(N'lab')
+              )
+           OR EXISTS (SELECT 1 FROM sys.service_queues WHERE schema_id = SCHEMA_ID(N'lab'))
+            THROW 51945, 'Unrecognized lab sequence, type, XML schema collection, fulltext, or Service Broker object found; refusing optional lab deletion.', 1;
 
         IF OBJECT_ID(N'WorkshopAdmin.dbo.LabObjectOwnership', N'U') IS NULL
             THROW 51930, 'Lab object ownership fingerprints are absent; refusing optional lab deletion.', 1;
@@ -818,6 +886,12 @@ END;';
             (N'ValidationRun', N'FK_ValidationRun_BaselineWorkshopRun', 'F'),
             (N'ValidationRun', N'FK_ValidationRun_OptimizedWorkshopRun', 'F'),
             (N'ValidationRun', N'CK_ValidationRun_Linkage', 'C');
+
+        DECLARE @ExpectedLabTriggers table
+        (
+            ParentObjectName sysname NOT NULL,
+            TriggerName sysname NOT NULL PRIMARY KEY
+        );
 
         IF EXISTS
         (
@@ -997,12 +1071,23 @@ END;';
         )
             THROW 51935, 'Unrecognized lab index found; refusing optional lab deletion.', 1;
 
-        IF EXISTS
-        (
-            SELECT 1 FROM sys.triggers AS trigger_entry
+                IF EXISTS
+                (
+                        SELECT OBJECT_NAME(trigger_entry.parent_id), trigger_entry.name
+                        FROM sys.triggers AS trigger_entry
                         WHERE trigger_entry.parent_class = 1
                             AND OBJECT_SCHEMA_NAME(trigger_entry.parent_id) = N'lab'
-        )
+                        EXCEPT SELECT ParentObjectName, TriggerName FROM @ExpectedLabTriggers
+                )
+                OR EXISTS
+                (
+                        SELECT ParentObjectName, TriggerName FROM @ExpectedLabTriggers
+                        EXCEPT
+                        SELECT OBJECT_NAME(trigger_entry.parent_id), trigger_entry.name
+                        FROM sys.triggers AS trigger_entry
+                        WHERE trigger_entry.parent_class = 1
+                            AND OBJECT_SCHEMA_NAME(trigger_entry.parent_id) = N'lab'
+                )
             THROW 51936, 'Unrecognized lab trigger found; refusing optional lab deletion.', 1;
         IF EXISTS
         (
@@ -1127,17 +1212,60 @@ END;';
             WHERE parent_table.schema_id = SCHEMA_ID(N'lab')
         )
             THROW 51942, 'Unrecognized lab temporal, CDC, or fulltext feature found; refusing optional lab deletion.', 1;
+        /* Constraints are owned only as exact children of allowlisted tables. Add those
+           verified child IDs before checking dependencies so their normal expressions do
+           not look like foreign incoming references. The workshop owns no lab triggers. */
+        INSERT @OwnedLabObjectIds (ObjectId, ObjectName, ObjectType)
+        SELECT constraint_entry.object_id, constraint_entry.name, constraint_entry.type
+        FROM sys.objects AS constraint_entry
+        INNER JOIN sys.tables AS parent_table ON parent_table.object_id = constraint_entry.parent_object_id
+        INNER JOIN @ExpectedLabConstraints AS expected
+            ON expected.TableName = parent_table.name
+           AND expected.ConstraintName = constraint_entry.name
+           AND expected.ConstraintType = constraint_entry.type
+        WHERE parent_table.schema_id = SCHEMA_ID(N'lab');
+
         IF EXISTS
         (
-            SELECT 1 FROM sys.sql_expression_dependencies AS dependency
-            WHERE dependency.referenced_id IN
-                  (SELECT object_id FROM sys.objects WHERE schema_id = SCHEMA_ID(N'lab'))
-              AND
-              (
-                  dependency.is_schema_bound_reference = 1
-                  OR dependency.referencing_id NOT IN
-                     (SELECT object_id FROM sys.objects WHERE schema_id = SCHEMA_ID(N'lab'))
-              )
+            SELECT 1
+            FROM sys.sql_expression_dependencies AS dependency
+            WHERE
+                (
+                    dependency.referenced_id IN (SELECT ObjectId FROM @OwnedLabObjectIds)
+                    AND (dependency.referencing_id IS NULL
+                         OR dependency.referencing_id NOT IN (SELECT ObjectId FROM @OwnedLabObjectIds))
+                )
+                OR
+                (
+                    dependency.referencing_id IN (SELECT ObjectId FROM @OwnedLabObjectIds)
+                    AND dependency.referenced_id IS NOT NULL
+                    AND OBJECT_SCHEMA_NAME(dependency.referenced_id) = N'lab'
+                    AND dependency.referenced_id NOT IN (SELECT ObjectId FROM @OwnedLabObjectIds)
+                )
+                OR
+                (
+                    dependency.referencing_id NOT IN (SELECT ObjectId FROM @OwnedLabObjectIds)
+                    AND dependency.referenced_schema_name = N'lab'
+                    AND EXISTS
+                    (
+                        SELECT 1 FROM @ExpectedLabObjects AS expected
+                        WHERE expected.ObjectName = dependency.referenced_entity_name
+                    )
+                    AND (dependency.referenced_database_name IS NULL
+                         OR dependency.referenced_database_name = DB_NAME())
+                )
+                OR
+                (
+                    dependency.referencing_id IN (SELECT ObjectId FROM @OwnedLabObjectIds)
+                    AND dependency.referenced_schema_name = N'lab'
+                    AND NOT EXISTS
+                    (
+                        SELECT 1 FROM @ExpectedLabObjects AS expected
+                        WHERE expected.ObjectName = dependency.referenced_entity_name
+                    )
+                    AND (dependency.referenced_database_name IS NULL
+                         OR dependency.referenced_database_name = DB_NAME())
+                )
         )
             THROW 51943, 'Unrecognized lab dependency found; refusing optional lab deletion.', 1;
 

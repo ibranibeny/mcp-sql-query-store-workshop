@@ -2063,8 +2063,9 @@ def test_cleanup_optional_drop_is_marker_owned_dependency_ordered_and_preserves_
         "SYS.FULLTEXT_INDEXES",
     ):
         assert catalog in optional
-    for feature in ("TEMPORAL_TYPE", "IS_TRACKED_BY_CDC", "IS_SCHEMA_BOUND_REFERENCE"):
+    for feature in ("TEMPORAL_TYPE", "IS_TRACKED_BY_CDC"):
         assert feature in optional
+    assert "IS_SCHEMA_BOUND_REFERENCE" not in optional
     first_drop = optional.index("DROP VIEW")
     for blocker in (
         "UNRECOGNIZED LAB TRIGGER", "UNRECOGNIZED LAB INDEX",
@@ -2077,6 +2078,72 @@ def test_cleanup_optional_drop_is_marker_owned_dependency_ordered_and_preserves_
     for source in ("SALES.SALESORDERHEADER", "SALES.SALESORDERDETAIL", "SALES.SALESTERRITORY"):
         assert f"DROP TABLE {source}" not in text
     assert "DBCC" not in text
+
+
+def test_cleanup_inventories_every_user_lab_object_type_before_the_first_drop() -> None:
+    text = normalized("09-Cleanup.sql")
+    optional = text[text.index("IF @DROPLABDATA = 1"):]
+    inventory = optional[:optional.index("DROP VIEW IF EXISTS LAB.VW_WORKSHOPSAMPLESUMMARY")]
+
+    assert "@EXPECTEDLABOBJECTS" in inventory
+    assert "OBJECT_ENTRY.IS_MS_SHIPPED = 0" in inventory
+    assert "OBJECT_ENTRY.PARENT_OBJECT_ID = 0" in inventory
+    assert "OBJECT_ENTRY.PARENT_OBJECT_ID <> 0" in inventory
+    assert "OBJECT_ENTRY.TYPE NOT IN ('PK', 'UQ', 'C', 'D', 'F', 'TR')" in inventory
+    assert "OBJECT_ENTRY.TYPE NOT IN ('S', 'IT')" in inventory
+    exhaustive_guard = inventory[:inventory.index("DECLARE @OWNEDLABOBJECTIDS")]
+    assert "OBJECT_ENTRY.TYPE IN ('U', 'V', 'P')" not in exhaustive_guard
+    for catalog in (
+        "SYS.SYNONYMS", "SYS.SEQUENCES", "SYS.TYPES", "SYS.XML_SCHEMA_COLLECTIONS",
+        "SYS.FULLTEXT_INDEXES", "SYS.SERVICE_QUEUES",
+    ):
+        assert catalog in inventory
+    assert "UNRECOGNIZED LAB SCHEMA-SCOPED OBJECT" in inventory
+
+
+def test_cleanup_treats_a_foreign_lab_scalar_function_as_an_extra_before_drop() -> None:
+    text = normalized("09-Cleanup.sql")
+    optional = text[text.index("IF @DROPLABDATA = 1"):]
+    allowlist = optional[
+        optional.index("INSERT @EXPECTEDLABOBJECTS"):
+        optional.index("DECLARE @OWNEDLABOBJECTIDS")
+    ]
+
+    assert "'FN'" not in allowlist
+    assert "OBJECT_ENTRY.PARENT_OBJECT_ID = 0" in allowlist
+    assert "OBJECT_ENTRY.TYPE NOT IN ('S', 'IT')" in allowlist
+    assert allowlist.index("UNRECOGNIZED LAB SCHEMA-SCOPED OBJECT") < optional.index(
+        "DROP VIEW IF EXISTS LAB.VW_WORKSHOPSAMPLESUMMARY"
+    )
+
+
+def test_cleanup_rejects_lab_synonyms_and_synonyms_targeting_owned_tables_before_drop() -> None:
+    text = normalized("09-Cleanup.sql")
+    optional = text[text.index("IF @DROPLABDATA = 1"):]
+    first_drop = optional.index("DROP VIEW IF EXISTS LAB.VW_WORKSHOPSAMPLESUMMARY")
+    synonym_guard = optional.index("UNRECOGNIZED LAB SYNONYM")
+
+    assert "SYS.SYNONYMS" in optional
+    assert "BASE_OBJECT_NAME" in optional
+    assert "PARSENAME" in optional
+    assert "@OWNEDLABOBJECTIDS" in optional
+    synonym_region = optional[optional.index("FROM SYS.SYNONYMS"):synonym_guard]
+    assert "PARSENAME(SYNONYM_ENTRY.BASE_OBJECT_NAME, 4) IS NULL" not in synonym_region
+    assert synonym_guard < first_drop
+
+
+def test_cleanup_dependency_guard_blocks_external_non_schema_bound_modules_in_both_directions() -> None:
+    text = normalized("09-Cleanup.sql")
+    optional = text[text.index("IF @DROPLABDATA = 1"):]
+    dependency_guard = optional[:optional.index("UNRECOGNIZED LAB DEPENDENCY")]
+    first_drop = optional.index("DROP VIEW IF EXISTS LAB.VW_WORKSHOPSAMPLESUMMARY")
+
+    assert "@OWNEDLABOBJECTIDS" in dependency_guard
+    assert "DEPENDENCY.REFERENCED_ID" in dependency_guard
+    assert "DEPENDENCY.REFERENCING_ID" in dependency_guard
+    assert dependency_guard.count("SELECT OBJECTID FROM @OWNEDLABOBJECTIDS") >= 2
+    assert "IS_SCHEMA_BOUND_REFERENCE" not in dependency_guard
+    assert optional.index("UNRECOGNIZED LAB DEPENDENCY") < first_drop
 
 
 def test_diagnostics_records_created_identity_ownership() -> None:
