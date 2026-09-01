@@ -89,4 +89,11 @@ Describe 'Workshop SQL runner security and ordering' {
             $positions[$index] | Should -BeGreaterThan $positions[$index - 1]
         }
     }
+
+    It 'excludes optional hint and cleanup scripts from bootstrap defaults' {
+        $text = Get-Content -LiteralPath $script:RunnerPath -Raw
+        $scriptList = [regex]::Match($text, '(?s)\$scriptNames\s*=\s*@\((?<body>.*?)\)').Groups['body'].Value
+        $scriptList | Should -Not -Match '08-OptionalQueryStoreHint\.sql'
+        $scriptList | Should -Not -Match '09-Cleanup\.sql'
+    }
 }

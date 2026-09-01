@@ -1526,7 +1526,45 @@ BEGIN
 END;
 GO
 
+IF OBJECT_ID(N'WorkshopAdmin.dbo.IdentityOwnership', N'U') IS NULL
+    EXEC WorkshopAdmin.sys.sp_executesql N'
+        CREATE TABLE dbo.IdentityOwnership
+        (
+            MarkerId uniqueidentifier NOT NULL,
+            SchemaVersion int NOT NULL,
+            PrincipalType varchar(20) NOT NULL,
+            PrincipalName sysname NOT NULL,
+            PrincipalSid varbinary(85) NOT NULL,
+            CreatedByWorkshop bit NOT NULL,
+            RecordedAtUtc datetime2(3) NOT NULL,
+            CONSTRAINT PK_IdentityOwnership PRIMARY KEY
+                (MarkerId, SchemaVersion, PrincipalType, PrincipalName)
+        );';
+IF OBJECT_ID(N'WorkshopAdmin.dbo.LabObjectOwnership', N'U') IS NULL
+    EXEC WorkshopAdmin.sys.sp_executesql N'
+        CREATE TABLE dbo.LabObjectOwnership
+        (
+            MarkerId uniqueidentifier NOT NULL,
+            SchemaVersion int NOT NULL,
+            DatabaseName sysname NOT NULL,
+            ObjectName sysname NOT NULL,
+            ObjectType char(2) NOT NULL,
+            DefinitionHash varbinary(32) NULL,
+            SchemaHash varbinary(32) NULL,
+            RecordedAtUtc datetime2(3) NOT NULL,
+            CONSTRAINT PK_LabObjectOwnership PRIMARY KEY
+                (MarkerId, SchemaVersion, DatabaseName, ObjectName)
+        );';
+GO
+
 DECLARE @ReaderLoginName sysname = N'mcp_workshop_reader';
+DECLARE @ReaderLoginCreated bit = 0;
+DECLARE @ReaderUserCreated bit = 0;
+DECLARE @DatabaseCertificateCreated bit = 0;
+DECLARE @MasterCertificateCreated bit = 0;
+DECLARE @CertificateLoginCreated bit = 0;
+DECLARE @WorkshopMarker uniqueidentifier = '68A70D6E-62D8-4A77-8F0A-9DA7934DBA7C';
+DECLARE @WorkshopSchemaVersion int = 1;
 DECLARE @McpReaderPassword nvarchar(4000) =
     TRY_CONVERT(nvarchar(4000), SESSION_CONTEXT(N'McpReaderPassword'));
 
@@ -1545,8 +1583,11 @@ BEGIN
 END;
 
 IF NOT EXISTS (SELECT 1 FROM sys.certificates WHERE name = N'mcp_workshop_diagnostics_certificate')
+BEGIN
     CREATE CERTIFICATE [mcp_workshop_diagnostics_certificate]
         WITH SUBJECT = N'MCP workshop server DMV module signing', EXPIRY_DATE = '2099-12-31';
+    SET @DatabaseCertificateCreated = 1;
+END;
 IF NOT EXISTS
 (
     SELECT 1 FROM sys.certificates
@@ -1562,6 +1603,12 @@ DECLARE @DatabaseCertificateThumbprint varbinary(32) =
 );
 IF @DatabaseCertificateThumbprint IS NULL
     THROW 51675, 'The database diagnostics signing certificate is missing.', 1;
+IF @DatabaseCertificateCreated = 1
+    INSERT WorkshopAdmin.dbo.IdentityOwnership
+        (MarkerId, SchemaVersion, PrincipalType, PrincipalName, PrincipalSid, CreatedByWorkshop, RecordedAtUtc)
+    SELECT @WorkshopMarker, @WorkshopSchemaVersion, 'CERTIFICATE_DB', N'mcp_workshop_diagnostics_certificate',
+           @DatabaseCertificateThumbprint, 1, SYSUTCDATETIME()
+    WHERE NOT EXISTS (SELECT 1 FROM WorkshopAdmin.dbo.IdentityOwnership WHERE MarkerId = @WorkshopMarker AND SchemaVersion = @WorkshopSchemaVersion AND PrincipalType = 'CERTIFICATE_DB' AND PrincipalName = N'mcp_workshop_diagnostics_certificate');
 IF EXISTS
 (
     SELECT 1 FROM master.sys.certificates
@@ -1592,15 +1639,29 @@ BEGIN
     SET @CertificateSql = N'USE [master]; CREATE CERTIFICATE [mcp_workshop_diagnostics_certificate] FROM FILE = N'''
         + @EscapedCertificateFile + N''';';
     EXEC master.sys.sp_executesql @CertificateSql;
+    SET @MasterCertificateCreated = 1;
+    INSERT WorkshopAdmin.dbo.IdentityOwnership
+        (MarkerId, SchemaVersion, PrincipalType, PrincipalName, PrincipalSid, CreatedByWorkshop, RecordedAtUtc)
+    VALUES
+        (@WorkshopMarker, @WorkshopSchemaVersion, 'CERTIFICATE_MASTER', N'mcp_workshop_diagnostics_certificate',
+         @DatabaseCertificateThumbprint, 1, SYSUTCDATETIME());
 
     /* Certificate export is public, contains no private key, and must be deleted by bootstrap cleanup. */
     PRINT N'Certificate export is public; bootstrap cleanup must delete: ' + @CertificateFile;
 END;
 
 IF SUSER_ID(N'mcp_workshop_diagnostics_certificate_login') IS NULL
+BEGIN
     EXEC master.sys.sp_executesql
         N'CREATE LOGIN [mcp_workshop_diagnostics_certificate_login]
           FROM CERTIFICATE [mcp_workshop_diagnostics_certificate];';
+    SET @CertificateLoginCreated = 1;
+    INSERT WorkshopAdmin.dbo.IdentityOwnership
+        (MarkerId, SchemaVersion, PrincipalType, PrincipalName, PrincipalSid, CreatedByWorkshop, RecordedAtUtc)
+    VALUES
+        (@WorkshopMarker, @WorkshopSchemaVersion, 'CERT_LOGIN', N'mcp_workshop_diagnostics_certificate_login',
+         SUSER_SID(N'mcp_workshop_diagnostics_certificate_login'), 1, SYSUTCDATETIME());
+END;
 IF NOT EXISTS
 (
     SELECT 1
@@ -1649,6 +1710,7 @@ BEGIN
         SET @CreateReaderLoginSql = NULL;
         THROW;
     END CATCH;
+    SET @ReaderLoginCreated = 1;
 END
 ELSE
 BEGIN
@@ -1672,6 +1734,19 @@ IF NOT EXISTS
    OR IS_SRVROLEMEMBER(N'sysadmin', N'mcp_workshop_reader') <> 0
     THROW 51668, 'The mcp_workshop_reader server login contract is invalid.', 1;
 
+IF @ReaderLoginCreated = 1
+BEGIN
+    INSERT WorkshopAdmin.dbo.IdentityOwnership
+        (MarkerId, SchemaVersion, PrincipalType, PrincipalName, PrincipalSid, CreatedByWorkshop, RecordedAtUtc)
+    SELECT @WorkshopMarker, @WorkshopSchemaVersion, 'SQL_LOGIN', @ReaderLoginName,
+           SUSER_SID(@ReaderLoginName), 1, SYSUTCDATETIME()
+    WHERE NOT EXISTS
+    (
+        SELECT 1 FROM WorkshopAdmin.dbo.IdentityOwnership
+        WHERE MarkerId = @WorkshopMarker AND SchemaVersion = @WorkshopSchemaVersion
+          AND PrincipalType = 'SQL_LOGIN' AND PrincipalName = @ReaderLoginName
+    );
+END;
 GRANT VIEW SERVER PERFORMANCE STATE TO [mcp_workshop_diagnostics_certificate_login];
 REVOKE VIEW SERVER STATE FROM [mcp_workshop_diagnostics_certificate_login];
 
@@ -1756,7 +1831,16 @@ OR EXISTS
     THROW 51680, 'The server DMV procedure signature contract is invalid.', 1;
 
 IF USER_ID(N'mcp_workshop_reader') IS NULL
+BEGIN
     CREATE USER [mcp_workshop_reader] FOR LOGIN [mcp_workshop_reader];
+    SET @ReaderUserCreated = 1;
+END;
+IF @ReaderUserCreated = 1
+    INSERT WorkshopAdmin.dbo.IdentityOwnership
+        (MarkerId, SchemaVersion, PrincipalType, PrincipalName, PrincipalSid, CreatedByWorkshop, RecordedAtUtc)
+    SELECT @WorkshopMarker, @WorkshopSchemaVersion, 'DATABASE_USER', N'mcp_workshop_reader',
+           SUSER_SID(N'mcp_workshop_reader'), 1, SYSUTCDATETIME()
+    WHERE NOT EXISTS (SELECT 1 FROM WorkshopAdmin.dbo.IdentityOwnership WHERE MarkerId = @WorkshopMarker AND SchemaVersion = @WorkshopSchemaVersion AND PrincipalType = 'DATABASE_USER' AND PrincipalName = N'mcp_workshop_reader');
 IF NOT EXISTS
 (
     SELECT 1

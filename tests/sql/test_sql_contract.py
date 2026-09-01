@@ -1767,7 +1767,7 @@ def test_all_sql_is_bounded_and_avoids_destructive_or_public_network_commands() 
         r"\bDBCC\s+DROPCLEANBUFFERS\b",
         r"\bDBCC\s+FREEPROCCACHE\b",
         r"\bWHILE\s+1\s*=\s*1\b",
-        r"\bDROP\s+(?:DATABASE|LOGIN|ENDPOINT)\b",
+        r"\bDROP\s+(?:DATABASE|ENDPOINT)\b",
         r"\bSHUTDOWN\b",
         r"\bXP_CMDSHELL\b",
         r"\bSP_CONFIGURE\s+N?'REMOTE\s+ACCESS'",
@@ -1793,3 +1793,296 @@ def test_scripts_use_explicit_throw_numbers_and_no_raiserror(name: str) -> None:
     throw_numbers = [int(value) for value in re.findall(r"\bTHROW\s+(\d{5}),", text)]
     assert throw_numbers
     assert all(50000 <= value <= 59999 for value in throw_numbers)
+
+
+def test_optional_hint_requires_exact_secure_lab_contract_before_mutation() -> None:
+    raw = sql("08-OptionalQueryStoreHint.sql")
+    text = normalized("08-OptionalQueryStoreHint.sql")
+    assert ":on error exit" in raw.lower()
+    assert not re.search(r"\$\(\w+\)", raw)
+    assert re.search(r"IF\s+@@TRANCOUNT\s*<>\s*0.*?THROW", text)
+    for contract in (
+        "SESSION_CONTEXT(N'EXPECTEDSERVERNAME')",
+        "SESSION_CONTEXT(N'DATABASENAME')",
+        "SESSION_CONTEXT(N'ALLOWOPTIONALHINTEXERCISE')",
+        "N'ADVENTUREWORKS2022'",
+        "SERVERPROPERTY('PRODUCTMAJORVERSION')",
+        "68A70D6E-62D8-4A77-8F0A-9DA7934DBA7C",
+        "N'MCP SQL QUERY STORE WORKSHOP'",
+        "0XADA06F206D3DB321527A5AAB390FC814E28EBB59791967EB99841BF669E1B16B",
+        "ACTUAL_STATE_DESC = N'READ_WRITE'",
+    ):
+        assert contract in text
+    first_mutation = min(text.index("SP_QUERY_STORE_SET_HINTS"), text.index("INSERT INTO WORKSHOPADMIN.DBO.QUERYSTOREHINTOWNERSHIP"))
+    assert text.index("ALLOWOPTIONALHINTEXERCISE") < first_mutation
+    assert re.search(r"ISNULL\(@ALLOWOPTIONALHINTEXERCISE,\s*0\)\s*<>\s*1.*?RETURN", text)
+    assert "@ALLOWOPTIONALHINTEXERCISEVALUE" in text
+    assert "SQL_VARIANT_PROPERTY(@ALLOWOPTIONALHINTEXERCISEVALUE, 'BASETYPE') <> N'BIT'" in text
+    assert re.search(r"TRY_CONVERT\(INT,\s*@ALLOWOPTIONALHINTEXERCISEVALUE\).*?NOT IN \(0, 1\).*?THROW", text)
+
+
+def test_optional_hint_discovers_exact_baseline_query_without_fixed_id() -> None:
+    text = normalized("08-OptionalQueryStoreHint.sql")
+    assert "SYS.QUERY_STORE_QUERY AS Q" in text
+    assert "SYS.QUERY_STORE_QUERY_TEXT AS QT" in text
+    assert "Q.OBJECT_ID = OBJECT_ID(N'LAB.USP_MONTHENDSALESBASELINE', N'P')" in text
+    assert "Q.QUERY_CONTEXT_SETTINGS_ID" in text
+    assert "SESSION_CONTEXT(N'OPTIONALHINTQUERYCONTEXTSETTINGSID')" in text
+    assert "Q.QUERY_HASH" in text
+    assert "HASHBYTES('SHA2_256'" in text
+    assert "INSERT @WIDEWORK" in text and "FROM LAB.FACTSALES AS FS" in text
+    assert "SP_QUERY_STORE_SET_HINTS" not in text[:text.index("SYS.QUERY_STORE_QUERY AS Q")]
+    assert re.search(r"@MATCHCOUNT\s*<>\s*1.*?THROW", text)
+    assert not re.search(r"DECLARE\s+@QUERYID\s+BIGINT\s*=\s*\d+", text)
+    assert "EXCLUDE OWN DIAGNOSTIC TEXT" in text
+
+
+def test_optional_hint_owns_inspects_tests_clears_and_verifies_lifecycle() -> None:
+    text = normalized("08-OptionalQueryStoreHint.sql")
+    hint = "OPTION (MAX_GRANT_PERCENT = 10)"
+    assert hint in text
+    assert "WORKSHOPADMIN.DBO.QUERYSTOREHINTOWNERSHIP" in text
+    assert "SYS.QUERY_STORE_QUERY_HINTS" in text
+    assert "QUERY_HINT_TEXT" in text
+    assert "LAST_QUERY_HINT_FAILURE_REASON" in text
+    assert "LAST_QUERY_HINT_FAILURE_REASON_DESC" in text
+    assert "QUERY_HINT_FAILURE_COUNT" in text
+    assert "SOURCE_DESC" in text
+    assert "FOREIGN OR MANUAL QUERY STORE HINT" in text
+    assert "LAB.USP_MONTHENDSALESOPTIMIZED" not in text
+    assert "EXEC LAB.USP_MONTHENDSALESBASELINE" in text
+    assert "DECLARE @TESTSTARTDATE DATE = CONVERT(DATE, '2014-01-01')" in text
+    assert "DECLARE @TESTENDDATEEXCLUSIVE DATE = CONVERT(DATE, '2014-01-08')" in text
+    assert "@STARTDATE = @TESTSTARTDATE" in text
+    assert "@ENDDATEEXCLUSIVE = @TESTENDDATEEXCLUSIVE" in text
+    assert text.count("SYS.SP_QUERY_STORE_CLEAR_HINTS") >= 2
+    assert "@CREATEDBYTHISINVOCATION" in text
+    assert "@OWNEDHINTFORTHISINVOCATION" in text
+    assert "MCP_SQL_WORKSHOP_LIFECYCLE" in text
+    assert "@BEFORESTATISTICS" in text and "@AFTERSTATISTICS" in text
+    assert "SYS.QUERY_STORE_RUNTIME_STATS" in text
+    assert "EXERCISEEXECUTIONCOUNT" in text and "EXERCISEDURATIONMICROSECONDS" in text
+    assert "OWNERSHIPSTATE = 'CLEARED'" in text
+    assert re.search(r"OWNERSHIPSTATE = 'CLEARED'.*?SET OWNERSHIPSTATE = 'PENDING'", text)
+    clear_calls = [match.start() for match in re.finditer(r"SYS\.SP_QUERY_STORE_CLEAR_HINTS", text)]
+    for call in clear_calls:
+        preceding = text[max(0, call - 1800):call]
+        assert "SYS.QUERY_STORE_QUERY_HINTS" in preceding
+        assert "OPTION(MAX_GRANT_PERCENT=10)" in preceding
+        assert "QUERYSTOREHINTOWNERSHIP" in preceding
+    assert re.search(r"IF EXISTS\s*\(.*?SYS\.QUERY_STORE_QUERY_HINTS.*?THROW", text)
+    catch = text[text.index("BEGIN CATCH"):]
+    assert "ERROR_NUMBER()" in catch
+    assert "CLEAR ATTEMPT" in catch
+    assert re.search(r"THROW\s*;", catch)
+
+
+def test_cleanup_requires_exact_context_marker_server_database_and_lock() -> None:
+    raw = sql("09-Cleanup.sql")
+    text = normalized("09-Cleanup.sql")
+    assert ":on error exit" in raw.lower()
+    assert not re.search(r"\$\(\w+\)", raw)
+    assert re.search(r"IF\s+@@TRANCOUNT\s*<>\s*0.*?THROW", text)
+    for contract in (
+        "SESSION_CONTEXT(N'EXPECTEDSERVERNAME')",
+        "SESSION_CONTEXT(N'DATABASENAME')",
+        "SESSION_CONTEXT(N'DROPLABDATA')",
+        "N'ADVENTUREWORKS2022'",
+        "SERVERPROPERTY('PRODUCTMAJORVERSION')",
+        "68A70D6E-62D8-4A77-8F0A-9DA7934DBA7C",
+        "N'MCP SQL QUERY STORE WORKSHOP'",
+        "0XADA06F206D3DB321527A5AAB390FC814E28EBB59791967EB99841BF669E1B16B",
+        "SYS.SP_GETAPPLOCK",
+        "SYS.SP_RELEASEAPPLOCK",
+        "MCP_SQL_WORKSHOP_LIFECYCLE",
+    ):
+        assert contract in text
+    assert re.search(r"@DROPLABDATA\s+BIT\s*=\s*COALESCE\(.*?,\s*0\)", text)
+    assert re.search(r"TRY_CONVERT\(INT,\s*@DROPLABDATAVALUE\).*?NOT IN \(0, 1\).*?THROW", text)
+    assert "SQL_VARIANT_PROPERTY(@DROPLABDATAVALUE, 'BASETYPE') <> N'BIT'" in text
+    assert "@QUERYSTOREISREADWRITE" in text
+    assert re.search(r"@OWNEDACTIVEHINTCOUNT\s*>\s*0.*?@QUERYSTOREISREADWRITE\s*<>\s*1.*?THROW", text)
+    lock = text.index("SYS.SP_GETAPPLOCK")
+    assert lock < text.index("CREATE TABLE DBO.CLEANUPAUDIT")
+    assert lock < text.index("INSERT WORKSHOPADMIN.DBO.CLEANUPAUDIT")
+
+
+def test_cleanup_session_termination_is_double_tagged_snapshotted_and_bounded() -> None:
+    text = normalized("09-Cleanup.sql")
+    assert "SYS.DM_EXEC_SESSIONS" in text
+    assert "PROGRAM_NAME LIKE N'MCP-SQL-WORKSHOP-%'" in text
+    assert "CONTEXT_INFO" in text
+    assert "TRY_CONVERT(UNIQUEIDENTIFIER, CONVERT(BINARY(16), SUBSTRING(" in text
+    assert "TOP (100)" in text
+    assert "SESSION_ID <> @@SPID" in text
+    assert "PRIMARY KEY" in text
+    assert re.search(r"WHILE\s+@KILLORDINAL\s*<=\s+@KILLCOUNT", text)
+    assert "WHILE 1 = 1" not in text
+    assert "KILL " in text
+    assert "CURRENTMARKER.RUNID = @KILLRUNID" in text
+    assert "QUOTENAME" not in text[text.index("DECLARE @KILLSQL"):text.index("EXEC SYS.SP_EXECUTESQL @KILLSQL")]
+
+
+def test_cleanup_clears_only_owned_hints_and_restores_configuration() -> None:
+    text = normalized("09-Cleanup.sql")
+    assert "WORKSHOPADMIN.DBO.QUERYSTOREHINTOWNERSHIP" in text
+    assert "SYS.SP_QUERY_STORE_CLEAR_HINTS" in text
+    assert "SYS.QUERY_STORE_QUERY_HINTS" in text
+    assert "CONFIGURATIONBACKUP" in text and "DATABASECONFIGURATIONBACKUP" in text
+    for setting in (
+        "ROW_MODE_MEMORY_GRANT_FEEDBACK",
+        "BATCH_MODE_MEMORY_GRANT_FEEDBACK",
+        "MEMORY_GRANT_FEEDBACK_PERCENTILE_GRANT",
+        "MEMORY_GRANT_FEEDBACK_PERSISTENCE",
+        "QUERY_STORE",
+        "MAX SERVER MEMORY (MB)",
+        "MIN SERVER MEMORY (MB)",
+        "CLASSIFIER_FUNCTION",
+        "RESOURCE GOVERNOR RECONFIGURE",
+    ):
+        assert setting in text
+    memory = text[text.index("DECLARE @RESTOREMEMORYSQL"):]
+    assert memory.index("MIN SERVER MEMORY (MB)', 0") < memory.index("MAX SERVER MEMORY (MB)', @BACKUPMAXSERVERMEMORYMB")
+    assert memory.index("MAX SERVER MEMORY (MB)', @BACKUPMAXSERVERMEMORYMB") < memory.index("MIN SERVER MEMORY (MB)', @BACKUPMINSERVERMEMORYMB")
+    hint_loop = text[text.index("WHILE @HINTORDINAL <= @HINTCOUNT"):text.index("IF EXISTS", text.index("WHILE @HINTORDINAL <= @HINTCOUNT") + 20)]
+    assert "SYS.QUERY_STORE_QUERY_HINTS" in hint_loop
+    assert "QUERYSTOREHINTOWNERSHIP" in hint_loop
+    assert "OPTION(MAX_GRANT_PERCENT=10)" in hint_loop
+    for fingerprint in ("QUERYCONTEXTSETTINGSID", "QUERYHASH", "QUERYTEXTHASH"):
+        assert fingerprint in hint_loop
+    assert "MAX_STORAGE_SIZE_MB" in text
+    assert "QUERY_CAPTURE_MODE" in text
+    assert text.index("MAX_STORAGE_SIZE_MB") < text.index("OPERATION_MODE = READ_ONLY")
+    assert "FOR SECONDARY SET ROW_MODE_MEMORY_GRANT_FEEDBACK = PRIMARY" in text
+    assert "FOR SECONDARY SET BATCH_MODE_MEMORY_GRANT_FEEDBACK = PRIMARY" in text
+    for option in (
+        "STALE_QUERY_THRESHOLD_DAYS", "DATA_FLUSH_INTERVAL_SECONDS", "INTERVAL_LENGTH_MINUTES",
+        "SIZE_BASED_CLEANUP_MODE", "WAIT_STATS_CAPTURE_MODE",
+    ):
+        assert option in text
+
+
+def test_restore_captures_complete_pre_workshop_query_store_state_before_configuration() -> None:
+    text = normalized("02-RestoreAndConfigureDatabase.sql")
+    capture = text.index("INSERT INTO WORKSHOPADMIN.DBO.DATABASECONFIGURATIONBACKUP")
+    configure = text.index("EXEC SYS.SP_EXECUTESQL @CONFIGURESQL")
+    assert capture < configure
+    for column in (
+        "QUERYSTORESTALEQUERYTHRESHOLDDAYS", "QUERYSTOREFLUSHINTERVALSECONDS",
+        "QUERYSTOREINTERVALLENGTHMINUTES", "QUERYSTORESIZEBASEDCLEANUPMODEDESC",
+        "QUERYSTOREWAITSTATSCAPTUREMODEDESC",
+    ):
+        assert column in text
+    assert "INCOMPLETE LEGACY DATABASE CONFIGURATION BACKUP CANNOT BE SAFELY BACKFILLED" in text
+    assert "UPDATE WORKSHOPADMIN.DBO.DATABASECONFIGURATIONBACKUP" not in text
+    assert "COMPATIBILITYLEVEL" in text
+
+
+def test_cleanup_restores_original_database_compatibility_level() -> None:
+    text = normalized("09-Cleanup.sql")
+    assert "@BACKUPCOMPATIBILITYLEVEL" in text
+    assert "SET COMPATIBILITY_LEVEL = " in text
+    assert "SYS.DATABASES" in text
+
+
+def test_cleanup_removes_only_exact_owned_resource_governor_objects() -> None:
+    text = normalized("09-Cleanup.sql")
+    assert "RESOURCEGOVERNOROBJECTOWNERSHIP" in text
+    assert "DEFINITIONHASH" in text
+    assert "MASTER.SYS.SQL_MODULES" in text and "HASHBYTES('SHA2_256'" in text
+    assert "REQUEST_MAX_MEMORY_GRANT_PERCENT = 40" in text
+    assert "MIN_MEMORY_PERCENT = 0" in text and "MAX_MEMORY_PERCENT = 50" in text
+    assert "DROP WORKLOAD GROUP [MCP_SQL_WORKSHOP_GROUP]" in text
+    assert "DROP RESOURCE POOL [MCP_SQL_WORKSHOP_POOL]" in text
+    assert "DROP FUNCTION DBO.MCP_SQL_WORKSHOP_CLASSIFIER" in text
+    assert text.index("DROP WORKLOAD GROUP [MCP_SQL_WORKSHOP_GROUP]") < text.index("DROP RESOURCE POOL [MCP_SQL_WORKSHOP_POOL]")
+    assert "RESTORE THE PRIOR CLASSIFIER" in text
+    assert "FOREIGN" in text and "REFUSING TO DROP" in text
+    classifier_region = text[text.index("DECLARE @EXPECTEDCLASSIFIERCREATESQL"):text.index("RELATIONSHIP-SAFE MEMORY RESTORATION") if "RELATIONSHIP-SAFE MEMORY RESTORATION" in text else text.index("DECLARE @RESTOREMEMORYSQL")]
+    assert "USE [MASTER]" in classifier_region
+    assert "MASTER.SYS.OBJECTS" in classifier_region
+    assert "MASTER.SYS.SQL_MODULES" in classifier_region
+    assert "@CURRENTCLASSIFIERID" in classifier_region
+    assert re.search(r"@CURRENTCLASSIFIERID NOT IN \(COALESCE\(@WORKSHOPCLASSIFIERID, -1\), @BACKUPCLASSIFIERFUNCTIONID\).*?THROW", classifier_region)
+
+
+def test_cleanup_identity_certificate_and_dmk_are_narrow_and_audited() -> None:
+    text = normalized("09-Cleanup.sql")
+    assert "DROP USER [MCP_WORKSHOP_READER]" in text
+    assert "DROP LOGIN [MCP_WORKSHOP_READER]" in text
+    assert "SUSER_SID(N'MCP_WORKSHOP_READER')" in text
+    assert "DROP LOGIN [MCP_WORKSHOP_DIAGNOSTICS_CERTIFICATE_LOGIN]" in text
+    assert text.count("DROP CERTIFICATE [MCP_WORKSHOP_DIAGNOSTICS_CERTIFICATE]") >= 2
+    assert "MCP WORKSHOP SERVER DMV MODULE SIGNING" in text
+    assert "CERTIFICATE EXPORT" in text and "BOOTSTRAP CLEANUP" in text
+    assert "CLOSE MASTER KEY" in text
+    assert "DROP MASTER KEY" not in text
+    assert "XP_CMDSHELL" not in text
+    assert "CLEANUPAUDIT" in text and "SYSUTCDATETIME()" in text
+    assert "IDENTITYOWNERSHIP" in text
+    assert "CREATEDBYWORKSHOP = 1" in text
+
+
+def test_cleanup_optional_drop_is_marker_owned_dependency_ordered_and_preserves_source() -> None:
+    text = normalized("09-Cleanup.sql")
+    optional = text[text.index("IF @DROPLABDATA = 1"):]
+    assert "LAB.WORKSHOPMARKER" in optional
+    assert re.search(r"DROP VIEW(?: IF EXISTS)? LAB\.VW_WORKSHOPSAMPLESUMMARY", optional)
+    assert re.search(r"DROP PROCEDURE(?: IF EXISTS)? LAB\.USP_GETMEMORYSNAPSHOT", optional)
+    assert re.search(r"DROP TABLE(?: IF EXISTS)? LAB\.WORKSHOPREQUESTSAMPLE", optional)
+    assert re.search(r"DROP TABLE(?: IF EXISTS)? LAB\.FACTSALES", optional)
+    assert re.search(r"DROP TABLE(?: IF EXISTS)? LAB\.WORKSHOPMARKER", optional)
+    assert optional.index("DROP VIEW") < optional.index("DROP PROCEDURE") < optional.index("DROP TABLE IF EXISTS LAB.WORKSHOPREQUESTSAMPLE")
+    assert "DROP SCHEMA LAB" in optional
+    assert "@EXPECTEDLABOBJECTS" in optional
+    assert "LABOBJECTOWNERSHIP" in optional
+    assert "DEFINITIONHASH" in optional and "SCHEMAHASH" in optional
+    assert "SYS.OBJECTS" in optional and "SYS.SCHEMAS" in optional
+    assert "UNEXPECTED OR DRIFTED LAB OBJECT" in optional
+    assert "DROP DATABASE" not in text
+    for source in ("SALES.SALESORDERHEADER", "SALES.SALESORDERDETAIL", "SALES.SALESTERRITORY"):
+        assert f"DROP TABLE {source}" not in text
+    assert "DBCC" not in text
+
+
+def test_diagnostics_records_created_identity_ownership() -> None:
+    text = normalized("05-CreateDiagnostics.sql")
+    assert "WORKSHOPADMIN.DBO.IDENTITYOWNERSHIP" in text
+    assert "@READERLOGINCREATED" in text
+    assert "CREATEDBYWORKSHOP" in text
+
+
+def test_runner_finalizes_exact_lab_object_ownership_after_all_setup_scripts() -> None:
+    text = (ROOT / "deploy" / "Invoke-WorkshopSqlScripts.ps1").read_text(encoding="utf-8").upper()
+    finalize = text.index("$FINALIZELABOWNERSHIPCOMMAND")
+    assert finalize > text.index("FOREACH ($SCRIPTNAME IN $SCRIPTNAMES)")
+    for token in ("WORKSHOPADMIN.DBO.LABOBJECTOWNERSHIP", "DEFINITIONHASH", "SCHEMAHASH", "@CURRENTLABOBJECTS"):
+        assert token in text[finalize:]
+
+
+def test_cleanup_global_catch_releases_lock_best_effort_and_bare_rethrows() -> None:
+    text = normalized("09-Cleanup.sql")
+    catch = text[text.index("BEGIN CATCH", text.index("SYS.SP_GETAPPLOCK")):]
+    assert "@RESTORATIONERRORS" in catch
+    assert "SYS.SP_RELEASEAPPLOCK" in catch
+    assert "BEST-EFFORT RESTORE" in catch
+    assert "ERROR_MESSAGE()" not in catch
+    assert re.search(r"THROW\s*;\s*END CATCH", catch)
+
+
+def test_task13_scripts_avoid_unsafe_global_operations_and_raw_substitution() -> None:
+    combined = "\n".join(sql(name) for name in ("08-OptionalQueryStoreHint.sql", "09-Cleanup.sql"))
+    upper = combined.upper()
+    assert not re.search(r"\$\(\w+\)", combined)
+    for forbidden in (
+        "DROP DATABASE", "DBCC DROPCLEANBUFFERS", "DBCC FREEPROCCACHE", "WHILE 1 = 1",
+        "XP_CMDSHELL", "SHUTDOWN", "ALTER ENDPOINT", "CREATE ENDPOINT",
+    ):
+        assert forbidden not in upper
+    cleanup = normalized("09-Cleanup.sql")
+    assert cleanup.count("DROP LOGIN [MCP_WORKSHOP_READER]") == 1
+    assert cleanup.count("DROP LOGIN [MCP_WORKSHOP_DIAGNOSTICS_CERTIFICATE_LOGIN]") == 1
+    assert not re.search(r"DROP\s+LOGIN\s+(?!\[MCP_WORKSHOP_READER\]|\[MCP_WORKSHOP_DIAGNOSTICS_CERTIFICATE_LOGIN\])", cleanup)
+    for path in SQL_DIR.glob("*.sql"):
+        if path.name != "09-Cleanup.sql":
+            assert "DROP LOGIN" not in normalized(path.name)

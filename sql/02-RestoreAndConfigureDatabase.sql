@@ -139,6 +139,86 @@ BEGIN
     SET @FreshRestore = 1;
 END;
 
+/* 01 runs before a first restore, so a fresh database has no database backup row yet.
+   Capture every Query Store option this script changes before applying workshop values. */
+IF DB_ID(N'WorkshopAdmin') IS NULL
+   OR OBJECT_ID(N'WorkshopAdmin.dbo.DatabaseConfigurationBackup', N'U') IS NULL
+    THROW 51215, 'WorkshopAdmin database configuration backup storage is required.', 1;
+
+IF COL_LENGTH(N'WorkshopAdmin.dbo.DatabaseConfigurationBackup', N'QueryStoreStaleQueryThresholdDays') IS NULL
+    ALTER TABLE WorkshopAdmin.dbo.DatabaseConfigurationBackup ADD QueryStoreStaleQueryThresholdDays bigint NULL;
+IF COL_LENGTH(N'WorkshopAdmin.dbo.DatabaseConfigurationBackup', N'QueryStoreFlushIntervalSeconds') IS NULL
+    ALTER TABLE WorkshopAdmin.dbo.DatabaseConfigurationBackup ADD QueryStoreFlushIntervalSeconds bigint NULL;
+IF COL_LENGTH(N'WorkshopAdmin.dbo.DatabaseConfigurationBackup', N'QueryStoreIntervalLengthMinutes') IS NULL
+    ALTER TABLE WorkshopAdmin.dbo.DatabaseConfigurationBackup ADD QueryStoreIntervalLengthMinutes bigint NULL;
+IF COL_LENGTH(N'WorkshopAdmin.dbo.DatabaseConfigurationBackup', N'QueryStoreSizeBasedCleanupModeDesc') IS NULL
+    ALTER TABLE WorkshopAdmin.dbo.DatabaseConfigurationBackup ADD QueryStoreSizeBasedCleanupModeDesc nvarchar(60) NULL;
+IF COL_LENGTH(N'WorkshopAdmin.dbo.DatabaseConfigurationBackup', N'QueryStoreWaitStatsCaptureModeDesc') IS NULL
+    ALTER TABLE WorkshopAdmin.dbo.DatabaseConfigurationBackup ADD QueryStoreWaitStatsCaptureModeDesc nvarchar(60) NULL;
+IF COL_LENGTH(N'WorkshopAdmin.dbo.DatabaseConfigurationBackup', N'CompatibilityLevel') IS NULL
+    ALTER TABLE WorkshopAdmin.dbo.DatabaseConfigurationBackup ADD CompatibilityLevel tinyint NULL;
+
+IF NOT EXISTS
+(
+    SELECT 1 FROM WorkshopAdmin.dbo.DatabaseConfigurationBackup
+    WHERE MarkerId = @WorkshopMarker AND SchemaVersion = @WorkshopSchemaVersion
+      AND DatabaseName = @DatabaseName
+)
+BEGIN
+    DECLARE @CaptureOriginalDatabaseConfigurationSql nvarchar(max) = N'USE ' + QUOTENAME(@DatabaseName) + N';
+        INSERT INTO WorkshopAdmin.dbo.DatabaseConfigurationBackup
+        (
+            MarkerId, SchemaVersion, DatabaseName,
+            QueryStoreActualStateDesc, QueryStoreDesiredStateDesc, QueryStoreMaxStorageSizeMB,
+            QueryStoreCaptureModeDesc, QueryStoreStaleQueryThresholdDays,
+            QueryStoreFlushIntervalSeconds, QueryStoreIntervalLengthMinutes,
+            QueryStoreSizeBasedCleanupModeDesc, QueryStoreWaitStatsCaptureModeDesc,
+            CompatibilityLevel,
+            RowModeMemoryGrantFeedback, RowModeMemoryGrantFeedbackForSecondary,
+            BatchModeMemoryGrantFeedback, BatchModeMemoryGrantFeedbackForSecondary,
+            MemoryGrantFeedbackPercentileGrant, MemoryGrantFeedbackPercentileGrantForSecondary,
+            MemoryGrantFeedbackPersistence, MemoryGrantFeedbackPersistenceForSecondary
+        )
+        SELECT @MarkerId, @Version, DB_NAME(), q.actual_state_desc, q.desired_state_desc,
+               q.max_storage_size_mb, q.query_capture_mode_desc, q.stale_query_threshold_days,
+               q.flush_interval_seconds, q.interval_length_minutes, q.size_based_cleanup_mode_desc,
+               q.wait_stats_capture_mode_desc, database_state.compatibility_level,
+               MAX(CASE WHEN d.name = N''ROW_MODE_MEMORY_GRANT_FEEDBACK'' THEN TRY_CONVERT(int, d.value) END),
+               MAX(CASE WHEN d.name = N''ROW_MODE_MEMORY_GRANT_FEEDBACK'' THEN TRY_CONVERT(int, d.value_for_secondary) END),
+               MAX(CASE WHEN d.name = N''BATCH_MODE_MEMORY_GRANT_FEEDBACK'' THEN TRY_CONVERT(int, d.value) END),
+               MAX(CASE WHEN d.name = N''BATCH_MODE_MEMORY_GRANT_FEEDBACK'' THEN TRY_CONVERT(int, d.value_for_secondary) END),
+               MAX(CASE WHEN d.name = N''MEMORY_GRANT_FEEDBACK_PERCENTILE_GRANT'' THEN TRY_CONVERT(int, d.value) END),
+               MAX(CASE WHEN d.name = N''MEMORY_GRANT_FEEDBACK_PERCENTILE_GRANT'' THEN TRY_CONVERT(int, d.value_for_secondary) END),
+               MAX(CASE WHEN d.name = N''MEMORY_GRANT_FEEDBACK_PERSISTENCE'' THEN TRY_CONVERT(int, d.value) END),
+               MAX(CASE WHEN d.name = N''MEMORY_GRANT_FEEDBACK_PERSISTENCE'' THEN TRY_CONVERT(int, d.value_for_secondary) END)
+        FROM sys.database_query_store_options AS q
+        CROSS JOIN sys.databases AS database_state
+        CROSS JOIN sys.database_scoped_configurations AS d
+        WHERE database_state.database_id = DB_ID()
+        GROUP BY q.actual_state_desc, q.desired_state_desc, q.max_storage_size_mb,
+                 q.query_capture_mode_desc, q.stale_query_threshold_days, q.flush_interval_seconds,
+             q.interval_length_minutes, q.size_based_cleanup_mode_desc, q.wait_stats_capture_mode_desc,
+             database_state.compatibility_level;';
+    EXEC sys.sp_executesql @CaptureOriginalDatabaseConfigurationSql,
+        N'@MarkerId uniqueidentifier, @Version int',
+        @MarkerId = @WorkshopMarker, @Version = @WorkshopSchemaVersion;
+END;
+ELSE IF EXISTS
+(
+    SELECT 1 FROM WorkshopAdmin.dbo.DatabaseConfigurationBackup
+    WHERE MarkerId = @WorkshopMarker AND SchemaVersion = @WorkshopSchemaVersion
+      AND DatabaseName = @DatabaseName
+     AND (QueryStoreStaleQueryThresholdDays IS NULL
+         OR QueryStoreFlushIntervalSeconds IS NULL
+         OR QueryStoreIntervalLengthMinutes IS NULL
+         OR QueryStoreSizeBasedCleanupModeDesc IS NULL
+         OR QueryStoreWaitStatsCaptureModeDesc IS NULL
+         OR CompatibilityLevel IS NULL)
+)
+BEGIN
+    THROW 51216, 'Incomplete legacy database configuration backup cannot be safely backfilled after prior mutation.', 1;
+END;
+
 EXEC sys.sp_executesql @ConfigureSql;
 
 IF @FreshRestore = 1

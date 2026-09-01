@@ -355,6 +355,50 @@ END CATCH;
             Invoke-WorkshopSqlCommand -Connection $connection -CommandText $batch
         }
     }
+
+    $finalizeLabOwnershipCommand = @'
+DECLARE @MarkerId uniqueidentifier = '68A70D6E-62D8-4A77-8F0A-9DA7934DBA7C';
+DECLARE @SchemaVersion int = 1;
+DECLARE @CurrentLabObjects table
+(
+    ObjectName sysname NOT NULL PRIMARY KEY, ObjectType char(2) NOT NULL,
+    DefinitionHash varbinary(32) NULL, SchemaHash varbinary(32) NULL
+);
+INSERT @CurrentLabObjects (ObjectName, ObjectType, DefinitionHash, SchemaHash)
+SELECT object_entry.name, object_entry.type,
+       CASE WHEN module.definition IS NULL THEN NULL ELSE HASHBYTES('SHA2_256', CONVERT(varbinary(max), module.definition COLLATE Latin1_General_100_BIN2)) END,
+       CASE WHEN object_entry.type <> 'U' THEN NULL ELSE HASHBYTES('SHA2_256', CONVERT(varbinary(max), columns_shape.SchemaDefinition COLLATE Latin1_General_100_BIN2)) END
+FROM sys.objects AS object_entry
+INNER JOIN sys.schemas AS object_schema ON object_schema.schema_id = object_entry.schema_id
+LEFT JOIN sys.sql_modules AS module ON module.object_id = object_entry.object_id
+OUTER APPLY
+(
+    SELECT STRING_AGG(CONVERT(nvarchar(max), CONCAT(column_entry.column_id, N'|', column_entry.name, N'|', TYPE_NAME(column_entry.user_type_id), N'|', column_entry.max_length, N'|', column_entry.precision, N'|', column_entry.scale, N'|', column_entry.is_nullable, N'|', column_entry.is_identity)), N';') WITHIN GROUP (ORDER BY column_entry.column_id) AS SchemaDefinition
+    FROM sys.columns AS column_entry WHERE column_entry.object_id = object_entry.object_id
+) AS columns_shape
+WHERE object_schema.name = N'lab' AND object_entry.is_ms_shipped = 0 AND object_entry.type IN ('U', 'V', 'P');
+IF EXISTS
+(
+    SELECT ObjectName, ObjectType, DefinitionHash, SchemaHash FROM @CurrentLabObjects
+    EXCEPT
+    SELECT ObjectName, ObjectType, DefinitionHash, SchemaHash FROM WorkshopAdmin.dbo.LabObjectOwnership
+    WHERE MarkerId = @MarkerId AND SchemaVersion = @SchemaVersion AND DatabaseName = DB_NAME()
+)
+AND EXISTS (SELECT 1 FROM WorkshopAdmin.dbo.LabObjectOwnership WHERE MarkerId = @MarkerId AND SchemaVersion = @SchemaVersion AND DatabaseName = DB_NAME())
+    THROW 51701, 'Existing lab object ownership fingerprints do not match finalized objects.', 1;
+INSERT WorkshopAdmin.dbo.LabObjectOwnership
+    (MarkerId, SchemaVersion, DatabaseName, ObjectName, ObjectType, DefinitionHash, SchemaHash, RecordedAtUtc)
+SELECT @MarkerId, @SchemaVersion, DB_NAME(), current_object.ObjectName, current_object.ObjectType,
+       current_object.DefinitionHash, current_object.SchemaHash, SYSUTCDATETIME()
+FROM @CurrentLabObjects AS current_object
+WHERE NOT EXISTS
+(
+    SELECT 1 FROM WorkshopAdmin.dbo.LabObjectOwnership AS ownership
+    WHERE ownership.MarkerId = @MarkerId AND ownership.SchemaVersion = @SchemaVersion
+      AND ownership.DatabaseName = DB_NAME() AND ownership.ObjectName = current_object.ObjectName
+);
+'@
+    Invoke-WorkshopSqlCommand -Connection $connection -CommandText $finalizeLabOwnershipCommand
 }
 finally {
     if ($null -ne $builder) { $builder.Clear() }
