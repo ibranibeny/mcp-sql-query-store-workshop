@@ -1977,6 +1977,61 @@ Describe 'Task 12 workload orchestration' {
         @(Get-ChildItem (Join-Path $TestDrive 'evidence/runs') -Filter '*.tmp' -Directory).Count | Should -Be 0
     }
 
+    It 'preserves run-lock acquisition and rejection provenance through public startup' -ForEach @(
+        @{ Case = 'throw'; ExpectedStage = 'RunLockAcquisition'; ExpectedCode = 'RUN_LOCK_ACQUISITION_FAILED' }
+        @{ Case = 'reject'; ExpectedStage = 'ConcurrentRunRejected'; ExpectedCode = 'CONCURRENT_RUN_REJECTED' }
+    ) {
+        $fixture = Get-TestOperationSet
+        if ($Case -eq 'throw') {
+            $fixture.Operations.AcquireRunLock = { throw 'injected lock acquisition failure' }
+        }
+        else {
+            $fixture.Operations.AcquireRunLock = { return -1 }
+        }
+
+        $result = Invoke-WorkshopStartup -RunId ([guid]::NewGuid()) -RepositoryRoot $TestDrive `
+            -OperationFactory { $fixture.Operations }.GetNewClosure() -SemanticValidator { $true }
+
+        $result.Outcome | Should -BeExactly 'Failed'
+        $result.Evidence.terminationEvidence.failure.stage | Should -BeExactly $ExpectedStage
+        $result.Evidence.terminationEvidence.failure.code | Should -BeExactly $ExpectedCode
+    }
+
+    It 'returns export failure provenance without retrying the failed export' {
+        $fixture = Get-TestOperationSet
+        $fixture.State | Add-Member NoteProperty ExportAttempts 0
+        $fixture.Operations.Export = {
+            param($Result,$RemainingSeconds)
+            Write-Verbose "$($Result.Outcome) $RemainingSeconds"
+            $fixture.State.ExportAttempts++
+            throw 'injected evidence export failure'
+        }.GetNewClosure()
+
+        $result = Invoke-WorkshopStartup -RunId ([guid]::NewGuid()) -RepositoryRoot $TestDrive `
+            -OperationFactory { $fixture.Operations }.GetNewClosure() -SemanticValidator { $true }
+
+        $result.Outcome | Should -BeExactly 'Failed'
+        $result.Evidence.terminationEvidence.failure.stage | Should -BeExactly 'Export'
+        $result.Evidence.terminationEvidence.failure.code | Should -BeExactly 'EXPORT_FAILED'
+        $result.Evidence.terminationEvidence.failure.message | Should -BeExactly 'injected evidence export failure'
+        $fixture.State.ExportAttempts | Should -BeExactly 1
+    }
+
+    It 'classifies an untyped escaped experiment exception outside provider resolution' {
+        $fixture = Get-TestOperationSet
+        Mock -CommandName Invoke-WorkshopExperiment -ModuleName Workshop.Workload -MockWith {
+            throw 'injected unexpected experiment failure'
+        }
+
+        $result = Invoke-WorkshopStartup -RunId ([guid]::NewGuid()) -RepositoryRoot $TestDrive `
+            -OperationFactory { $fixture.Operations }.GetNewClosure() -SemanticValidator { $true }
+
+        $result.Outcome | Should -BeExactly 'Failed'
+        $result.Evidence.terminationEvidence.failure.stage | Should -BeExactly 'UnexpectedExperimentFailure'
+        $result.Evidence.terminationEvidence.failure.code | Should -BeExactly 'UNEXPECTED_EXPERIMENT_FAILURE'
+        $result.Evidence.terminationEvidence.failure.message | Should -BeExactly 'injected unexpected experiment failure'
+    }
+
     It 'exports sanitized local failure evidence when SQL failure persistence also fails' {
         $fixture = Get-TestOperationSet
         $inner = $fixture.Operations.Sample

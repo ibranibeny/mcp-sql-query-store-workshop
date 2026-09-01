@@ -2196,6 +2196,7 @@ function Invoke-WorkshopExperiment {
                 -SampleIntervalSeconds $SampleIntervalSeconds -WorkerRampSeconds $WorkerRampSeconds
             $startupExportBudget = [math]::Min(1, (& $getRemainingSeconds))
             if ($startupExportBudget -lt 1) { $startupExportBudget = $emergencyFinalizationBudgetSeconds }
+            $operationState.Stage = 'Export'
             & $OperationSet.Export $result $startupExportBudget
             return $result
         }
@@ -2331,6 +2332,7 @@ function Invoke-WorkshopExperiment {
             & $OperationSet.Persist $result $persistenceBudget
             $exportBudget = [math]::Min(1, (& $getRemainingSeconds))
             if ($exportBudget -lt 1) { throw 'The global deadline elapsed before local evidence export.' }
+            $operationState.Stage = 'Export'
             & $OperationSet.Export $result $exportBudget
             return $result
         }
@@ -2355,6 +2357,7 @@ function Invoke-WorkshopExperiment {
             & $OperationSet.Persist $result $persistenceBudget
             $exportBudget = [math]::Min(1, (& $getRemainingSeconds))
             if ($exportBudget -lt 1) { throw 'The global deadline elapsed before local evidence export.' }
+            $operationState.Stage = 'Export'
             & $OperationSet.Export $result $exportBudget
             return $result
         }
@@ -2648,12 +2651,14 @@ function Invoke-WorkshopExperiment {
         if ($comparisonState.Index -lt $comparisonOperations.Count -and
             $comparisonOperations[$comparisonState.Index].Name -ceq 'Export') {
             $exportBudget = & $beginComparisonOperation 'Export'
+            $operationState.Stage = 'Export'
             & $OperationSet.Export $result $exportBudget
             & $completeComparisonOperation 'Export'
         }
         else {
             $exportBudget = [math]::Min(1, (& $getRemainingSeconds))
             if ($exportBudget -lt 1) { throw 'The global deadline elapsed before local evidence export.' }
+            $operationState.Stage = 'Export'
             & $OperationSet.Export $result $exportBudget
         }
         return $result
@@ -2663,6 +2668,16 @@ function Invoke-WorkshopExperiment {
         $caughtStage = [string]$operationState.Stage
         $originalText = ConvertTo-SanitizedFailureMessage $originalError.Exception.Message
         & $invokeFinalization $caughtStage
+
+        if ($null -ne $result -and $caughtStage -eq 'Export') {
+            $failure = ConvertTo-WorkshopFailureEvidence -Code 'EXPORT_FAILED' -Stage 'Export' `
+                -Message $originalText -StartupFailure ($samples.Count -eq 0)
+            $result.Outcome = 'Failed'
+            $result.RunStatus = 'Failed'
+            $result.Evidence.outcome = 'Failed'
+            Copy-WorkshopFailureEvidence $result.TerminationEvidence $failure
+            Copy-WorkshopFailureEvidence $result.Evidence.terminationEvidence $failure
+        }
 
         if ($null -eq $result) {
             try {
@@ -2743,6 +2758,9 @@ function Invoke-WorkshopExperiment {
                         Copy-WorkshopFailureEvidence $result.Evidence.terminationEvidence $persistenceFailure
                     }
                 }
+            }
+            if ($caughtStage -eq 'Export') {
+                return $result
             }
             try {
                 $operationState.Stage = 'Export'
@@ -2897,6 +2915,21 @@ function Invoke-WorkshopStartup {
         else {
             $operationSet = & $OperationFactory
         }
+    }
+    catch {
+        $completedAt = [datetimeoffset]::UtcNow
+        $failure = ConvertTo-WorkshopFailureEvidence -Code 'PROVIDER_RESOLUTION_FAILED' `
+            -Stage 'ProviderResolution' -Message $_.Exception.Message -StartupFailure $true
+        $result = Build-WorkshopStartupFailureResult -RunId $RunId -Failure $failure `
+            -StartedAtUtc $startedAt -CompletedAtUtc $completedAt -MaximumWorkers $MaximumWorkers `
+            -MaximumDurationSeconds $MaximumDurationSeconds -SampleIntervalSeconds $SampleIntervalSeconds `
+            -WorkerRampSeconds $WorkerRampSeconds
+        Export-WorkshopEvidenceFile -RunId $RunId.ToString('D') -Evidence $result.Evidence `
+            -RepositoryRoot $RepositoryRoot -SemanticValidator $SemanticValidator -Confirm:$false | Out-Null
+        return $result
+    }
+
+    try {
         return Invoke-WorkshopExperiment -RunId $RunId -OperationSet $operationSet `
             -MaximumWorkers $MaximumWorkers -MaximumDurationSeconds $MaximumDurationSeconds `
             -SampleIntervalSeconds $SampleIntervalSeconds -WorkerRampSeconds $WorkerRampSeconds `
@@ -2905,8 +2938,18 @@ function Invoke-WorkshopStartup {
     }
     catch {
         $completedAt = [datetimeoffset]::UtcNow
-        $failure = ConvertTo-WorkshopFailureEvidence -Code 'PROVIDER_RESOLUTION_FAILED' `
-            -Stage 'ProviderResolution' -Message $_.Exception.Message -StartupFailure $true
+        $failureCode = 'UNEXPECTED_EXPERIMENT_FAILURE'
+        $failureStage = 'UnexpectedExperimentFailure'
+        if ($_.Exception.Data.Contains('WorkshopFailureCode') -and
+            -not [string]::IsNullOrWhiteSpace([string]$_.Exception.Data['WorkshopFailureCode'])) {
+            $failureCode = [string]$_.Exception.Data['WorkshopFailureCode']
+        }
+        if ($_.Exception.Data.Contains('WorkshopFailureStage') -and
+            -not [string]::IsNullOrWhiteSpace([string]$_.Exception.Data['WorkshopFailureStage'])) {
+            $failureStage = [string]$_.Exception.Data['WorkshopFailureStage']
+        }
+        $failure = ConvertTo-WorkshopFailureEvidence -Code $failureCode -Stage $failureStage `
+            -Message $_.Exception.Message -StartupFailure $true
         $result = Build-WorkshopStartupFailureResult -RunId $RunId -Failure $failure `
             -StartedAtUtc $startedAt -CompletedAtUtc $completedAt -MaximumWorkers $MaximumWorkers `
             -MaximumDurationSeconds $MaximumDurationSeconds -SampleIntervalSeconds $SampleIntervalSeconds `
