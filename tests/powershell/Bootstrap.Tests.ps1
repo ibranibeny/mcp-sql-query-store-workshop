@@ -240,9 +240,12 @@ Describe 'Administration VM bootstrap static contract' {
         $text = $script:AdminContract.Text
         $text | Should -Match 'Resolve-DnsName'
         $text | Should -Match 'Test-NetConnection'
-        $text | Should -Match 'Encrypt=True'
-        $text | Should -Match 'TrustServerCertificate=False'
-        $text | Should -Match 'HostNameInCertificate'
+        $text | Should -Match "-HostNameInCertificate\s+'sql01\.mcpworkshop\.internal'"
+        $text | Should -Match 'Encrypt\s*=\s*\$true'
+        $text | Should -Match 'TrustServerCertificate\s*=\s*\$false'
+        $text | Should -Match 'ApplicationName'
+        $text | Should -Match 'Microsoft\.Data\.SqlClient\.SqlConnectionStringBuilder'
+        $text | Should -Match 'UTF8Encoding\]\:\:new\(\$false\)'
         $text | Should -Match 'encrypt_option'
         $text | Should -Match 'initialize'
         $text | Should -Match 'tools/list'
@@ -257,6 +260,74 @@ Describe 'Administration VM bootstrap static contract' {
         $text | Should -Not -Match 'mcp[/\\]\.env'
     }
 
+    It 'round-trips a delimiter-bearing password through a Microsoft.Data-compatible parser without output leakage' {
+        foreach ($functionName in @('ConvertTo-DabMssqlConnectionString', 'Read-DabMssqlEnvironment')) {
+            $functionAst = $script:AdminContract.Ast.Find({
+                param($node)
+                $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+                    $node.Name -eq $functionName
+            }, $true)
+            $functionAst | Should -Not -BeNullOrEmpty
+            . ([scriptblock]::Create($functionAst.Extent.Text))
+        }
+
+        if ('Microsoft.Data.SqlClient.TestSqlConnectionStringBuilder' -as [type] -eq $null) {
+            Add-Type -TypeDefinition @'
+namespace Microsoft.Data.SqlClient {
+    public sealed class TestSqlConnectionStringBuilder : System.Data.Common.DbConnectionStringBuilder {
+        public TestSqlConnectionStringBuilder() { }
+        public TestSqlConnectionStringBuilder(string value) { ConnectionString = value; }
+        private string Get(string key) { return ContainsKey(key) ? (string)this[key] : string.Empty; }
+        private bool GetBool(string key) { return ContainsKey(key) && System.Convert.ToBoolean(this[key]); }
+        public string DataSource { get { return Get("Data Source"); } set { this["Data Source"] = value; } }
+        public string InitialCatalog { get { return Get("Initial Catalog"); } set { this["Initial Catalog"] = value; } }
+        public string UserID { get { return Get("User ID"); } set { this["User ID"] = value; } }
+        public string Password { get { return Get("Password"); } set { this["Password"] = value; } }
+        public bool Encrypt { get { return GetBool("Encrypt"); } set { this["Encrypt"] = value; } }
+        public bool TrustServerCertificate { get { return GetBool("TrustServerCertificate"); } set { this["TrustServerCertificate"] = value; } }
+        public string HostNameInCertificate { get { return Get("Host Name In Certificate"); } set { this["Host Name In Certificate"] = value; } }
+        public string ApplicationName { get { return Get("Application Name"); } set { this["Application Name"] = value; } }
+    }
+}
+'@
+        }
+
+        $builderType = 'Microsoft.Data.SqlClient.TestSqlConnectionStringBuilder' -as [type]
+        $secret = 'canary;value="quoted";tail'
+        $secureSecret = [securestring]::new()
+        foreach ($character in $secret.ToCharArray()) { $secureSecret.AppendChar($character) }
+        $secureSecret.MakeReadOnly()
+        $envPath = Join-Path $TestDrive '.env'
+        $captured = @(
+            $connectionString = ConvertTo-DabMssqlConnectionString -BuilderType $builderType `
+                -DataSource 'sql01.mcpworkshop.internal' -Database 'AdventureWorks2022' `
+            -UserId 'mcp_workshop_reader' -ReaderSecret $secureSecret `
+                -HostNameInCertificate 'sql01.mcpworkshop.internal' `
+                -ApplicationName 'MCP-SQL-Workshop-MCP'
+            [IO.File]::WriteAllText(
+                $envPath,
+                "MSSQL_CONNECTION_STRING=$connectionString`r`n",
+                [Text.UTF8Encoding]::new($false)
+            )
+            $parsed = Read-DabMssqlEnvironment -Path $envPath -BuilderType $builderType `
+                -ExpectedDataSource 'sql01.mcpworkshop.internal' `
+                -ExpectedUserId 'mcp_workshop_reader' `
+                -ExpectedHostNameInCertificate 'sql01.mcpworkshop.internal' `
+                -ExpectedApplicationName 'MCP-SQL-Workshop-MCP'
+        )
+
+        ($captured -join ' ') | Should -Not -Match ([regex]::Escape($secret))
+        $parsed.DataSource | Should -BeExactly 'sql01.mcpworkshop.internal'
+        $parsed.Encrypt | Should -BeTrue
+        $parsed.TrustServerCertificate | Should -BeFalse
+        $parsed.HostNameInCertificate | Should -BeExactly 'sql01.mcpworkshop.internal'
+        $parsed.UserId | Should -BeExactly 'mcp_workshop_reader'
+        $parsed.PasswordPresent | Should -BeTrue
+        $parsed.ApplicationName | Should -BeExactly 'MCP-SQL-Workshop-MCP'
+        $parsed.Builder.Password | Should -BeExactly $secret
+        [IO.File]::ReadAllBytes($envPath)[0..2] | Should -Not -Be @(0xEF, 0xBB, 0xBF)
+    }
+
     It 'observes GitHub CLI authentication without emitting token-bearing output' {
         $functionAst = $script:AdminContract.Ast.Find({
             param($node)
@@ -264,7 +335,7 @@ Describe 'Administration VM bootstrap static contract' {
                 $node.Name -eq 'Get-GitHubCliAuthStatus'
         }, $true)
         $functionAst | Should -Not -BeNullOrEmpty
-        Invoke-Expression $functionAst.Extent.Text
+        . ([scriptblock]::Create($functionAst.Extent.Text))
         (Get-GitHubCliAuthStatus -GitHubCliPath 'gh.exe' -CommandInvoker {
             param($FilePath, $Arguments)
             $null = $FilePath, $Arguments
@@ -288,7 +359,7 @@ Describe 'Bootstrap orchestration and evidence contracts' {
         foreach ($character in 'unit-test-secret-value'.ToCharArray()) { $script:SecureValue.AppendChar($character) }
         $script:SecureValue.MakeReadOnly()
 
-        function New-CompleteReadinessPair {
+        function Get-CompleteReadinessPair {
             $deploymentId = '11111111-2222-3333-4444-555555555555'
             $commit = '0123456789abcdef0123456789abcdef01234567'
             $thumbprint = '0123456789ABCDEF0123456789ABCDEF01234567'
@@ -454,7 +525,7 @@ Describe 'Bootstrap orchestration and evidence contracts' {
     }
 
     It 'passes only a complete exact pair and labels attested unknown activation as a warning' {
-        $pair = New-CompleteReadinessPair
+        $pair = Get-CompleteReadinessPair
         $result = Test-WorkshopReadiness -SqlReadiness $pair.Sql -AdminReadiness $pair.Admin
         $result.Passed | Should -BeTrue
         @($result.Checks | Where-Object Status -EQ 'Warning').Name | Should -Contain 'Administration activation observation'
@@ -476,7 +547,7 @@ Describe 'Bootstrap orchestration and evidence contracts' {
         @{ Path = 'Admin.DeploymentId'; Value = '99999999-2222-3333-4444-555555555555' },
         @{ Path = 'Admin.Repository.Commit'; Value = 'ffffffffffffffffffffffffffffffffffffffff' }
     ) {
-        $pair = New-CompleteReadinessPair
+        $pair = Get-CompleteReadinessPair
         $segments = $Path -split '\.'
         $target = $pair
         foreach ($segment in $segments[0..($segments.Count - 2)]) { $target = $target.$segment }
@@ -492,13 +563,13 @@ Describe 'Bootstrap orchestration and evidence contracts' {
     }
 
     It 'fails closed without throwing for malformed DAB versions and deployment identifiers' {
-        $pair = New-CompleteReadinessPair
+        $pair = Get-CompleteReadinessPair
         $pair.Admin.Tools.DAB = 'not-a-version'
         { $script:MalformedVersionResult = Test-WorkshopReadiness -SqlReadiness $pair.Sql -AdminReadiness $pair.Admin } |
             Should -Not -Throw
         $script:MalformedVersionResult.Passed | Should -BeFalse
 
-        $pair = New-CompleteReadinessPair
+        $pair = Get-CompleteReadinessPair
         $pair.Sql.DeploymentId = '------------------------------------'
         $pair.Admin.DeploymentId = '------------------------------------'
         (Test-WorkshopReadiness -SqlReadiness $pair.Sql -AdminReadiness $pair.Admin).Passed | Should -BeFalse

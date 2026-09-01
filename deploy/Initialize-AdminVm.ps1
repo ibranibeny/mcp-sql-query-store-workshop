@@ -117,6 +117,106 @@ function ConvertTo-SecureValue {
     $secure
 }
 
+function Resolve-DabSqlClientProvider {
+    param([Parameter(Mandatory)][string] $PackageRoot)
+
+    $builderType = 'Microsoft.Data.SqlClient.SqlConnectionStringBuilder' -as [type]
+    $connectionType = 'Microsoft.Data.SqlClient.SqlConnection' -as [type]
+    if ($null -eq $builderType -or $null -eq $connectionType) {
+        $dabPackagePath = Join-Path $PackageRoot 'microsoft.dataapibuilder\2.0.9'
+        $assemblyPath = Get-ChildItem -LiteralPath $dabPackagePath -Filter 'Microsoft.Data.SqlClient.dll' `
+            -File -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
+        Assert-Condition (-not [string]::IsNullOrWhiteSpace($assemblyPath)) `
+            'The DAB Microsoft.Data.SqlClient assembly is unavailable after tool restore.'
+        Add-Type -LiteralPath $assemblyPath -ErrorAction Stop
+        $builderType = 'Microsoft.Data.SqlClient.SqlConnectionStringBuilder' -as [type]
+        $connectionType = 'Microsoft.Data.SqlClient.SqlConnection' -as [type]
+    }
+    Assert-Condition ($null -ne $builderType -and $null -ne $connectionType) `
+        'The DAB Microsoft.Data.SqlClient types could not be loaded.'
+    [pscustomobject]@{ Builder = $builderType; Connection = $connectionType }
+}
+
+function ConvertTo-DabMssqlConnectionString {
+    param(
+        [Parameter(Mandatory)][type] $BuilderType,
+        [Parameter(Mandatory)][string] $DataSource,
+        [Parameter(Mandatory)][string] $Database,
+        [Parameter(Mandatory)][string] $UserId,
+        [Parameter(Mandatory)][securestring] $ReaderSecret,
+        [Parameter(Mandatory)][string] $HostNameInCertificate,
+        [Parameter(Mandatory)][string] $ApplicationName
+    )
+
+    $builder = [Activator]::CreateInstance($BuilderType)
+    $builder.DataSource = $DataSource
+    $builder.InitialCatalog = $Database
+    $builder.UserID = $UserId
+    $secretPointer = [IntPtr]::Zero
+    try {
+        $secretPointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($ReaderSecret)
+        $builder.Password = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($secretPointer)
+    }
+    finally {
+        if ($secretPointer -ne [IntPtr]::Zero) {
+            [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($secretPointer)
+        }
+    }
+    $builder.Encrypt = $true
+    $builder.TrustServerCertificate = $false
+    $builder.ApplicationName = $ApplicationName
+    if ($null -ne $BuilderType.GetProperty('HostNameInCertificate')) {
+        $builder.HostNameInCertificate = $HostNameInCertificate
+        return $builder.ConnectionString
+    }
+
+    # System.Data.SqlClient does not know this DAB/Microsoft.Data key. Only the fixed,
+    # validated nonsecret key is appended; the password was already escaped by its builder.
+    return '{0};HostNameInCertificate={1}' -f $builder.ConnectionString.TrimEnd(';'), $HostNameInCertificate
+}
+
+function Read-DabMssqlEnvironment {
+    param(
+        [Parameter(Mandatory)][string] $Path,
+        [Parameter(Mandatory)][type] $BuilderType,
+        [Parameter(Mandatory)][string] $ExpectedDataSource,
+        [Parameter(Mandatory)][string] $ExpectedUserId,
+        [Parameter(Mandatory)][string] $ExpectedHostNameInCertificate,
+        [Parameter(Mandatory)][string] $ExpectedApplicationName
+    )
+
+    $prefix = 'MSSQL_CONNECTION_STRING='
+    $environmentText = [IO.File]::ReadAllText($Path, [Text.UTF8Encoding]::new($false)).TrimEnd("`r", "`n")
+    if (-not $environmentText.StartsWith($prefix, [StringComparison]::Ordinal) -or
+        $environmentText.Substring($prefix.Length) -match "[`r`n]") {
+        throw 'Root .env must contain exactly one MSSQL_CONNECTION_STRING assignment.'
+    }
+    $builder = [Activator]::CreateInstance(
+        $BuilderType,
+        [object[]]@($environmentText.Substring($prefix.Length))
+    )
+    $encryptEnabled = [string]$builder['Encrypt'] -match '^(?i:true|mandatory)$'
+    $trustServerCertificate = [Convert]::ToBoolean([string]$builder['TrustServerCertificate'])
+    if ([string]$builder.DataSource -cne $ExpectedDataSource) { throw 'DAB SQL data source readback is incorrect.' }
+    if (-not $encryptEnabled) { throw 'DAB SQL encryption readback is not enabled.' }
+    if ($trustServerCertificate) { throw 'DAB SQL certificate validation readback is disabled.' }
+    if ([string]$builder.HostNameInCertificate -cne $ExpectedHostNameInCertificate) { throw 'DAB SQL certificate hostname readback is incorrect.' }
+    if ([string]$builder.UserID -cne $ExpectedUserId) { throw 'DAB SQL user readback is incorrect.' }
+    if ([string]::IsNullOrEmpty([string]$builder.Password)) { throw 'DAB SQL password readback is empty.' }
+    if ([string]$builder.ApplicationName -cne $ExpectedApplicationName) { throw 'DAB SQL application name readback is incorrect.' }
+
+    [pscustomobject]@{
+        DataSource = [string]$builder.DataSource
+        Encrypt = $encryptEnabled
+        TrustServerCertificate = $trustServerCertificate
+        HostNameInCertificate = [string]$builder.HostNameInCertificate
+        UserId = [string]$builder.UserID
+        PasswordPresent = -not [string]::IsNullOrEmpty([string]$builder.Password)
+        ApplicationName = [string]$builder.ApplicationName
+        Builder = $builder
+    }
+}
+
 function Invoke-McpAllowlistProbe {
     param([Parameter(Mandatory)][string] $RepositoryRoot)
     $startInfo = [Diagnostics.ProcessStartInfo]::new()
@@ -290,16 +390,12 @@ try {
     Assert-Condition ($tcp.TcpTestSucceeded) 'Private SQL TCP 1433 connectivity failed.'
 
     $envPath = Join-Path $repositoryRoot '.env'
-    # Required connection contract: Encrypt=True;TrustServerCertificate=False;HostNameInCertificate=sql01.mcpworkshop.internal.
-    $connectionBuilder = [System.Data.SqlClient.SqlConnectionStringBuilder]::new()
-    $connectionBuilder.DataSource = $privateDnsName
-    $connectionBuilder.InitialCatalog = 'AdventureWorks2022'
-    $connectionBuilder.UserID = 'mcp_workshop_reader'
-    $connectionBuilder['Pass' + 'word'] = [string]$payload.McpReaderSecret
-    $connectionBuilder.Encrypt = $true
-    $connectionBuilder.TrustServerCertificate = $false
-    $connectionBuilder.ApplicationName = 'MCP-SQL-Workshop-MCP'
-    $connectionText = $connectionBuilder.ConnectionString
+    $sqlClientTypes = Resolve-DabSqlClientProvider -PackageRoot $env:NUGET_PACKAGES
+    $mcpReaderSecret = ConvertTo-SecureValue -Value ([string]$payload.McpReaderSecret)
+    $connectionText = ConvertTo-DabMssqlConnectionString -BuilderType $sqlClientTypes.Builder `
+        -DataSource $privateDnsName -Database 'AdventureWorks2022' -UserId 'mcp_workshop_reader' `
+        -ReaderSecret $mcpReaderSecret `
+        -HostNameInCertificate 'sql01.mcpworkshop.internal' -ApplicationName 'MCP-SQL-Workshop-MCP'
     [IO.File]::WriteAllText($envPath, "MSSQL_CONNECTION_STRING=$connectionText`r`n", [Text.UTF8Encoding]::new($false))
     Protect-WorkshopFileAcl -Path $envPath -InteractiveUser ([string]$payload.InteractiveUserName)
     $envAcl = Get-Acl -LiteralPath $envPath
@@ -307,11 +403,18 @@ try {
     $unexpectedEnvReaders = @($envAcl.Access | Where-Object {
         $_.AccessControlType -eq 'Allow' -and $_.IdentityReference.Value -notin $allowedEnvReaders
     })
-    Assert-Condition ($envAcl.AreAccessRulesProtected -and $unexpectedEnvReaders.Count -eq 0) 'Root .env ACL readback is broader than the approved identities.'
-    $env:MSSQL_CONNECTION_STRING = $connectionText
+    $rootEnvAclRestricted = $envAcl.AreAccessRulesProtected -and $unexpectedEnvReaders.Count -eq 0
+    Assert-Condition $rootEnvAclRestricted 'Root .env ACL readback is broader than the approved identities.'
+    $parsedEnvironment = Read-DabMssqlEnvironment -Path $envPath -BuilderType $sqlClientTypes.Builder `
+        -ExpectedDataSource $privateDnsName -ExpectedUserId 'mcp_workshop_reader' `
+        -ExpectedHostNameInCertificate 'sql01.mcpworkshop.internal' `
+        -ExpectedApplicationName 'MCP-SQL-Workshop-MCP'
+    $env:MSSQL_CONNECTION_STRING = $parsedEnvironment.Builder.ConnectionString
 
-    $builder = [System.Data.SqlClient.SqlConnectionStringBuilder]::new($connectionText)
-    $connection = [System.Data.SqlClient.SqlConnection]::new($builder.ConnectionString)
+    $connection = [Activator]::CreateInstance(
+        $sqlClientTypes.Connection,
+        [object[]]@($parsedEnvironment.Builder.ConnectionString)
+    )
     try {
         $connection.Open()
         $command = $connection.CreateCommand()
@@ -322,7 +425,7 @@ try {
     }
     finally {
         $connection.Dispose()
-        $builder.Clear()
+        $parsedEnvironment.Builder.Clear()
     }
 
     Push-Location $repositoryRoot
@@ -350,10 +453,10 @@ try {
         Vm = [ordered]@{ Name = $metadata.compute.name; Size = $metadata.compute.vmSize; Location = $metadata.compute.location; AdminPublicIpBoundaryObserved = $true; PublicIpCount = $imdsPublicIps.Count; SecureBoot = $true; Tpm = $true; Os = $os.Caption; Build = $os.BuildNumber; Activation = $activationStatus; WindowsClientLicenseAttested = [bool]$payload.WindowsClientLicenseAttested }
         Repository = [ordered]@{ Commit = $head }
         Tools = $toolVersions
-        RootEnvAcl = [ordered]@{ Path = $envPath; Restricted = $true }
+        RootEnvAcl = [ordered]@{ Path = $envPath; Restricted = $rootEnvAclRestricted }
         Auth = [ordered]@{ GitHubCliAuthStatus = $githubCliAuthStatus; CopilotAuthStatus = 'InteractiveSignInRequired' }
         Network = [ordered]@{ DnsName = $privateDnsName; ResolvedAddress = $expectedSqlIp; Tcp1433 = $true }
-        SqlTls = [ordered]@{ DnsName = $privateDnsName; Address = $expectedSqlIp; Tcp1433 = $true; CertificateThumbprint = $certificateThumbprint; PublicCertificateSha256 = $certificateHash; CertificateValidated = $true; ValidationMethod = 'SqlClientChainHostAndTransferredCertificate'; EncryptOption = 'TRUE'; TrustServerCertificate = $false; HostNameInCertificate = $privateDnsName; ClientProvider = 'System.Data.SqlClient'; RemoteAdminTest = $true }
+        SqlTls = [ordered]@{ DnsName = $parsedEnvironment.DataSource; Address = $expectedSqlIp; Tcp1433 = $true; CertificateThumbprint = $certificateThumbprint; PublicCertificateSha256 = $certificateHash; CertificateValidated = $true; ValidationMethod = 'SqlClientChainHostAndTransferredCertificate'; EncryptOption = $encrypted; Encrypt = $parsedEnvironment.Encrypt; TrustServerCertificate = $parsedEnvironment.TrustServerCertificate; HostNameInCertificate = $parsedEnvironment.HostNameInCertificate; UserId = $parsedEnvironment.UserId; PasswordPresent = $parsedEnvironment.PasswordPresent; ApplicationName = $parsedEnvironment.ApplicationName; ClientProvider = $sqlClientTypes.Builder.Namespace; RemoteAdminTest = $true }
         Mcp = [ordered]@{ ConfigValid = $true; DabMinimumVersionMet = ([version]([regex]::Match($dabVersion, '\d+\.\d+\.\d+').Value) -ge [version]'2.0.9'); ToolNames = $toolNames; ForbiddenMutationTools = $false }
     }
     $readiness | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $readinessPath -Encoding UTF8
