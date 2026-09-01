@@ -31,6 +31,14 @@ param(
     [ValidateRange(20, 60)]
     [int] $WorkerRampSeconds = 20,
 
+    [Parameter()]
+    [ValidateRange(1, 60)]
+    [int] $CommandTimeoutSeconds = 1,
+
+    [Parameter()]
+    [ValidateRange(0.10, 0.80)]
+    [decimal] $BaselineCalibrationFraction = [decimal]'0.60',
+
     [Parameter(DontShow)]
     [System.Collections.IDictionary] $OperationSet
 )
@@ -48,5 +56,7 @@ if ($PSCmdlet.ShouldProcess($RunId, 'Start bounded memory-grant workshop lab')) 
         -Credential $Credential -HostNameInCertificate $HostNameInCertificate `
         -OperationFactory $operationFactory `
         -MaximumWorkers $MaximumWorkers -MaximumDurationSeconds $MaximumDurationSeconds `
-        -SampleIntervalSeconds $SampleIntervalSeconds -WorkerRampSeconds $WorkerRampSeconds
+        -SampleIntervalSeconds $SampleIntervalSeconds -WorkerRampSeconds $WorkerRampSeconds `
+        -CommandTimeoutSeconds $CommandTimeoutSeconds `
+        -BaselineCalibrationFraction $BaselineCalibrationFraction
 }

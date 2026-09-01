@@ -992,7 +992,7 @@ function ConvertTo-TerminationEvidence {
         if ((Get-ObjectValue $failure code -Required) -cnotmatch '^[A-Z][A-Z0-9_]{2,63}$') {
             throw 'Failure code must be a bounded canonical identifier.'
         }
-        if ((Get-ObjectValue $failure stage -Required) -cnotmatch '^[A-Za-z][A-Za-z0-9]{0,31}$') {
+        if ((Get-ObjectValue $failure stage -Required) -cnotmatch '^[A-Za-z][A-Za-z0-9]{0,63}$') {
             throw 'Failure stage must be a bounded canonical identifier.'
         }
         $message = Get-ObjectValue $failure message -Required
@@ -1919,7 +1919,15 @@ function Invoke-WorkshopExperiment {
 
         [Parameter()]
         [ValidateRange(20, 60)]
-        [int] $WorkerRampSeconds = 20
+        [int] $WorkerRampSeconds = 20,
+
+        [Parameter()]
+        [ValidateRange(1, 60)]
+        [int] $CommandTimeoutSeconds = 1,
+
+        [Parameter()]
+        [ValidateRange(0.10, 0.80)]
+        [decimal] $BaselineCalibrationFraction = [decimal]'0.60'
     )
 
     Assert-WorkshopOperationSet $OperationSet
@@ -1942,12 +1950,15 @@ function Invoke-WorkshopExperiment {
     $safetyStopTriggered = $false
     $safetyReasons = @()
     $timeout = $false
+    $failure = $null
     $result = $null
     $operationState = [pscustomobject]@{ Stage = 'OpenConnection' }
     $sampleClockState = [pscustomobject]@{ Last = $start.AddTicks(-1) }
     $workerCountStarted = 0
     $healthState = [pscustomobject]@{ ConsecutiveFailures = 0 }
-    $deadline = $start.AddSeconds($MaximumDurationSeconds)
+    $deadline = $null
+    $baselineDeadline = $null
+    $optimizedObservationDeadline = $null
     $preflight = $null
     $runtimeState = [pscustomobject]@{ Deadline = $deadline; Preflight = $null }
     $getRemainingSeconds = {
@@ -1970,6 +1981,7 @@ function Invoke-WorkshopExperiment {
         param([string]$Phase, [string]$Kind, [AllowNull()][string]$TrialPhase, [AllowNull()][string]$ScheduleEntry)
         $remaining = & $getRemainingSeconds
         if ($remaining -le 0) { return $null }
+        $remaining = [math]::Min($CommandTimeoutSeconds, $remaining)
         $operationState.Stage = if ($Kind -in @('Memory','Drain')) { 'Sample' } else { $Kind }
         return & $OperationSet.Sample $RunId $Phase $Kind $TrialPhase $ScheduleEntry $remaining
     }.GetNewClosure()
@@ -2019,24 +2031,35 @@ function Invoke-WorkshopExperiment {
         $sampleClockState.Last = $start.AddTicks(-1)
         $deadline = $start.AddSeconds($MaximumDurationSeconds)
         $runtimeState.Deadline = $deadline
+        $comparisonReserveSeconds = 12 * $CommandTimeoutSeconds
+        $optimizedObservationDeadline = $deadline.AddSeconds(-$comparisonReserveSeconds)
+        $baselineFractionDeadline = $start.AddSeconds([math]::Floor($MaximumDurationSeconds * $BaselineCalibrationFraction))
+        $baselineReserveDeadline = $optimizedObservationDeadline.AddSeconds(-(2 * $SampleIntervalSeconds))
+        $baselineDeadline = @($baselineFractionDeadline, $baselineReserveDeadline | Sort-Object)[0]
         $operationState.Stage = 'OpenConnection'
-        [void](& $OperationSet.OpenConnection 'Preflight')
+        [void](& $OperationSet.OpenConnection 'Preflight' ([math]::Min($CommandTimeoutSeconds, (& $getRemainingSeconds))))
         $operationState.Stage = 'CaptureEnvironment'
-        $preflight = & $OperationSet.CaptureEnvironment
+        $preflight = & $OperationSet.CaptureEnvironment ([math]::Min($CommandTimeoutSeconds, (& $getRemainingSeconds)))
         $runtimeState.Preflight = $preflight
         $operationState.Stage = 'Preflight'
         [void] (Test-WorkshopPreflight -Snapshot $preflight)
         $operationState.Stage = 'InitializePersistence'
-        [void](& $OperationSet.InitializePersistence)
+        [void](& $OperationSet.InitializePersistence ([math]::Min($CommandTimeoutSeconds, (& $getRemainingSeconds))))
+        if (([datetimeoffset] (& $OperationSet.Clock)) -ge $baselineDeadline -or (& $getRemainingSeconds) -le 0) {
+            $outcome = 'BaselineTargetNotReached'
+            $timeout = $true
+        }
         $operationState.Stage = 'StartWorker'
-        $applicationName = Get-WorkshopApplicationName -RunId $RunId -Phase Baseline -Worker 1
-        $workerHandle = & $OperationSet.StartWorker $RunId 'Baseline' 1 $applicationName $schedule $deadline
-        $workers.Add($workerHandle)
-        $workerCountStarted = 1
-        $lastRamp = [datetimeoffset] (& $OperationSet.Clock)
+        if ($null -eq $outcome) {
+            $applicationName = Get-WorkshopApplicationName -RunId $RunId -Phase Baseline -Worker 1
+            $workerHandle = & $OperationSet.StartWorker $RunId 'Baseline' 1 $applicationName $schedule $deadline
+            $workers.Add($workerHandle)
+            $workerCountStarted = 1
+            $lastRamp = [datetimeoffset] (& $OperationSet.Clock)
+        }
         while ($null -eq $outcome -and $null -eq $frozen) {
             $now = [datetimeoffset] (& $OperationSet.Clock)
-            if ($now -ge $deadline) {
+            if ($now -ge $baselineDeadline -or (& $getRemainingSeconds) -le 0) {
                 $outcome = 'BaselineTargetNotReached'
                 $timeout = $true
                 [void](& $OperationSet.KillTagged $RunId)
@@ -2089,6 +2112,12 @@ function Invoke-WorkshopExperiment {
                 $workerNumber = $workers.Count + 1
                 $applicationName = Get-WorkshopApplicationName -RunId $RunId -Phase Baseline -Worker $workerNumber
                 $operationState.Stage = 'StartWorker'
+                if (([datetimeoffset] (& $OperationSet.Clock)) -ge $baselineDeadline -or (& $getRemainingSeconds) -le 0) {
+                    $outcome = 'BaselineTargetNotReached'
+                    $timeout = $true
+                    [void](& $OperationSet.KillTagged $RunId)
+                    break
+                }
                 $workerHandle = & $OperationSet.StartWorker $RunId 'Baseline' $workerNumber $applicationName $schedule $deadline
                 $workers.Add($workerHandle)
                 $workerCountStarted = [math]::Max($workerCountStarted, $workerNumber)
@@ -2096,7 +2125,10 @@ function Invoke-WorkshopExperiment {
             }
             $remaining = & $getRemainingSeconds
             if ($remaining -gt 0) {
-                & $OperationSet.Delay ([math]::Min($SampleIntervalSeconds, $remaining))
+                $baselineRemaining = [math]::Max(0, [int][math]::Floor(($baselineDeadline - [datetimeoffset] (& $OperationSet.Clock)).TotalSeconds))
+                if ($baselineRemaining -gt 0) {
+                    & $OperationSet.Delay ([math]::Min($SampleIntervalSeconds, [math]::Min($remaining, $baselineRemaining)))
+                }
             }
         }
 
@@ -2108,7 +2140,7 @@ function Invoke-WorkshopExperiment {
             $result = Build-WorkshopExperimentResult -RunId $RunId -Outcome $outcome `
                 -TerminalPhase Baseline -FrozenSettings $null -Preflight $preflight `
                 -Samples $samples.ToArray() -RequestSamples $requestSamples.ToArray() -Trials @() `
-                -StartedAtUtc $start -CompletedAtUtc $sampleClockState.Last `
+                -StartedAtUtc $start -CompletedAtUtc $(if ($sampleClockState.Last -lt $start) { $start } else { $sampleClockState.Last }) `
                 -ManualStopRequested $manualStopRequested -SafetyStopTriggered $safetyStopTriggered `
                 -SafetyReasons $safetyReasons -Timeout $timeout -Workers $workerCountStarted -Schedule $schedule `
                 -MaximumDurationSeconds $MaximumDurationSeconds -SampleIntervalSeconds $SampleIntervalSeconds `
@@ -2159,16 +2191,17 @@ function Invoke-WorkshopExperiment {
         }
 
         $terminalPhase = 'Optimized'
-        $optimizedMeasurementStart = [datetimeoffset] (& $OperationSet.Clock)
-        $deadline = $optimizedMeasurementStart.AddSeconds($MaximumDurationSeconds)
-        $runtimeState.Deadline = $deadline
         & $assertFrozenFingerprint
 
         $consecutive = 0
         for ($index = 1; $index -le [int] $frozen.workers; $index++) {
-            if (([datetimeoffset] (& $OperationSet.Clock)) -ge $deadline) {
+            if (([datetimeoffset] (& $OperationSet.Clock)) -ge $optimizedObservationDeadline -or
+                (& $getRemainingSeconds) -le 0) {
                 $outcome = 'Failed'
                 $timeout = $true
+                $failure = ConvertTo-WorkshopFailureEvidence -Code 'GLOBAL_DEADLINE_BEFORE_COMPARISON_COMPLETE' `
+                    -Stage 'GlobalDeadlineBeforeComparisonComplete' `
+                    -Message 'The global deadline elapsed before comparison could complete.' -StartupFailure $false
                 [void](& $OperationSet.KillTagged $RunId)
                 break
             }
@@ -2178,16 +2211,19 @@ function Invoke-WorkshopExperiment {
         }
         while ($null -eq $outcome) {
             $now = [datetimeoffset] (& $OperationSet.Clock)
-            if ($now -ge $deadline) {
+            if ($now -ge $optimizedObservationDeadline) {
                 $timeout = $true
-                [void](& $OperationSet.KillTagged $RunId)
                 break
             }
             $sample = & $recordSample (& $invokeBoundedSample 'Optimized' 'Memory' $null $null) $now
             & $assertFrozenFingerprint
             $now = [datetimeoffset] (& $OperationSet.Clock)
             if ($now -ge $deadline) {
+                $outcome = 'Failed'
                 $timeout = $true
+                $failure = ConvertTo-WorkshopFailureEvidence -Code 'GLOBAL_DEADLINE_BEFORE_COMPARISON_COMPLETE' `
+                    -Stage 'GlobalDeadlineBeforeComparisonComplete' `
+                    -Message 'The global deadline elapsed before comparison could complete.' -StartupFailure $false
                 [void](& $OperationSet.KillTagged $RunId)
                 break
             }
@@ -2197,7 +2233,7 @@ function Invoke-WorkshopExperiment {
                 -HostAvailableMB $sample.HostAvailableMB -ProcessPhysicalLow $sample.ProcessPhysicalLow `
                 -ProcessVirtualLow $sample.ProcessVirtualLow `
                 -ConsecutiveHealthFailures $healthFailures `
-                -ElapsedSeconds (($now - $optimizedMeasurementStart).TotalSeconds) `
+                -ElapsedSeconds (($now - $start).TotalSeconds) `
                 -MaximumDurationSeconds $MaximumDurationSeconds -Phase Optimized `
                 -ManualStop $sample.ManualStopRequested
             if ($safety.Decision -eq 'Stop') {
@@ -2216,9 +2252,16 @@ function Invoke-WorkshopExperiment {
             }
             if (Test-TargetBand $sample.GrantUtilizationPercent Optimized) { $consecutive++ } else { $consecutive = 0 }
             if ($consecutive -ge 3) { break }
+            if ($now -ge $optimizedObservationDeadline) {
+                $timeout = $true
+                break
+            }
             $remaining = & $getRemainingSeconds
             if ($remaining -gt 0) {
-                & $OperationSet.Delay ([math]::Min($SampleIntervalSeconds, $remaining))
+                $observationRemaining = [math]::Max(0, [int][math]::Floor(($optimizedObservationDeadline - $now).TotalSeconds))
+                if ($observationRemaining -gt 0) {
+                    & $OperationSet.Delay ([math]::Min($SampleIntervalSeconds, [math]::Min($remaining, $observationRemaining)))
+                }
             }
         }
 
@@ -2230,14 +2273,14 @@ function Invoke-WorkshopExperiment {
 
         if ($null -eq $outcome) {
             $terminalPhase = 'Comparison'
-            $comparisonStart = [datetimeoffset] (& $OperationSet.Clock)
-            $deadline = $comparisonStart.AddSeconds($MaximumDurationSeconds)
-            $runtimeState.Deadline = $deadline
             $sequence = @(Get-WorkshopTrialSequence)
             for ($index = 0; $index -lt $sequence.Count; $index++) {
-                if (([datetimeoffset] (& $OperationSet.Clock)) -ge $deadline) {
+                if ((& $getRemainingSeconds) -le 0) {
                     $outcome = 'Failed'
                     $timeout = $true
+                    $failure = ConvertTo-WorkshopFailureEvidence -Code 'GLOBAL_DEADLINE_BEFORE_COMPARISON_COMPLETE' `
+                        -Stage 'GlobalDeadlineBeforeComparisonComplete' `
+                        -Message 'The global deadline elapsed before all twelve trials completed.' -StartupFailure $false
                     [void](& $OperationSet.KillTagged $RunId)
                     break
                 }
@@ -2251,6 +2294,9 @@ function Invoke-WorkshopExperiment {
                         if ($null -eq $trial -or ([datetimeoffset] (& $OperationSet.Clock)) -ge $deadline) {
                             $outcome = 'Failed'
                             $timeout = $true
+                            $failure = ConvertTo-WorkshopFailureEvidence -Code 'GLOBAL_DEADLINE_BEFORE_COMPARISON_COMPLETE' `
+                                -Stage 'GlobalDeadlineBeforeComparisonComplete' `
+                                -Message 'The global deadline elapsed before all twelve trials completed.' -StartupFailure $false
                             [void](& $OperationSet.KillTagged $RunId)
                             break
                         }
@@ -2263,6 +2309,9 @@ function Invoke-WorkshopExperiment {
                     if ($safetyNow -ge $deadline) {
                         $outcome = 'Failed'
                         $timeout = $true
+                        $failure = ConvertTo-WorkshopFailureEvidence -Code 'GLOBAL_DEADLINE_BEFORE_COMPARISON_COMPLETE' `
+                            -Stage 'GlobalDeadlineBeforeComparisonComplete' `
+                            -Message 'The global deadline elapsed before all twelve trials completed.' -StartupFailure $false
                         [void](& $OperationSet.KillTagged $RunId)
                         break
                     }
@@ -2272,6 +2321,9 @@ function Invoke-WorkshopExperiment {
                     if ($safetyNow -ge $deadline) {
                         $outcome = 'Failed'
                         $timeout = $true
+                        $failure = ConvertTo-WorkshopFailureEvidence -Code 'GLOBAL_DEADLINE_BEFORE_COMPARISON_COMPLETE' `
+                            -Stage 'GlobalDeadlineBeforeComparisonComplete' `
+                            -Message 'The global deadline elapsed before all twelve trials completed.' -StartupFailure $false
                         [void](& $OperationSet.KillTagged $RunId)
                         break
                     }
@@ -2280,7 +2332,7 @@ function Invoke-WorkshopExperiment {
                         -ProcessPhysicalLow $safetySample.ProcessPhysicalLow `
                         -ProcessVirtualLow $safetySample.ProcessVirtualLow `
                         -ConsecutiveHealthFailures (& $updateHealthFailures ([bool]$safetySample.Healthy)) `
-                        -ElapsedSeconds (($safetyNow-$comparisonStart).TotalSeconds) `
+                        -ElapsedSeconds (($safetyNow-$start).TotalSeconds) `
                         -MaximumDurationSeconds $MaximumDurationSeconds -Phase $trialPhase `
                         -ManualStop $safetySample.ManualStopRequested
                     if ($safety.Decision -eq 'Stop') {
@@ -2321,7 +2373,7 @@ function Invoke-WorkshopExperiment {
             -ManualStopRequested $manualStopRequested -SafetyStopTriggered $safetyStopTriggered `
             -SafetyReasons $safetyReasons -Timeout $timeout -Workers $workerCountStarted -Schedule $schedule `
             -MaximumDurationSeconds $MaximumDurationSeconds -SampleIntervalSeconds $SampleIntervalSeconds `
-            -WorkerRampSeconds $WorkerRampSeconds
+            -WorkerRampSeconds $WorkerRampSeconds -Failure $failure
         & $OperationSet.Persist $result
         & $OperationSet.Export $result
         return $result
@@ -2512,6 +2564,8 @@ function Invoke-WorkshopStartup {
         [Parameter()][ValidateRange(60,600)][int]$MaximumDurationSeconds = 600,
         [Parameter()][ValidateRange(5,30)][int]$SampleIntervalSeconds = 5,
         [Parameter()][ValidateRange(20,60)][int]$WorkerRampSeconds = 20,
+        [Parameter()][ValidateRange(1,60)][int]$CommandTimeoutSeconds = 1,
+        [Parameter()][ValidateRange(0.10,0.80)][decimal]$BaselineCalibrationFraction = [decimal]'0.60',
         [Parameter()][string]$RepositoryRoot = (Split-Path -Parent $PSScriptRoot),
         [Parameter()][scriptblock]$OperationFactory,
         [Parameter()][scriptblock]$SemanticValidator
@@ -2528,7 +2582,9 @@ function Invoke-WorkshopStartup {
         }
         return Invoke-WorkshopExperiment -RunId $RunId -OperationSet $operationSet `
             -MaximumWorkers $MaximumWorkers -MaximumDurationSeconds $MaximumDurationSeconds `
-            -SampleIntervalSeconds $SampleIntervalSeconds -WorkerRampSeconds $WorkerRampSeconds -Confirm:$false
+            -SampleIntervalSeconds $SampleIntervalSeconds -WorkerRampSeconds $WorkerRampSeconds `
+            -CommandTimeoutSeconds $CommandTimeoutSeconds `
+            -BaselineCalibrationFraction $BaselineCalibrationFraction -Confirm:$false
     }
     catch {
         $completedAt = [datetimeoffset]::UtcNow
@@ -3167,7 +3223,9 @@ OUTER APPLY
                 if ($WorkerDeadline -le [datetimeoffset]::UtcNow) {
                     throw 'The experiment deadline elapsed before the worker connection opened.'
                 }
-                $setupCancellation = [Threading.CancellationTokenSource]::new([TimeSpan]::FromSeconds(15))
+                $setupRemaining = $WorkerDeadline - [datetimeoffset]::UtcNow
+                $setupTimeout = @([TimeSpan]::FromSeconds(15), $setupRemaining | Sort-Object)[0]
+                $setupCancellation = [Threading.CancellationTokenSource]::new($setupTimeout)
                 $connection.OpenAsync($setupCancellation.Token).GetAwaiter().GetResult()
                 $tag = $connection.CreateCommand()
                 try {
@@ -3223,7 +3281,9 @@ OUTER APPLY
             }
             }).AddArgument($Server).AddArgument($Database).AddArgument($Credential).AddArgument($HostNameInCertificate).AddArgument($RunId).AddArgument($Phase).AddArgument($ApplicationName).AddArgument($Schedule).AddArgument($Deadline).AddArgument($readySignal).AddArgument($provider.ConnectionType.AssemblyQualifiedName).AddArgument($provider.ConnectionStringBuilderType.AssemblyQualifiedName).AddArgument($provider.SupportsHostNameInCertificate)
             $asyncResult = $powerShell.BeginInvoke()
-            if (-not $readySignal.Wait([TimeSpan]::FromSeconds(15))) {
+            $readinessRemaining = $Deadline - [datetimeoffset]::UtcNow
+            if ($readinessRemaining -le [TimeSpan]::Zero -or
+                -not $readySignal.Wait(@([TimeSpan]::FromSeconds(15), $readinessRemaining | Sort-Object)[0])) {
                 $details = @($powerShell.Streams.Error | ForEach-Object { $_.Exception.Message }) -join ' '
                 throw "Workshop worker failed to become tagged and ready within 15 seconds. $details".Trim()
             }
@@ -3723,15 +3783,17 @@ END CATCH;
             Warnings = [string[]]$provider.Warnings
         }
         OpenConnection = {
-            param($Purpose)
+            param($Purpose, [int]$RemainingSeconds = 60)
             Write-Verbose "Opening $Purpose controller connection."
-            $rows = @(& $invokeTable 'MCP-SQL-Workshop-Controller-Open' 'SELECT CONVERT(bit,1) AS ConnectionReady;' @{} $null 60)
+            $rows = @(& $invokeTable 'MCP-SQL-Workshop-Controller-Open' `
+                'SELECT CONVERT(bit,1) AS ConnectionReady;' @{} $null $RemainingSeconds)
             if ($rows.Count -ne 1 -or -not [bool]$rows[0].ConnectionReady) {
                 throw 'Workshop SQL connection readiness check failed.'
             }
         }.GetNewClosure()
-        CaptureEnvironment = { & $getPreflight }.GetNewClosure()
+        CaptureEnvironment = { param([int]$RemainingSeconds = 60) & $getPreflight $RemainingSeconds }.GetNewClosure()
         InitializePersistence = {
+            param([int]$RemainingSeconds = 60)
             $persistenceReadinessSql = @'
 SELECT CONVERT(bit, CASE WHEN
     OBJECT_ID(N'lab.WorkshopRun', N'U') IS NOT NULL
@@ -3741,7 +3803,7 @@ SELECT CONVERT(bit, CASE WHEN
     THEN 1 ELSE 0 END) AS PersistenceReady;
 '@
             $rows = @(& $invokeTable 'MCP-SQL-Workshop-Controller-Persistence' `
-                $persistenceReadinessSql @{} $null 60)
+                $persistenceReadinessSql @{} $null $RemainingSeconds)
             if ($rows.Count -ne 1 -or -not [bool]$rows[0].PersistenceReady) {
                 throw 'Workshop SQL persistence initialization failed.'
             }

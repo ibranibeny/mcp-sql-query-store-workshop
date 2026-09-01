@@ -1274,16 +1274,96 @@ Describe 'Task 12 workload orchestration' {
     It 'passes one shared bounded deadline to workers in each measurement phase' {
         $fixture = Get-TestOperationSet
         [void](Invoke-WorkshopExperiment -RunId ([guid]::NewGuid()) -OperationSet $fixture.Operations `
-            -MaximumDurationSeconds 60 -WorkerRampSeconds 20)
+            -MaximumDurationSeconds 600 -WorkerRampSeconds 20)
 
         @($fixture.State.Starts).Count | Should -BeGreaterThan 0
         $baselineDeadlines = @($fixture.State.Starts | Where-Object Phase -eq Baseline |
             Select-Object -ExpandProperty Deadline -Unique)
         $optimizedDeadlines = @($fixture.State.Starts | Where-Object Phase -eq Optimized |
             Select-Object -ExpandProperty Deadline -Unique)
-        $baselineDeadlines | Should -Be @([datetimeoffset]'2026-09-01T10:01:00Z')
+        $baselineDeadlines | Should -Be @([datetimeoffset]'2026-09-01T10:10:00Z')
         $optimizedDeadlines.Count | Should -Be 1
-        $optimizedDeadlines[0] | Should -BeGreaterThan $baselineDeadlines[0]
+        $optimizedDeadlines[0] | Should -BeExactly $baselineDeadlines[0]
+
+        $remaining = @($fixture.State.Events.RemainingSeconds)
+        for ($index = 1; $index -lt $remaining.Count; $index++) {
+            $remaining[$index] | Should -BeLessOrEqual $remaining[$index - 1]
+        }
+    }
+
+    It 'reserves global time for optimized observation and all twelve comparison trials' {
+        $baseline = 1..200 | ForEach-Object { Get-TestSample Baseline 70 }
+        $fixture = Get-TestOperationSet -Baseline $baseline
+
+        $result = Invoke-WorkshopExperiment -RunId ([guid]::NewGuid()) -OperationSet $fixture.Operations `
+            -MaximumDurationSeconds 600 -SampleIntervalSeconds 5 -WorkerRampSeconds 20 `
+            -CommandTimeoutSeconds 15
+
+        $result.Outcome | Should -BeExactly 'BaselineTargetNotReached'
+        @($fixture.State.Events | Where-Object Kind -eq 'Memory')[-1].At |
+            Should -BeLessOrEqual ([datetimeoffset]'2026-09-01T10:06:00Z')
+        @($fixture.State.Starts | Where-Object Phase -eq Optimized).Count | Should -Be 0
+    }
+
+    It 'shrinks trial command timeouts against the original global deadline' {
+        $fixture = Get-TestOperationSet
+        $inner = $fixture.Operations.Sample
+        $fixture.State | Add-Member NoteProperty OptimizedMemoryCalls 0
+        $fixture.Operations.Sample = {
+            param($RunId,$Phase,$Kind,$TrialPhase,$ScheduleEntry,$RemainingSeconds)
+            if ($Phase -eq 'Optimized' -and $Kind -eq 'Memory') {
+                $fixture.State.OptimizedMemoryCalls++
+                if ($fixture.State.OptimizedMemoryCalls -eq 3) {
+                    $fixture.State.Now = [datetimeoffset]'2026-09-01T10:06:59Z'
+                }
+            }
+            $value = & $inner $RunId $Phase $Kind $TrialPhase $ScheduleEntry $RemainingSeconds
+            if ($Phase -in @('Baseline','Optimized') -and $Kind -eq 'Memory' -and $fixture.State.Trials.Count -gt 0) {
+                $fixture.State.Now = $fixture.State.Now.AddMilliseconds(250)
+            }
+            if ($Kind -eq 'Trial') {
+                $advance = if ($RemainingSeconds -lt 15) {
+                    [math]::Max(0, $RemainingSeconds - 1)
+                }
+                else { 15 }
+                $fixture.State.Now = $fixture.State.Now.AddSeconds($advance)
+            }
+            return $value
+        }.GetNewClosure()
+
+        $result = Invoke-WorkshopExperiment -RunId ([guid]::NewGuid()) -OperationSet $fixture.Operations `
+            -MaximumDurationSeconds 600 -WorkerRampSeconds 20 -CommandTimeoutSeconds 15
+
+        $trialTimeouts = @($fixture.State.Events | Where-Object Kind -eq 'Trial' |
+            Select-Object -ExpandProperty RemainingSeconds)
+        $result.Trials.Count | Should -BeExactly 12
+        $trialTimeouts.Count | Should -BeExactly 12
+        $trialTimeouts[0] | Should -BeExactly 15
+        $trialTimeouts[-1] | Should -BeLessThan 15 -Because ($trialTimeouts -join ',')
+        $fixture.State.Now | Should -BeLessOrEqual ([datetimeoffset]'2026-09-01T10:10:00Z')
+    }
+
+    It 'never schedules work after 600 seconds and reports an incomplete comparison truthfully' {
+        $fixture = Get-TestOperationSet
+        $inner = $fixture.Operations.Sample
+        $fixture.Operations.Sample = {
+            param($RunId,$Phase,$Kind,$TrialPhase,$ScheduleEntry,$RemainingSeconds)
+            $value = & $inner $RunId $Phase $Kind $TrialPhase $ScheduleEntry $RemainingSeconds
+            if ($Kind -eq 'Trial') { $fixture.State.Now = $fixture.State.Now.AddSeconds(50) }
+            return $value
+        }.GetNewClosure()
+
+        $result = Invoke-WorkshopExperiment -RunId ([guid]::NewGuid()) -OperationSet $fixture.Operations `
+            -MaximumDurationSeconds 600 -WorkerRampSeconds 20 -CommandTimeoutSeconds 15
+
+        $result.Outcome | Should -BeExactly 'Failed'
+        $result.Trials.Count | Should -BeLessThan 12
+        $result.Validation.Passed | Should -BeFalse
+        $result.TerminationEvidence.Timeout | Should -BeTrue
+        $result.TerminationEvidence.failure.stage | Should -BeExactly 'GlobalDeadlineBeforeComparisonComplete'
+        @($fixture.State.Events | Where-Object {
+            $_.At -gt [datetimeoffset]'2026-09-01T10:10:00Z'
+        }).Count | Should -Be 0
     }
 
     It 'fails at the exact experiment deadline during drain without entering optimized measurement' {
