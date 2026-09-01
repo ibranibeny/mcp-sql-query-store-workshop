@@ -62,6 +62,20 @@ function Test-Python {
     )
 }
 
+function Test-PythonDependency {
+    $virtualEnvironmentPython = Join-Path $script:RepositoryRoot '.venv/Scripts/python.exe'
+    if (-not (Test-Path -LiteralPath $virtualEnvironmentPython -PathType Leaf)) {
+        Write-Host 'SKIP: Python dependency bounds (.venv is not present)'
+        return
+    }
+
+    Invoke-NativeCommand -FilePath $virtualEnvironmentPython -ArgumentList @(
+        (Join-Path $script:RepositoryRoot 'build/Test-PythonDependencies.py'),
+        '--requirements',
+        (Join-Path $script:RepositoryRoot 'requirements-dev.txt')
+    )
+}
+
 function Test-Pester {
     $testPath = Join-Path $script:RepositoryRoot 'tests'
     $result = Invoke-Pester -Path $testPath -PassThru
@@ -243,6 +257,7 @@ function Invoke-PowerShellAnalyzerGate {
 Push-Location $script:RepositoryRoot
 try {
     Invoke-ValidationGate -Name 'Python tests' -Validation { Test-Python }
+    Invoke-ValidationGate -Name 'Python dependency bounds' -Validation { Test-PythonDependency }
     Invoke-ValidationGate -Name 'Pester tests' -Validation { Test-Pester }
     Invoke-ValidationGate -Name 'PowerShell syntax' -Validation { Test-PowerShellSyntax }
     Invoke-PowerShellAnalyzerGate

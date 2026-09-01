@@ -91,6 +91,15 @@ def test_repository_validation_has_canonical_evidence_gate() -> None:
     assert "Invoke-ValidationGate -Name 'Evidence semantics'" in script
 
 
+def test_repository_validation_verifies_current_venv_without_installing() -> None:
+    script = REPOSITORY_TEST_SCRIPT.read_text(encoding="utf-8")
+
+    assert "function Test-PythonDependency" in script
+    assert "Test-PythonDependencies.py" in script
+    assert "Invoke-ValidationGate -Name 'Python dependency bounds'" in script
+    assert "pip install" not in script.lower()
+
+
 def test_json_validation_skips_node_modules(tmp_path: Path) -> None:
     initialize_git_repository(tmp_path)
     (tmp_path / ".gitignore").write_text("node_modules/\n", encoding="utf-8")
