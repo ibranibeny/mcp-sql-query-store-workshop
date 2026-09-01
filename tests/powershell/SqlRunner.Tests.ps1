@@ -97,13 +97,15 @@ Describe 'Workshop SQL runner security and ordering' {
         $text | Should -Match '\.Dispose\(\)'
     }
 
-    It 'declares the exact deterministic default script order' {
+    It 'declares the exact deterministic pre-candidate bootstrap script order' {
         $text = Get-Content -LiteralPath $script:RunnerPath -Raw
-        $positions = 0..7 | ForEach-Object { $text.IndexOf(('0{0}-' -f $_)) }
+        $scriptList = [regex]::Match($text, '(?s)\$scriptNames\s*=\s*@\((?<body>.*?)\)').Groups['body'].Value
+        $positions = 0..5 | ForEach-Object { $scriptList.IndexOf(('0{0}-' -f $_)) }
         $positions | ForEach-Object { $_ | Should -BeGreaterThan -1 }
         for ($index = 1; $index -lt $positions.Count; $index++) {
             $positions[$index] | Should -BeGreaterThan $positions[$index - 1]
         }
+        $scriptList | Should -Not -Match '06-CreateOptimizedProcedure\.sql|07-ValidateEquivalence\.sql'
     }
 
     It 'excludes optional hint and cleanup scripts from bootstrap defaults' {

@@ -9,6 +9,7 @@ BeforeAll {
     $script:ModulePath = Join-Path $script:DeployRoot 'Workshop.Azure.psd1'
     $script:ToolManifestPath = Join-Path $PSScriptRoot '../../.config/dotnet-tools.json'
     $script:McpConfigPath = Join-Path $PSScriptRoot '../../.vscode/mcp.json'
+    $script:ConfigPath = Join-Path $script:DeployRoot 'WorkshopConfig.psd1'
 
     function Get-ScriptContract {
         param([Parameter(Mandatory)][string] $Path)
@@ -154,16 +155,63 @@ Describe 'SQL VM bootstrap static contract' {
         $text | Should -Match 'storeCertificate'
     }
 
-    It 'downloads only the official backup and records an observed SHA256 before invoking scripts 00 through 07' {
+    It 'requires the reviewed official backup SHA256 before VERIFYONLY and bootstraps only scripts 00 through 05' {
         $text = $script:SqlContract.Text
+        $runnerText = Get-Content -LiteralPath (Join-Path $script:DeployRoot 'Invoke-WorkshopSqlScripts.ps1') -Raw
+        $config = Import-PowerShellDataFile $script:ConfigPath
         $text | Should -Match 'https://github\.com/Microsoft/sql-server-samples/releases/download/adventureworks/AdventureWorks2022\.bak'
         $text | Should -Match 'Get-FileHash'
         $text | Should -Match 'SHA256'
-        $text | Should -Match 'observed'
+        $config.AdventureWorksBackup.Sha256 | Should -Be 'D17567ADB1521F972E1DC183A7216CEA869C4580B5D75632425BCADBAF82CE5E'
+        $text | Should -Match 'expected-verified'
         $text | Should -Match 'Invoke-WorkshopSqlScripts\.ps1'
-        $positions = 0..7 | ForEach-Object { $text.IndexOf(('0{0}-' -f $_)) }
+        $hashAt = $text.IndexOf('Get-FileHash')
+        $expectedHashAt = $text.IndexOf('AdventureWorksBackupSha256')
+        $verifyAt = $text.IndexOf('RESTORE VERIFYONLY')
+        $runnerAt = $text.IndexOf('& $runner')
+        $hashAt | Should -BeGreaterThan -1
+        $expectedHashAt | Should -BeGreaterThan -1
+        $hashAt | Should -BeLessThan $verifyAt
+        $expectedHashAt | Should -BeLessThan $verifyAt
+        $verifyAt | Should -BeLessThan $runnerAt
+        $positions = 0..5 | ForEach-Object { $text.IndexOf(('0{0}-' -f $_)) }
         $positions | ForEach-Object { $_ | Should -BeGreaterThan -1 }
-        $text | Should -Not -Match '08-OptionalQueryStoreHint|09-Cleanup'
+        $text | Should -Not -Match '06-CreateOptimizedProcedure|07-ValidateEquivalence|08-OptionalQueryStoreHint|09-Cleanup'
+        $runnerText | Should -Match '00-Preflight\.sql'
+        $runnerText | Should -Match '05-CreateDiagnostics\.sql'
+        $runnerText | Should -Not -Match '06-CreateOptimizedProcedure|07-ValidateEquivalence|08-OptionalQueryStoreHint|09-Cleanup'
+    }
+
+    It 'rejects an existing or downloaded backup digest mismatch before SQL verification and runner execution' -ForEach @(
+        @{ Case = 'existing'; Existing = $true; ExpectedDownloads = 0 }
+        @{ Case = 'downloaded'; Existing = $false; ExpectedDownloads = 1 }
+    ) {
+        $function = $script:SqlContract.Ast.Find({
+            param($node)
+            $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -eq 'Get-VerifiedAdventureWorksBackup'
+        }, $true)
+        $function | Should -Not -BeNullOrEmpty
+        . ([scriptblock]::Create($function.Extent.Text))
+        $path = Join-Path $TestDrive "$Case.bak"
+        if ($Existing) { Set-Content -LiteralPath $path -Value 'tampered' -NoNewline }
+        $script:downloads = 0
+        $download = {
+            param($Uri, $OutFile)
+            $null = $Uri
+            $script:downloads++
+            Set-Content -LiteralPath $OutFile -Value 'tampered' -NoNewline
+        }
+        $hash = {
+            param($LiteralPath, $Algorithm)
+            $null = $LiteralPath, $Algorithm
+            [pscustomobject]@{ Hash = ('0' * 64) }
+        }
+
+        { Get-VerifiedAdventureWorksBackup -Uri 'https://github.com/Microsoft/sql-server-samples/releases/download/adventureworks/AdventureWorks2022.bak' `
+                -Path $path -ExpectedSha256 ('A' * 64) -DownloadOperation $download -HashOperation $hash } |
+            Should -Throw '*SHA256*'
+        $script:downloads | Should -Be $ExpectedDownloads
     }
 
     It 'writes a secret-free ACL-restricted positive readiness report with required readbacks' {
@@ -430,8 +478,8 @@ Describe 'Bootstrap orchestration and evidence contracts' {
                     ) }
                     Firewall = [pscustomobject]@{ Rule = 'MCP SQL Workshop 1433'; RemoteAddress = '10.20.1.0/24'; BroadRule = $false }
                     Certificate = [pscustomobject]@{ DnsName = 'sql01.mcpworkshop.internal'; Thumbprint = $thumbprint; RegistryCertificate = $thumbprint; StoreThumbprint = $thumbprint; ForceEncryption = 1; HasPrivateKey = $true; ServerAuthenticationEku = $true; SanVerified = $true; ServiceKeyAclVerified = $true; PublicCertificateThumbprint = $thumbprint; PublicCertificateSha256 = $publicHash; PrivateKeyExported = $false; TlsLoadFailures = 0; StartupBindingEvidence = 'DeferredRemoteValidation' }
-                    Backup = [pscustomobject]@{ VerifyOnly = $true; Sha256 = 'B' * 64 }
-                    Database = [pscustomobject]@{ Marker = '68A70D6E-62D8-4A77-8F0A-9DA7934DBA7C'; QueryStore = 'READ_WRITE'; ResourceGovernor = 'Enabled'; ProcedureCount = 8 }
+                    Backup = [pscustomobject]@{ VerifyOnly = $true; Sha256 = 'B' * 64; ExpectedSha256 = 'B' * 64; ChecksumClassification = 'expected-verified' }
+                    Database = [pscustomobject]@{ Marker = '68A70D6E-62D8-4A77-8F0A-9DA7934DBA7C'; QueryStore = 'READ_WRITE'; ResourceGovernor = 'Enabled'; ProcedureCount = 7 }
                 }
                 Admin = [pscustomobject]@{
                     SchemaVersion = '1.0'; DeploymentId = $deploymentId; Completed = $true
@@ -533,7 +581,7 @@ Describe 'Bootstrap orchestration and evidence contracts' {
         }
         $result = Initialize-WorkshopSqlVm -Config $script:BootstrapConfig `
             -DatabaseMasterKeyPassword $script:SecureValue -McpReaderPassword $script:SecureValue `
-            -RepositoryUrl 'https://github.com/example/workshop.git' `
+            -RepositoryUrl 'https://github.com/ibranibeny/mcp-sql-query-store-workshop.git' `
             -RepositoryCommit '0123456789abcdef0123456789abcdef01234567' `
             -DeploymentId '11111111-2222-3333-4444-555555555555' -Operations $operations
 
@@ -568,7 +616,7 @@ Describe 'Bootstrap orchestration and evidence contracts' {
             Certificate = [pscustomobject]@{ PublicCertificatePath = 'C:\McpSqlWorkshop\public\sql01.cer'; PublicCertificateSha256 = ('B' * 64); Thumbprint = ('A' * 40) }
         }
         $result = Initialize-WorkshopAdminVm -Config $script:BootstrapConfig -McpReaderPassword $script:SecureValue `
-            -RepositoryUrl 'https://github.com/example/workshop.git' `
+            -RepositoryUrl 'https://github.com/ibranibeny/mcp-sql-query-store-workshop.git' `
             -RepositoryCommit '0123456789abcdef0123456789abcdef01234567' `
             -DeploymentId '11111111-2222-3333-4444-555555555555' `
             -InteractiveUserName 'workshop-admin' `
@@ -594,7 +642,7 @@ Describe 'Bootstrap orchestration and evidence contracts' {
         @{ Path = 'Sql.TempDb.OldPathCount'; Value = 1 },
         @{ Path = 'Sql.Certificate.RegistryCertificate'; Value = $null },
         @{ Path = 'Sql.Certificate.TlsLoadFailures'; Value = 1 },
-        @{ Path = 'Sql.Database.ProcedureCount'; Value = 7 },
+        @{ Path = 'Sql.Database.ProcedureCount'; Value = 8 },
         @{ Path = 'Admin.Vm.PublicIpCount'; Value = 0 },
         @{ Path = 'Admin.Workspace.WorkspaceUserModify'; Value = $false },
         @{ Path = 'Admin.RootEnvAcl.Restricted'; Value = $false },
@@ -632,5 +680,93 @@ Describe 'Bootstrap orchestration and evidence contracts' {
         $pair.Sql.DeploymentId = '------------------------------------'
         $pair.Admin.DeploymentId = '------------------------------------'
         (Test-WorkshopReadiness -SqlReadiness $pair.Sql -AdminReadiness $pair.Admin).Passed | Should -BeFalse
+    }
+
+    It 'requires a validated readiness result before deployment evidence is exported' {
+        $pair = Get-CompleteReadinessPair
+        $output = Join-Path $TestDrive 'missing-validation'
+
+        $command = Get-Command Export-WorkshopDeploymentEvidence
+        $parameterAttribute = $command.Parameters['ReadinessResult'].Attributes |
+            Where-Object { $_ -is [System.Management.Automation.ParameterAttribute] }
+        $parameterAttribute.Mandatory | Should -Contain $true
+
+        { Export-WorkshopDeploymentEvidence -SqlReadiness $pair.Sql -AdminReadiness $pair.Admin `
+            -ReadinessResult $null -OutputDirectory $output } | Should -Throw '*ReadinessResult*'
+        Test-Path -LiteralPath $output | Should -BeFalse
+    }
+
+    It 'exports canonical source hashes from a valid readiness result without exporting secrets' {
+        $pair = Get-CompleteReadinessPair
+        $readiness = Test-WorkshopReadiness -SqlReadiness $pair.Sql -AdminReadiness $pair.Admin
+        $output = Join-Path $TestDrive 'valid-evidence'
+
+        $result = Export-WorkshopDeploymentEvidence -SqlReadiness $pair.Sql -AdminReadiness $pair.Admin `
+            -ReadinessResult $readiness -OutputDirectory $output
+
+        $result.Completed | Should -BeTrue
+        $result.SqlReadinessSha256 | Should -Match '^[A-F0-9]{64}$'
+        $result.AdminReadinessSha256 | Should -Match '^[A-F0-9]{64}$'
+        $result.SqlReadinessSha256 | Should -BeExactly $readiness.SourceHashes.SqlReadinessSha256
+        $result.AdminReadinessSha256 | Should -BeExactly $readiness.SourceHashes.AdminReadinessSha256
+        $rendered = (Get-Content -LiteralPath $result.HtmlPath -Raw) +
+            (Get-Content -LiteralPath $result.MarkdownPath -Raw)
+        $rendered | Should -Match ([regex]::Escape($readiness.SourceHashes.SqlReadinessSha256))
+        $rendered | Should -Match ([regex]::Escape($readiness.SourceHashes.AdminReadinessSha256))
+        $rendered | Should -Not -Match 'unit-test-secret-value|Password|PrivateKey'
+    }
+
+    It 'rejects forged completion and sanitization flags before creating output' {
+        $deploymentId = '11111111-2222-3333-4444-555555555555'
+        $forgedSql = [pscustomobject]@{
+            SchemaVersion = '1.0'; DeploymentId = $deploymentId; Completed = $true
+            Evidence = [pscustomobject]@{ Sanitized = $true }
+        }
+        $forgedAdmin = [pscustomobject]@{
+            SchemaVersion = '1.0'; DeploymentId = $deploymentId; Completed = $true
+            Evidence = [pscustomobject]@{ Sanitized = $true }
+        }
+        $forgedResult = [pscustomobject]@{ Passed = $true; Checks = @(); SourceHashes = [pscustomobject]@{
+            SqlReadinessSha256 = 'A' * 64; AdminReadinessSha256 = 'B' * 64
+        } }
+        $output = Join-Path $TestDrive 'forged-flags'
+
+        { Export-WorkshopDeploymentEvidence -SqlReadiness $forgedSql -AdminReadiness $forgedAdmin `
+            -ReadinessResult $forgedResult -OutputDirectory $output } | Should -Throw '*validated readiness result*'
+        Test-Path -LiteralPath $output | Should -BeFalse
+    }
+
+    It 'rejects a tampered readiness check or source hash before creating output' -ForEach @(
+        @{ Case = 'check status'; Tamper = { param($r) $r.Checks[0].Status = 'Failed' } }
+        @{ Case = 'SQL source hash'; Tamper = { param($r) $r.SourceHashes | Add-Member -NotePropertyName SqlReadinessSha256 -NotePropertyValue ('0' * 64) -Force } }
+        @{ Case = 'admin source hash'; Tamper = { param($r) $r.SourceHashes | Add-Member -NotePropertyName AdminReadinessSha256 -NotePropertyValue ('0' * 64) -Force } }
+    ) {
+        $pair = Get-CompleteReadinessPair
+        $readiness = Test-WorkshopReadiness -SqlReadiness $pair.Sql -AdminReadiness $pair.Admin
+        & $Tamper $readiness
+        $output = Join-Path $TestDrive "tampered-result-$Case"
+
+        { Export-WorkshopDeploymentEvidence -SqlReadiness $pair.Sql -AdminReadiness $pair.Admin `
+            -ReadinessResult $readiness -OutputDirectory $output } | Should -Throw '*validated readiness result*'
+        Test-Path -LiteralPath $output | Should -BeFalse
+    }
+
+    It 'rejects source-record security and identity tampering after validation before creating output' -ForEach @(
+        @{ Case = 'security field'; Path = 'Admin.RootEnvAcl.Restricted'; Value = $false }
+        @{ Case = 'deployment binding'; Path = 'Admin.DeploymentId'; Value = '99999999-2222-3333-4444-555555555555' }
+        @{ Case = 'commit binding'; Path = 'Admin.Repository.Commit'; Value = 'ffffffffffffffffffffffffffffffffffffffff' }
+        @{ Case = 'certificate binding'; Path = 'Admin.SqlTls.CertificateThumbprint'; Value = 'F' * 40 }
+    ) {
+        $pair = Get-CompleteReadinessPair
+        $readiness = Test-WorkshopReadiness -SqlReadiness $pair.Sql -AdminReadiness $pair.Admin
+        $segments = $Path -split '\.'
+        $target = $pair
+        foreach ($segment in $segments[0..($segments.Count - 2)]) { $target = $target.$segment }
+        $target.($segments[-1]) = $Value
+        $output = Join-Path $TestDrive "tampered-source-$Case"
+
+        { Export-WorkshopDeploymentEvidence -SqlReadiness $pair.Sql -AdminReadiness $pair.Admin `
+            -ReadinessResult $readiness -OutputDirectory $output } | Should -Throw '*validated readiness result*'
+        Test-Path -LiteralPath $output | Should -BeFalse
     }
 }

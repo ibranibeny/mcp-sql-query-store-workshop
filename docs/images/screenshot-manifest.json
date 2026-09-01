@@ -1,6 +1,11 @@
 {
   "schemaVersion": "1.0.0",
-  "allowedClassifications": ["LocalVerified", "LocalPending", "AzurePending", "AzureVerified"],
+  "allowedClassifications": [
+    "LocalVerified",
+    "LocalPending",
+    "AzurePending",
+    "AzureVerified"
+  ],
   "redactionRules": [
     "Remove credentials, tokens, connection strings, and certificate private material.",
     "Remove tenant and subscription identifiers, public IPs, user names, and local profile paths.",
@@ -8,15 +13,65 @@
     "Never alter measured values, evidence labels, outcome states, or failed checkpoint status."
   ],
   "screenshots": [
-    {"file": "local-home.png", "classification": "LocalVerified", "milestone": "Generated local index route passes full site validation", "sha256": "1ec6a9c1b4564b83419de6276d0076ebe22d10d8f0b4e44faecc7e2ddff00ed1"},
-    {"file": "local-architecture.png", "classification": "LocalVerified", "milestone": "Generated architecture route renders both Mermaid diagrams", "sha256": "bd2f08e55cccd59b19108d08e3c94fcf5d2cc520c9f3c0e00fb7f49f383fb977"},
-    {"file": "local-memory-target.png", "classification": "LocalVerified", "milestone": "TARGET calculator renders with no measured values", "sha256": "94e732bcbca273411ecd01b9de572946d5e0667de7c04e428affbd74eaf580c0"},
-    {"file": "azure-01-preflight.png", "classification": "AzurePending", "milestone": "Read-only preflight passes and plan card is reviewed", "sha256": null},
-    {"file": "azure-02-network.png", "classification": "AzurePending", "milestone": "Network boundary readback passes", "sha256": null},
-    {"file": "azure-03-vms.png", "classification": "AzurePending", "milestone": "VM boundary proves SQL has no public IP", "sha256": null},
-    {"file": "azure-04-sql-readiness.png", "classification": "AzurePending", "milestone": "SQL bootstrap readiness passes", "sha256": null},
-    {"file": "azure-05-admin-readiness.png", "classification": "AzurePending", "milestone": "Admin bootstrap and TLS readiness pass", "sha256": null},
-    {"file": "azure-06-workload.png", "classification": "AzurePending", "milestone": "Bounded workload emits a semantically valid actual outcome", "sha256": null},
-    {"file": "azure-07-pages.png", "classification": "AzurePending", "milestone": "Published Pages route and teardown proof are verified", "sha256": null}
+    {
+      "file": "local-home.png",
+      "classification": "LocalVerified",
+      "milestone": "Generated local index route passes full site validation",
+      "sha256": "1ec6a9c1b4564b83419de6276d0076ebe22d10d8f0b4e44faecc7e2ddff00ed1"
+    },
+    {
+      "file": "local-architecture.png",
+      "classification": "LocalVerified",
+      "milestone": "Generated architecture route renders both Mermaid diagrams",
+      "sha256": "bd2f08e55cccd59b19108d08e3c94fcf5d2cc520c9f3c0e00fb7f49f383fb977"
+    },
+    {
+      "file": "local-memory-target.png",
+      "classification": "LocalVerified",
+      "milestone": "TARGET calculator renders with no measured values",
+      "sha256": "8a726473d929d65b9d5b50c4984ab698775d0f054393d77848e04f382de83302"
+    },
+    {
+      "file": "azure-01-preflight.png",
+      "classification": "AzurePending",
+      "milestone": "Read-only preflight passes and plan card is reviewed",
+      "sha256": null
+    },
+    {
+      "file": "azure-02-network.png",
+      "classification": "AzurePending",
+      "milestone": "Network boundary readback passes",
+      "sha256": null
+    },
+    {
+      "file": "azure-03-vms.png",
+      "classification": "AzurePending",
+      "milestone": "VM boundary proves SQL has no public IP",
+      "sha256": null
+    },
+    {
+      "file": "azure-04-sql-readiness.png",
+      "classification": "AzurePending",
+      "milestone": "SQL bootstrap readiness passes",
+      "sha256": null
+    },
+    {
+      "file": "azure-05-admin-readiness.png",
+      "classification": "AzurePending",
+      "milestone": "Admin bootstrap and TLS readiness pass",
+      "sha256": null
+    },
+    {
+      "file": "azure-06-workload.png",
+      "classification": "AzurePending",
+      "milestone": "Bounded workload emits a semantically valid actual outcome",
+      "sha256": null
+    },
+    {
+      "file": "azure-07-pages.png",
+      "classification": "AzurePending",
+      "milestone": "Published Pages route and teardown proof are verified",
+      "sha256": null
+    }
   ]
 }

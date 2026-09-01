@@ -2283,6 +2283,75 @@ Describe 'Task 12 workload orchestration' {
 }
 
 Describe 'Task 12 stop and export safety' {
+    It 'writes a stop request atomically through a normal evidence path' {
+        $run = [guid]'13131313-1313-1313-1313-131313131313'
+        $repository = Join-Path $TestDrive 'normal-stop-repository'
+        $operations = @{
+            KillTagged = { param($RunId) Write-Verbose $RunId; @(51, 57) }
+        }
+
+        $result = & (Join-Path $PSScriptRoot '../../workload/Stop-MemoryGrantLab.ps1') `
+            -RunId $run -RepositoryRoot $repository -OperationSet $operations -Confirm:$false
+
+        $expectedPath = Join-Path $repository "evidence/runs/$($run.ToString('D'))/stop.request"
+        $result.StopRequested | Should -BeTrue
+        $result.StopRequestPath | Should -BeExactly ([IO.Path]::GetFullPath($expectedPath))
+        [IO.File]::ReadAllText($expectedPath) | Should -BeExactly $run.ToString('D')
+        [IO.File]::ReadAllBytes($expectedPath)[0..2] | Should -Not -Be @(0xEF,0xBB,0xBF)
+        @(Get-ChildItem (Split-Path -Parent $expectedPath) -Filter '*.tmp').Count | Should -Be 0
+        $result.KilledSessionIds | Should -Be @(51, 57)
+    }
+
+    It 'rejects a reparse point at every existing evidence path ancestor' -ForEach @(
+        @{ Component = 'evidence' }
+        @{ Component = 'runs' }
+        @{ Component = 'runDirectory' }
+    ) {
+        $run = [guid]::NewGuid()
+        $repository = Join-Path $TestDrive "linked-stop-repository-$Component"
+        $target = Join-Path $TestDrive "linked-stop-target-$Component"
+        [void] (New-Item -ItemType Directory -Path $repository, $target -Force)
+        $evidence = Join-Path $repository 'evidence'
+        $runs = Join-Path $evidence 'runs'
+        $runDirectory = Join-Path $runs $run.ToString('D')
+        $link = switch ($Component) {
+            'evidence' { $evidence }
+            'runs' {
+                [void] (New-Item -ItemType Directory -Path $evidence -Force)
+                $runs
+            }
+            'runDirectory' {
+                [void] (New-Item -ItemType Directory -Path $runs -Force)
+                $runDirectory
+            }
+        }
+        [void] (New-Item -ItemType Junction -Path $link -Target $target -Force)
+        $operations = @{ KillTagged = { throw 'KillTagged must not run for an unsafe path.' } }
+
+        {
+            & (Join-Path $PSScriptRoot '../../workload/Stop-MemoryGrantLab.ps1') `
+                -RunId $run -RepositoryRoot $repository -OperationSet $operations -Confirm:$false
+        } | Should -Throw '*reparse*'
+        Test-Path -LiteralPath (Join-Path $target 'stop.request') | Should -BeFalse
+    }
+
+    It 'rejects an existing reparse-point stop request destination' {
+        $run = [guid]::NewGuid()
+        $repository = Join-Path $TestDrive 'redirected-stop-repository'
+        $runDirectory = Join-Path $repository "evidence/runs/$($run.ToString('D'))"
+        $target = Join-Path $TestDrive 'redirected-stop-target'
+        [void] (New-Item -ItemType Directory -Path $runDirectory, $target -Force)
+        [void] (New-Item -ItemType Junction -Path (Join-Path $runDirectory 'stop.request') `
+            -Target $target -Force)
+        $operations = @{ KillTagged = { throw 'KillTagged must not run for an unsafe path.' } }
+
+        {
+            & (Join-Path $PSScriptRoot '../../workload/Stop-MemoryGrantLab.ps1') `
+                -RunId $run -RepositoryRoot $repository -OperationSet $operations -Confirm:$false
+        } | Should -Throw '*reparse*'
+        @(Get-ChildItem -LiteralPath $target -Force).Count | Should -Be 0
+    }
+
     It 'builds KILL only for active, exact doubly tagged user sessions' {
         $run = [guid]'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
         $rows = @(

@@ -27,23 +27,56 @@ Set-StrictMode -Version Latest
 Import-Module (Join-Path $PSScriptRoot 'Workshop.Workload.psd1') -Force
 
 $canonicalRunId = $RunId.ToString('D')
-$runsRoot = [IO.Path]::GetFullPath((Join-Path $RepositoryRoot 'evidence/runs'))
+$canonicalRepositoryRoot = [IO.Path]::GetFullPath($RepositoryRoot)
+$evidenceRoot = [IO.Path]::GetFullPath((Join-Path $canonicalRepositoryRoot 'evidence'))
+$runsRoot = [IO.Path]::GetFullPath((Join-Path $evidenceRoot 'runs'))
 $runDirectory = [IO.Path]::GetFullPath((Join-Path $runsRoot $canonicalRunId))
-if (-not $runDirectory.StartsWith("$runsRoot$([IO.Path]::DirectorySeparatorChar)", [StringComparison]::OrdinalIgnoreCase)) {
+$stopPath = [IO.Path]::GetFullPath((Join-Path $runDirectory 'stop.request'))
+$evidencePrefix = "$($evidenceRoot.TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar))$([IO.Path]::DirectorySeparatorChar)"
+$repositoryPrefix = "$($canonicalRepositoryRoot.TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar))$([IO.Path]::DirectorySeparatorChar)"
+if (-not $evidenceRoot.StartsWith($repositoryPrefix, [StringComparison]::OrdinalIgnoreCase) -or
+    -not $runsRoot.StartsWith($evidencePrefix, [StringComparison]::OrdinalIgnoreCase) -or
+    -not $runDirectory.StartsWith("$runsRoot$([IO.Path]::DirectorySeparatorChar)", [StringComparison]::OrdinalIgnoreCase) -or
+    -not $stopPath.StartsWith("$runDirectory$([IO.Path]::DirectorySeparatorChar)", [StringComparison]::OrdinalIgnoreCase)) {
     throw 'Run output path escapes evidence/runs.'
 }
 
+$assertSafeEvidencePath = {
+    param([string[]] $Paths)
+
+    foreach ($path in $Paths) {
+        $canonicalPath = [IO.Path]::GetFullPath($path)
+        if ($canonicalPath -ne $canonicalRepositoryRoot -and
+            $canonicalPath -ne $evidenceRoot -and
+            -not $canonicalPath.StartsWith($evidencePrefix, [StringComparison]::OrdinalIgnoreCase)) {
+            throw 'The canonical stop request path escapes the intended evidence root.'
+        }
+        if (-not (Test-Path -LiteralPath $canonicalPath)) { continue }
+
+        $item = Get-Item -LiteralPath $canonicalPath -Force
+        if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw 'Stop request paths and ancestors cannot be symbolic links, junctions, mount points, or reparse points.'
+        }
+        $resolvedPath = [IO.Path]::GetFullPath($item.FullName)
+        if ($resolvedPath -ne $canonicalPath -or
+            $resolvedPath -ne $canonicalRepositoryRoot -and
+            $resolvedPath -ne $evidenceRoot -and
+            -not $resolvedPath.StartsWith($evidencePrefix, [StringComparison]::OrdinalIgnoreCase)) {
+            throw 'The resolved stop request path escapes the intended evidence root.'
+        }
+    }
+}.GetNewClosure()
+$evidencePaths = @($canonicalRepositoryRoot, $evidenceRoot, $runsRoot, $runDirectory, $stopPath)
+& $assertSafeEvidencePath $evidencePaths
+
 if ($PSCmdlet.ShouldProcess($canonicalRunId, 'Request stop and terminate exact tagged workshop sessions')) {
     [void] (New-Item -ItemType Directory -Path $runDirectory -Force)
-    $item = Get-Item -LiteralPath $runDirectory -Force
-    if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-        throw 'Run output cannot be a reparse point or symbolic link.'
-    }
+    & $assertSafeEvidencePath $evidencePaths
     $temporary = Join-Path $runDirectory "stop.$([guid]::NewGuid().ToString('N')).tmp"
-    $stopPath = Join-Path $runDirectory 'stop.request'
     try {
         [IO.File]::WriteAllText($temporary, $canonicalRunId, [Text.UTF8Encoding]::new($false))
-        Move-Item -LiteralPath $temporary -Destination $stopPath -Force
+        & $assertSafeEvidencePath ($evidencePaths + $temporary)
+        [IO.File]::Move($temporary, $stopPath, $true)
     }
     finally {
         Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue

@@ -454,6 +454,59 @@ pre {
   background: var(--cp-bg-elevated);
 }
 
+.architecture-diagram {
+  margin-block: 2rem;
+  overflow-x: auto;
+  border: 1px solid var(--cp-border);
+  border-radius: 0.625rem;
+  padding: 1rem;
+  background: var(--cp-bg-elevated);
+}
+
+.architecture-diagram svg {
+  display: block;
+  min-width: 42rem;
+  width: 100%;
+  height: auto;
+  color: var(--cp-text);
+}
+
+.diagram-node {
+  fill: var(--cp-surface);
+  stroke: var(--cp-border-strong);
+  stroke-width: 2;
+}
+
+.diagram-node-label,
+.diagram-edge-label {
+  fill: var(--cp-text);
+  font-family: Consolas, "Courier New", Courier, monospace;
+  font-size: 12px;
+}
+
+.diagram-edge,
+.diagram-lifeline {
+  fill: none;
+  stroke: var(--cp-text-soft);
+  stroke-width: 2;
+}
+
+.diagram-lifeline {
+  stroke-dasharray: 5 5;
+}
+
+.diagram-arrowhead {
+  fill: var(--cp-text-soft);
+}
+
+.architecture-diagram details {
+  margin-top: 1rem;
+}
+
+.architecture-diagram details pre {
+  white-space: pre-wrap;
+}
+
 .code-block {
   position: relative;
   margin-block: 1rem;

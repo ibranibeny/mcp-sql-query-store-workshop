@@ -20,8 +20,7 @@ $transcriptStarted = $false
 $backupUri = 'https://github.com/Microsoft/sql-server-samples/releases/download/adventureworks/AdventureWorks2022.bak'
 $orderedScripts = @(
     '00-Preflight.sql', '01-ConfigureInstance.sql', '02-RestoreAndConfigureDatabase.sql',
-    '03-CreateScaledLabData.sql', '04-CreateBaselineProcedure.sql', '05-CreateDiagnostics.sql',
-    '06-CreateOptimizedProcedure.sql', '07-ValidateEquivalence.sql'
+    '03-CreateScaledLabData.sql', '04-CreateBaselineProcedure.sql', '05-CreateDiagnostics.sql'
 )
 
 function Assert-Condition {
@@ -35,6 +34,36 @@ function ConvertTo-SecureValue {
     foreach ($character in $Value.ToCharArray()) { $secure.AppendChar($character) }
     $secure.MakeReadOnly()
     $secure
+}
+
+function Get-VerifiedAdventureWorksBackup {
+    param(
+        [Parameter(Mandatory)][string] $Uri,
+        [Parameter(Mandatory)][string] $Path,
+        [Parameter(Mandatory)][string] $ExpectedSha256,
+        [scriptblock] $DownloadOperation = {
+            param($SourceUri, $OutFile)
+            Invoke-WebRequest -Uri $SourceUri -OutFile $OutFile -UseBasicParsing
+        },
+        [scriptblock] $HashOperation = {
+            param($LiteralPath, $Algorithm)
+            Get-FileHash -LiteralPath $LiteralPath -Algorithm $Algorithm
+        }
+    )
+    if ($Uri -cne 'https://github.com/Microsoft/sql-server-samples/releases/download/adventureworks/AdventureWorks2022.bak') {
+        throw 'AdventureWorks backup URI is not approved.'
+    }
+    if ($ExpectedSha256 -notmatch '^[A-F0-9]{64}$') {
+        throw 'AdventureWorks expected SHA256 is invalid.'
+    }
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        & $DownloadOperation $Uri $Path
+    }
+    $actualSha256 = [string] (& $HashOperation $Path 'SHA256').Hash
+    if ($actualSha256 -cne $ExpectedSha256) {
+        throw 'AdventureWorks backup SHA256 does not match the reviewed expected digest.'
+    }
+    $actualSha256
 }
 
 function Invoke-LocalSqlScalar {
@@ -400,11 +429,9 @@ ORDER BY file_id;
     Assert-Condition ($oldTempDbPaths.Count -eq 0) 'One or more TempDB files remain outside the approved root.'
 
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-    if (-not (Test-Path -LiteralPath $backupPath)) {
-        Invoke-WebRequest -Uri $backupUri -OutFile $backupPath -UseBasicParsing
-    }
-    $backupHash = (Get-FileHash -LiteralPath $backupPath -Algorithm SHA256).Hash
-    Assert-Condition ($backupHash -match '^[A-F0-9]{64}$') 'Backup SHA256 could not be observed.'
+    Assert-Condition ([string]$payload.AdventureWorksBackupUri -ceq $backupUri) 'Protected payload backup URI is not approved.'
+    $backupHash = Get-VerifiedAdventureWorksBackup -Uri $backupUri -Path $backupPath `
+        -ExpectedSha256 ([string]$payload.AdventureWorksBackupSha256)
 
     $verifyCommand = "RESTORE VERIFYONLY FROM DISK = N'$($backupPath.Replace("'", "''"))' WITH CHECKSUM;"
     $null = Invoke-LocalSqlScalar -Query $verifyCommand
@@ -430,7 +457,7 @@ ORDER BY file_id;
     Assert-Condition ($databaseMarker -ceq '68A70D6E-62D8-4A77-8F0A-9DA7934DBA7C') 'Workshop database marker readback failed.'
     Assert-Condition ($queryStoreState -ceq 'READ_WRITE') 'Query Store is not READ_WRITE.'
     Assert-Condition ($resourceGovernorState -ceq 'Enabled') 'Resource Governor is not enabled.'
-    Assert-Condition ($procedureCount -eq 8) 'The exact lab stored-procedure count was not verified.'
+    Assert-Condition ($procedureCount -eq 7) 'The exact pre-candidate lab stored-procedure count was not verified.'
     Assert-Condition ($priorMaxServerMemory -gt 0) 'Prior max server memory was not retained.'
     Assert-Condition ($tdsEncryption -ceq 'TRUE') 'Validated private-DNS SQL connection was not encrypted.'
 
@@ -447,7 +474,7 @@ ORDER BY file_id;
         TempDb = [ordered]@{ ApprovedRoot = $tempDbPath; Storage = $tempDbStorage; PersistentDataOnTemporaryDisk = $false; Deviation = $tempDbDeviation; EnoughSpace = $true; FileCount = $tempDbFilesAfter.Count; AllFilesUnderApprovedRoot = $true; OldPathCount = $oldTempDbPaths.Count; Files = $tempDbFilesAfter }
         Firewall = [ordered]@{ Rule = [string]$firewallRuleReadback.DisplayName; RemoteAddress = [string]@($firewallAddressReadback.RemoteAddress)[0]; BroadRule = ($broadSqlRules.Count -ne 0) }
         Certificate = [ordered]@{ DnsName = $privateDnsName; Thumbprint = $certificateThumbprint; RegistryCertificate = $registryCertificate; StoreThumbprint = (([string]$storeCertificate.Thumbprint -replace '\s', '').ToUpperInvariant()); ForceEncryption = $forceEncryption; HasPrivateKey = [bool]$storeCertificate.HasPrivateKey; ServerAuthenticationEku = $true; SanVerified = $true; ServiceKeyAclVerified = $true; PublicCertificateThumbprint = $publicCertificateThumbprint; PublicCertificateSha256 = (Get-FileHash -LiteralPath $publicCertificatePath -Algorithm SHA256).Hash; PublicCertificatePath = $publicCertificatePath; PrivateKeyExported = $false; TlsLoadFailures = $tlsLoadFailures; StartupBindingEvidence = $startupBindingEvidence }
-        Backup = [ordered]@{ Uri = $backupUri; Sha256 = $backupHash; ChecksumClassification = 'observed-not-upstream-expected'; VerifyOnly = $true }
+        Backup = [ordered]@{ Uri = $backupUri; Sha256 = $backupHash; ExpectedSha256 = [string]$payload.AdventureWorksBackupSha256; ChecksumClassification = 'expected-verified'; VerifyOnly = $true }
         Database = [ordered]@{ Marker = $databaseMarker; QueryStore = $queryStoreState; ResourceGovernor = $resourceGovernorState; ProcedureCount = $procedureCount; PriorMaxServerMemoryMB = $priorMaxServerMemory }
     }
     $readiness | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $readinessPath -Encoding UTF8

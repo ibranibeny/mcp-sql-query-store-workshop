@@ -573,15 +573,15 @@ END;';
             SELECT 1 FROM sys.database_principals
             WHERE name = N'mcp_workshop_reader' AND type = 'S' AND sid = @ReaderSid
         )
-            THROW 51920, 'The mcp_workshop_reader SID ownership contract is invalid.', 1;
-        IF EXISTS
+        OR NOT EXISTS
         (
             SELECT 1 FROM WorkshopAdmin.dbo.IdentityOwnership
             WHERE MarkerId = @WorkshopMarker AND SchemaVersion = @WorkshopSchemaVersion
               AND PrincipalType = 'DATABASE_USER' AND PrincipalName = N'mcp_workshop_reader'
               AND PrincipalSid = @ReaderSid AND CreatedByWorkshop = 1
         )
-            DROP USER [mcp_workshop_reader];
+            THROW 51920, 'The mcp_workshop_reader SID ownership contract is invalid.', 1;
+        DROP USER [mcp_workshop_reader];
     END;
         IF USER_ID(N'mcp_workshop_reader') IS NULL
                 DELETE WorkshopAdmin.dbo.IdentityOwnership
@@ -597,15 +597,15 @@ END;';
               AND default_database_name = N'AdventureWorks2022'
               AND is_policy_checked = 1 AND is_expiration_checked = 0
         )
-            THROW 51921, 'The mcp_workshop_reader login is foreign or drifted.', 1;
-        IF EXISTS
+        OR NOT EXISTS
         (
             SELECT 1 FROM WorkshopAdmin.dbo.IdentityOwnership
             WHERE MarkerId = @WorkshopMarker AND SchemaVersion = @WorkshopSchemaVersion
               AND PrincipalType = 'SQL_LOGIN' AND PrincipalName = N'mcp_workshop_reader'
               AND PrincipalSid = @ReaderSid AND CreatedByWorkshop = 1
         )
-            DROP LOGIN [mcp_workshop_reader];
+            THROW 51921, 'The mcp_workshop_reader login is foreign or drifted.', 1;
+        DROP LOGIN [mcp_workshop_reader];
     END;
         IF SUSER_ID(N'mcp_workshop_reader') IS NULL
                 DELETE WorkshopAdmin.dbo.IdentityOwnership

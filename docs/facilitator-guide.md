@@ -37,13 +37,13 @@ Lunch is outside the six-hour agenda.
 | 120–125 | Explicit deployment decision | Exact deploy phrase and `ShouldProcess` approval | No action; preserve plan card |
 | 125–135 | Deployment checkpoints/fallback handoff | Network, VMs, bootstrap, TLS, readiness all pass, or use pre-staged environment | Preserve last checkpoint; do not claim readiness |
 | 135–145 | Break | No workload active | Stop exact tagged run |
-| 145–165 | SQL setup and Query Store | Marker valid; Enterprise 2022; Resource Governor and Query Store read back | Repair setup; never weaken guards |
+| 145–165 | SQL setup and Query Store | Bootstrap scripts 00–05 complete; marker valid; Enterprise 2022; Resource Governor and Query Store read back; no candidate exists | Repair setup; never weaken guards or create the candidate early |
 | 165–190 | Baseline calibration | Three consecutive 75–85% samples or bounded truthful miss | Record `BaselineTargetNotReached`; do not increase limits |
 | 190–210 | Evidence interpretation | Run ID, UTC window, units, grants, waits, plans captured | Mark missing evidence and defer conclusions |
 | 210–235 | VS Code, MSSQL, and DAB | TLS validates; DAB validates; allowlisted tools only | Fix trust/config/role; no broad SQL fallback |
 | 235–275 | Structured investigation | Observations are sourced; hypotheses ranked; experiments bounded | Score with rubric and revise |
 | 275–285 | Break | Workload stopped; run context retained | Stop tagged run before leaving |
-| 285–305 | Candidate review | Baseline preserved; candidate contract stated | Reject destructive or unsupported proposal |
+| 285–305 | Candidate review and explicit approval | Investigation complete; baseline preserved; candidate contract stated; `deploy/Approve-WorkshopCandidate.ps1` runs with `APPROVE AdventureWorks2022 candidate` | Reject destructive or unsupported proposal; do not run scripts 06/07 directly |
 | 305–320 | Correctness matrix | Metadata, counts, hashes, and bidirectional differences pass | Reject candidate; skip acceptance run |
 | 320–335 | Frozen comparison | Twelve interleaved trials; settings hash unchanged | Classify invalid/failed; do not combine runs |
 | 335–340 | Decision | Actual outcome and risks recorded | Use `ImprovedOutsideTarget` or `NoMaterialImprovement` truthfully |
@@ -76,6 +76,7 @@ Deployment preflight and deployment approval are separate checkpoints:
 ## Facilitation checkpoints
 
 - Before pressure: confirm the database, Resource Governor pool, workload tags, timeout, and stop path.
+- After investigation and before A/B: review the proposed index and procedure, then use `deploy/Approve-WorkshopCandidate.ps1` with the exact phrase `APPROVE AdventureWorks2022 candidate`. Bootstrap stops at script 05; only this entry point may run scripts 06 and 07 over certificate-validated encrypted private TDS.
 - Before accepting a proposal: prove result equivalence and keep conditions unchanged.
 - During measurement: record actual values; targets are not measured evidence.
 - On any threshold breach: stop the bounded workload and preserve diagnostics.

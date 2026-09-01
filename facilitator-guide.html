@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="description" content="An evidence-driven L400 workshop for optimizing a SQL Server stored procedure with GitHub Copilot and Microsoft SQL MCP.">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'sha256-b5MeUJifSKSfTMPMddrS1DZR/PfSzDiMsbc0XtGwWLc=' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https://cdn.jsdelivr.net; object-src 'none'; base-uri 'none'; form-action 'self'; upgrade-insecure-requests">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'sha256-b5MeUJifSKSfTMPMddrS1DZR/PfSzDiMsbc0XtGwWLc='; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; upgrade-insecure-requests">
   <title>Facilitator guide | MCP SQL Query Store Workshop</title>
   <link rel="stylesheet" href="assets/styles.css">
   <script>
@@ -322,8 +322,8 @@
 <tr>
 <td style="text-align: right;">145–165</td>
 <td>SQL setup and Query Store</td>
-<td>Marker valid; Enterprise 2022; Resource Governor and Query Store read back</td>
-<td>Repair setup; never weaken guards</td>
+<td>Bootstrap scripts 00–05 complete; marker valid; Enterprise 2022; Resource Governor and Query Store read back; no candidate exists</td>
+<td>Repair setup; never weaken guards or create the candidate early</td>
 </tr>
 <tr>
 <td style="text-align: right;">165–190</td>
@@ -357,9 +357,9 @@
 </tr>
 <tr>
 <td style="text-align: right;">285–305</td>
-<td>Candidate review</td>
-<td>Baseline preserved; candidate contract stated</td>
-<td>Reject destructive or unsupported proposal</td>
+<td>Candidate review and explicit approval</td>
+<td>Investigation complete; baseline preserved; candidate contract stated; <code>deploy/Approve-WorkshopCandidate.ps1</code> runs with <code>APPROVE AdventureWorks2022 candidate</code></td>
+<td>Reject destructive or unsupported proposal; do not run scripts 06/07 directly</td>
 </tr>
 <tr>
 <td style="text-align: right;">305–320</td>
@@ -421,6 +421,7 @@
 <h2 id="facilitation-checkpoints">Facilitation checkpoints<a class="headerlink" href="#facilitation-checkpoints" title="Permanent link">&para;</a></h2>
 <ul>
 <li>Before pressure: confirm the database, Resource Governor pool, workload tags, timeout, and stop path.</li>
+<li>After investigation and before A/B: review the proposed index and procedure, then use <code>deploy/Approve-WorkshopCandidate.ps1</code> with the exact phrase <code>APPROVE AdventureWorks2022 candidate</code>. Bootstrap stops at script 05; only this entry point may run scripts 06 and 07 over certificate-validated encrypted private TDS.</li>
 <li>Before accepting a proposal: prove result equivalence and keep conditions unchanged.</li>
 <li>During measurement: record actual values; targets are not measured evidence.</li>
 <li>On any threshold breach: stop the bounded workload and preserve diagnostics.</li>

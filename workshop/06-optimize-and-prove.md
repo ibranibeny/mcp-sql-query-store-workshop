@@ -14,7 +14,19 @@ Review the reference candidate in `sql/06-CreateOptimizedProcedure.sql`: half-op
 
 ## Correctness is the first gate
 
-Run `sql/07-ValidateEquivalence.sql`. It covers at least eight parameter cases and compares first-result metadata, row counts, deterministic hashes, baseline `EXCEPT` candidate, and candidate `EXCEPT` baseline. Any mismatch rejects the candidate and blocks performance acceptance. Do not edit a correctness test merely to approve the candidate.
+Only after the investigation is complete and the DBA has reviewed the proposed index and procedure, obtain a dedicated DBA credential and run the approval entry point. It opens one certificate-validated encrypted private TDS connection, executes only `sql/06-CreateOptimizedProcedure.sql` and `sql/07-ValidateEquivalence.sql`, and fails unless the candidate objects and the exact equivalence batch are positively verified. It does not accept or reuse the bootstrap database-master-key or MCP-reader secrets.
+
+```powershell
+$candidateDba = Get-Credential -Message 'DBA credential for approved candidate creation'
+./deploy/Approve-WorkshopCandidate.ps1 `
+	-Credential $candidateDba `
+	-ServerInstance 'sql01.mcpworkshop.internal' `
+	-ExpectedServerName 'sql01.mcpworkshop.internal' `
+	-ExpectedDatabaseName 'AdventureWorks2022' `
+	-ConfirmationPhrase 'APPROVE AdventureWorks2022 candidate'
+```
+
+The entry point runs the equivalence harness in `sql/07-ValidateEquivalence.sql`. It covers at least eight parameter cases and compares first-result metadata, row counts, deterministic hashes, baseline `EXCEPT` candidate, and candidate `EXCEPT` baseline. Any mismatch rejects the candidate and blocks performance acceptance. Do not run scripts 06 or 07 directly, and do not edit a correctness test merely to approve the candidate.
 
 ## Freeze and measure
 

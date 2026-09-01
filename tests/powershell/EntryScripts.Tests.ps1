@@ -4,6 +4,7 @@ BeforeAll {
     $script:DeployPath = Join-Path $PSScriptRoot '../../deploy/Deploy-WorkshopEnvironment.ps1'
     $script:StopPath = Join-Path $PSScriptRoot '../../deploy/Stop-WorkshopEnvironment.ps1'
     $script:RemovePath = Join-Path $PSScriptRoot '../../deploy/Remove-WorkshopEnvironment.ps1'
+    $script:CandidatePath = Join-Path $PSScriptRoot '../../deploy/Approve-WorkshopCandidate.ps1'
 }
 
 Describe 'Workshop deployment entry script contract' {
@@ -227,7 +228,7 @@ Describe 'Workshop deployment entry script gates' {
             Credential = $script:Credential
             DatabaseMasterKeyPassword = $script:Credential.Password
             McpReaderPassword = $script:Credential.Password
-            RepositoryUrl = 'https://github.com/example/mcp-sql-workshop.git'
+            RepositoryUrl = 'https://github.com/ibranibeny/mcp-sql-query-store-workshop.git'
             RepositoryCommit = '0123456789abcdef0123456789abcdef01234567'
             WindowsClientLicenseAttested = $true
             SqlEnterpriseCostAcknowledged = $true
@@ -279,6 +280,13 @@ Describe 'Workshop deployment entry script gates' {
         $commit = $ast.ParamBlock.Parameters |
             Where-Object { $_.Name.VariablePath.UserPath -eq 'RepositoryCommit' }
         $commit.Extent.Text | Should -Match "ValidatePattern\('\^\[0-9a-f\]\{40\}\$'\)"
+    }
+
+    It 'rejects an unapproved GitHub repository before any deployment operation executes' {
+        $script:EntryParameters.RepositoryUrl = 'https://github.com/example/mcp-sql-workshop'
+
+        { & $script:DeployPath @script:EntryParameters } | Should -Throw '*approved repository*'
+        $script:Sequence | Should -HaveCount 0
     }
 
     It 'creates nothing when preflight fails' {
@@ -382,6 +390,162 @@ Describe 'Workshop deployment entry script gates' {
         foreach ($counterName in $Later) {
             $script:Counters.$counterName | Should -Be 0
         }
+    }
+}
+
+Describe 'DBA-approved candidate entry script contract' {
+    BeforeAll {
+        $script:CandidateTokens = $null
+        $script:CandidateErrors = $null
+        $script:CandidateAst = [System.Management.Automation.Language.Parser]::ParseFile(
+            $script:CandidatePath,
+            [ref] $script:CandidateTokens,
+            [ref] $script:CandidateErrors
+        )
+        $script:CandidateText = if (Test-Path -LiteralPath $script:CandidatePath) {
+            Get-Content -LiteralPath $script:CandidatePath -Raw
+        }
+        else { '' }
+    }
+
+    It 'exists, parses, supports ShouldProcess, and accepts credential or secure connection string input' {
+        Test-Path -LiteralPath $script:CandidatePath -PathType Leaf | Should -BeTrue
+        $script:CandidateErrors | Should -HaveCount 0
+        $script:CandidateAst.ParamBlock.Attributes.NamedArguments.ArgumentName | Should -Contain 'SupportsShouldProcess'
+        $parameterNames = @($script:CandidateAst.ParamBlock.Parameters.Name.VariablePath.UserPath)
+        foreach ($name in @('Credential', 'ServerInstance', 'SqlConnectionString', 'ExpectedServerName', 'ExpectedDatabaseName', 'ConfirmationPhrase')) {
+            $parameterNames | Should -Contain $name
+        }
+        $parameterNames | Should -Not -Contain 'DatabaseMasterKeyPassword'
+        $parameterNames | Should -Not -Contain 'McpReaderPassword'
+        ($script:CandidateAst.ParamBlock.Parameters | Where-Object Name -Match 'SqlConnectionString').StaticType.FullName |
+            Should -Be 'System.Security.SecureString'
+    }
+
+    It 'fails closed before connection work unless the exact candidate phrase and ShouldProcess approval pass' {
+        $text = $script:CandidateText
+        $text | Should -Match 'APPROVE AdventureWorks2022 candidate'
+        $text | Should -Match 'did not match exactly'
+        $phraseAt = $text.LastIndexOf('APPROVE AdventureWorks2022 candidate')
+        $shouldProcessAt = $text.IndexOf('$PSCmdlet.ShouldProcess')
+        $openAt = $text.IndexOf('.Open()')
+        $phraseAt | Should -BeGreaterThan -1
+        $phraseAt | Should -BeLessThan $shouldProcessAt
+        $shouldProcessAt | Should -BeLessThan $openAt
+    }
+
+    It 'uses certificate-validated private TDS with the secure fallback rules and one connection' {
+        $text = $script:CandidateText
+        $text | Should -Match 'Microsoft\.Data\.SqlClient'
+        $text | Should -Match 'System\.Data\.SqlClient'
+        $text | Should -Match 'Encrypt\s*=\s*\$true'
+        $text | Should -Match 'TrustServerCertificate\s*=\s*\$false'
+        $text | Should -Match 'HostNameInCertificate'
+        $text | Should -Match 'sql01\.mcpworkshop\.internal'
+        $text | Should -Match 'AdventureWorks2022'
+        [regex]::Matches($text, '\.Open\(\)').Count | Should -Be 1
+        [regex]::Matches($text, 'SqlConnection\b').Count | Should -BeLessOrEqual 2
+    }
+
+    It 'runs only scripts 06 then 07 and positively verifies the exact approved validation batch' {
+        $text = $script:CandidateText
+        $sixAt = $text.IndexOf('06-CreateOptimizedProcedure.sql')
+        $sevenAt = $text.IndexOf('07-ValidateEquivalence.sql')
+        $sixAt | Should -BeGreaterThan -1
+        $sevenAt | Should -BeGreaterThan $sixAt
+        $text | Should -Not -Match '00-Preflight\.sql|01-ConfigureInstance\.sql|02-RestoreAndConfigureDatabase\.sql|03-CreateScaledLabData\.sql|04-CreateBaselineProcedure\.sql|05-CreateDiagnostics\.sql|08-OptionalQueryStoreHint\.sql|09-Cleanup\.sql'
+        $text | Should -Match 'CandidateApprovalId'
+        $text | Should -Match 'CandidateApprovalGranted'
+        $text | Should -Match 'ReadOnly'
+        $text | Should -Match 'usp_MonthEndSalesOptimized'
+        $text | Should -Match 'IX_FactSales_OrderDate_Territory'
+        $text | Should -Match 'ValidationBatchID'
+        $text | Should -Match 'PassingCaseCount'
+        $text | Should -Match 'ValidationPassed'
+    }
+
+    It 'uses only the canonical repository SQL directory and verifies the exact private address' {
+        $parameterNames = @($script:CandidateAst.ParamBlock.Parameters.Name.VariablePath.UserPath)
+        $parameterNames | Should -Not -Contain 'SqlDirectory'
+        $script:CandidateText | Should -Match ([regex]::Escape("Join-Path `$PSScriptRoot '../sql'"))
+        $script:CandidateText | Should -Match 'Resolve-DnsName'
+        $script:CandidateText | Should -Match '10\.20\.2\.10'
+        $dnsAt = $script:CandidateText.IndexOf('Resolve-DnsName')
+        $openAt = $script:CandidateText.IndexOf('.Open()')
+        $dnsAt | Should -BeGreaterThan -1
+        $dnsAt | Should -BeLessThan $openAt
+    }
+
+    It 'rejects existing candidate objects and compensates only this failed approval attempt' {
+        $text = $script:CandidateText
+        $text | Should -Match 'candidate objects already exist'
+        $text | Should -Match 'candidateChangesStarted'
+        $text | Should -Match '(?m)^catch\s*\{'
+        $text | Should -Match 'DELETE\s+lab\.ValidationRun'
+        $text | Should -Match 'DROP PROCEDURE\s+lab\.usp_MonthEndSalesOptimized'
+        $text | Should -Match 'DROP INDEX\s+IX_FactSales_OrderDate_Territory'
+        $text | Should -Match 'refusing compensating cleanup'
+    }
+
+    It 'serializes the complete candidate approval lifetime with a bounded session application lock' {
+        $text = $script:CandidateText
+        $preconditionAt = $text.IndexOf('$precondition =')
+        $acquireAt = $text.IndexOf('sys.sp_getapplock')
+        $absenceAt = $text.IndexOf('$existingCandidateObjectCount')
+        $ownershipAt = $text.IndexOf('WorkshopAdmin.dbo.LabObjectOwnership')
+        $compensationAt = $text.IndexOf('Candidate procedure drift detected')
+        $releaseAt = $text.LastIndexOf('sys.sp_releaseapplock')
+        $closeAt = $text.LastIndexOf('$connection.Close()')
+
+        $text | Should -Match "MCP_SQL_WORKSHOP_LIFECYCLE"
+        $text | Should -Match "@LockMode\s*=\s*N'Exclusive'"
+        $text | Should -Match "@LockOwner\s*=\s*N'Session'"
+        $text | Should -Match '\$applicationLockTimeoutMilliseconds\s*=\s*15000'
+        $text | Should -Match '@LockTimeout\s*=\s*\$applicationLockTimeoutMilliseconds'
+        $text | Should -Match '\$applicationLockResult\s+-lt\s+0'
+        $text | Should -Match '\$applicationLockAcquired\s*=\s*\$true'
+        $text | Should -Match '\$applicationLockAcquired\s*=\s*\$false'
+        $preconditionAt | Should -BeLessThan $acquireAt
+        $acquireAt | Should -BeLessThan $absenceAt
+        $ownershipAt | Should -BeLessThan $releaseAt
+        $compensationAt | Should -BeLessThan $releaseAt
+        $releaseAt | Should -BeLessThan $closeAt
+    }
+
+    It 'captures exact procedure and index hashes before validation and rejects hash drift during compensation' {
+        $text = $script:CandidateText
+        $createExecutionAt = $text.IndexOf('$scriptNames[0]')
+        $captureAt = $text.IndexOf('$candidateFingerprint =')
+        $validationExecutionAt = $text.IndexOf('$scriptNames[1]')
+        $compensationAt = $text.IndexOf('Candidate procedure drift detected')
+        $deleteAt = $text.IndexOf('DELETE lab.ValidationRun', $compensationAt)
+        $dropProcedureAt = $text.IndexOf('DROP PROCEDURE lab.usp_MonthEndSalesOptimized', $compensationAt)
+        $dropIndexAt = $text.IndexOf('DROP INDEX IX_FactSales_OrderDate_Territory', $compensationAt)
+
+        $text | Should -Match 'ExpectedCandidateDefinitionHash'
+        $text | Should -Match 'ExpectedCandidateIndexSchemaHash'
+        $text | Should -Match "HASHBYTES\(\s*'SHA2_256'"
+        $text | Should -Match 'CurrentCandidateDefinitionHash\s*<>\s*@ExpectedCandidateDefinitionHash'
+        $text | Should -Match 'CurrentCandidateIndexSchemaHash\s*<>\s*@ExpectedCandidateIndexSchemaHash'
+        $text | Should -Not -Match "OBJECT_DEFINITION\(@CandidateProcedureId\)\s+NOT\s+LIKE"
+        $createExecutionAt | Should -BeGreaterThan -1
+        $createExecutionAt | Should -BeLessThan $captureAt
+        $captureAt | Should -BeLessThan $validationExecutionAt
+        $compensationAt | Should -BeLessThan $deleteAt
+        $compensationAt | Should -BeLessThan $dropProcedureAt
+        $compensationAt | Should -BeLessThan $dropIndexAt
+    }
+
+    It 'rejects a wrong phrase without attempting a connection' {
+        $secure = [Security.SecureString]::new()
+        foreach ($character in 'unit-test-only'.ToCharArray()) { $secure.AppendChar($character) }
+        $secure.MakeReadOnly()
+        $credential = [PSCredential]::new('candidate-dba', $secure)
+
+        { & $script:CandidatePath -Credential $credential -ServerInstance 'sql01.mcpworkshop.internal' `
+                -ExpectedServerName 'sql01.mcpworkshop.internal' -ExpectedDatabaseName 'AdventureWorks2022' `
+                -ConfirmationPhrase 'approve AdventureWorks2022 candidate' -Confirm:$false } |
+            Should -Throw '*did not match exactly*'
     }
 }
 

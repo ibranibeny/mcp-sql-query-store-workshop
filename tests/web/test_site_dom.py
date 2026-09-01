@@ -245,8 +245,8 @@ def test_assets_define_exact_clawpilot_theme_typography_and_accessibility_rules(
     assert not re.search(r"#[0-9a-f]{3,8}|rgba?\(|hsla?\(", declarations, re.IGNORECASE)
 
 
-def test_scripts_are_csp_friendly_pinned_modules(tmp_path: Path) -> None:
-    _, pages = build_pages(tmp_path)
+def test_scripts_and_csp_do_not_allow_remote_executable_code(tmp_path: Path) -> None:
+    destination, pages = build_pages(tmp_path)
     soup = pages[0]
 
     local_module = soup.select_one('script[type="module"][src$="assets/app.js"]')
@@ -254,18 +254,162 @@ def test_scripts_are_csp_friendly_pinned_modules(tmp_path: Path) -> None:
     scripts = soup.select("script")
     assert scripts[0].get("src") is None
     assert scripts[0].string == CLAWPILOT_THEME_SCRIPT
-    app = (ROOT / "web/assets/app.js").read_text(encoding="utf-8")
-    assert "https://cdn.jsdelivr.net/npm/mermaid@11.12.0/dist/mermaid.esm.min.mjs" in app
+    app = (destination / "assets/app.js").read_text(encoding="utf-8")
+    assert "https://" not in app
+    assert "http://" not in app
+    assert "cdn.jsdelivr.net" not in app
+    assert "import(" not in app
     assert len(soup.select("script:not([src])")) == 1
-    csp = soup.select_one('meta[http-equiv="Content-Security-Policy"]')["content"]
-    assert "script-src 'self'" in csp and "https://cdn.jsdelivr.net" in csp
     expected_hash = base64.b64encode(
         hashlib.sha256(CLAWPILOT_THEME_SCRIPT.encode("utf-8")).digest()
     ).decode("ascii")
-    assert f"'sha256-{expected_hash}'" in csp
-    assert "style-src 'self' 'unsafe-inline'" in csp
-    assert "'unsafe-inline' https://cdn.jsdelivr.net" not in csp
-    assert "'unsafe-eval'" not in csp
+    for page in pages:
+        csp = page.select_one('meta[http-equiv="Content-Security-Policy"]')["content"]
+        assert "script-src 'self'" in csp
+        assert f"'sha256-{expected_hash}'" in csp
+        assert "style-src 'self' 'unsafe-inline'" in csp
+        assert "http://" not in csp
+        assert "https://" not in csp
+        assert "'unsafe-eval'" not in csp
+
+
+def test_architecture_route_preserves_two_static_svg_diagrams(tmp_path: Path) -> None:
+    destination, _ = build_pages(tmp_path)
+    soup = BeautifulSoup(
+        (destination / "02-scenario-and-architecture.html").read_text(encoding="utf-8"),
+        "html.parser",
+    )
+
+    diagrams = soup.select("figure.architecture-diagram > svg[role='img']")
+    assert len(diagrams) == 2
+    assert soup.select_one("figure.flowchart-diagram > svg title")
+    assert soup.select_one("figure.sequence-diagram > svg title")
+    assert not soup.select("pre.mermaid")
+
+
+def test_architecture_route_svg_nodes_are_inside_complete_viewboxes(tmp_path: Path) -> None:
+    destination, _ = build_pages(tmp_path)
+    soup = BeautifulSoup(
+        (destination / "02-scenario-and-architecture.html").read_text(encoding="utf-8"),
+        "html.parser",
+    )
+
+    for svg in soup.select("figure.architecture-diagram > svg"):
+        view_x, view_y, view_width, view_height = map(float, svg["viewbox"].split())
+        assert view_width > 0 and view_height > 0
+        for node in svg.select("rect.diagram-node"):
+            x, y = float(node["x"]), float(node["y"])
+            width, height = float(node["width"]), float(node["height"])
+            assert view_x <= x < x + width <= view_x + view_width
+            assert view_y <= y < y + height <= view_y + view_height
+
+
+def test_architecture_flow_routes_are_deterministic_orthogonal_and_avoid_other_nodes(
+    tmp_path: Path,
+) -> None:
+    first_destination, _ = build_pages(tmp_path / "first")
+    second_destination, _ = build_pages(tmp_path / "second")
+
+    def flow_svg(destination: Path):
+        soup = BeautifulSoup(
+            (destination / "02-scenario-and-architecture.html").read_text(encoding="utf-8"),
+            "html.parser",
+        )
+        return soup.select_one("figure.flowchart-diagram > svg")
+
+    first = flow_svg(first_destination)
+    second = flow_svg(second_destination)
+    assert first is not None and second is not None
+    assert str(first) == str(second)
+
+    boxes = {
+        node["data-node-id"]: (
+            float(node["x"]),
+            float(node["y"]),
+            float(node["x"]) + float(node["width"]),
+            float(node["y"]) + float(node["height"]),
+        )
+        for node in first.select("rect.diagram-node[data-node-id]")
+    }
+    assert {"A", "SN", "S", "NAT"}.issubset(boxes)
+
+    routes = first.select("path.diagram-edge[data-source][data-target]")
+    assert routes
+    for route in routes:
+        coordinates = [float(value) for value in re.findall(r"-?\d+(?:\.\d+)?", route["d"])]
+        points = list(zip(coordinates[::2], coordinates[1::2]))
+        assert len(points) >= 2
+        for (x1, y1), (x2, y2) in zip(points, points[1:]):
+            assert x1 == x2 or y1 == y2
+            for node_id, (left, top, right, bottom) in boxes.items():
+                if node_id in {route["data-source"], route["data-target"]}:
+                    continue
+                crosses_horizontal = y1 == y2 and top < y1 < bottom and max(x1, x2) > left and min(x1, x2) < right
+                crosses_vertical = x1 == x2 and left < x1 < right and max(y1, y2) > top and min(y1, y2) < bottom
+                assert not (crosses_horizontal or crosses_vertical), (
+                    f'{route["data-source"]} -> {route["data-target"]} crosses {node_id}'
+                )
+
+
+def test_architecture_svgs_describe_parsed_relationships_and_retain_sources(tmp_path: Path) -> None:
+    destination, _ = build_pages(tmp_path)
+    soup = BeautifulSoup(
+        (destination / "02-scenario-and-architecture.html").read_text(encoding="utf-8"),
+        "html.parser",
+    )
+    flow = soup.select_one("figure.flowchart-diagram > svg")
+    sequence = soup.select_one("figure.sequence-diagram > svg")
+    assert flow is not None and sequence is not None
+
+    assert "Facilitator workstation" in flow.title.get_text(" ", strip=True)
+    assert "Facilitator workstation to Admin public IP" in flow.desc.get_text(" ", strip=True)
+    assert "Windows 11 Enterprise admin VM to NAT Gateway" in flow.desc.get_text(" ", strip=True)
+    assert "DBA" in sequence.title.get_text(" ", strip=True)
+    assert "Private SQL Server" in sequence.title.get_text(" ", strip=True)
+    assert "DBA to Az PowerShell: Run read-only preflight" in sequence.desc.get_text(" ", strip=True)
+    assert "Private SQL Server to Query Store: Persist plans, runtime, and waits" in sequence.desc.get_text(" ", strip=True)
+    for svg in (flow, sequence):
+        labelled_by = svg["aria-labelledby"].split()
+        assert labelled_by == [svg.title["id"], svg.desc["id"]]
+    for figure in soup.select("figure.architecture-diagram"):
+        assert figure.select_one("details > summary").get_text(strip=True) == "Diagram source"
+        assert "mermaid" not in figure.select_one("details > pre").get("class", [])
+
+
+def test_architecture_sequence_replies_use_only_declared_participants(tmp_path: Path) -> None:
+    destination, _ = build_pages(tmp_path)
+    soup = BeautifulSoup(
+        (destination / "02-scenario-and-architecture.html").read_text(encoding="utf-8"),
+        "html.parser",
+    )
+    sequence = soup.select_one("figure.sequence-diagram > svg")
+    assert sequence is not None
+
+    description = sequence.desc.get_text(" ", strip=True)
+    participant_text, message_text = description.removeprefix("Participants: ").split(
+        ". Messages: ", maxsplit=1
+    )
+    assert participant_text.split(", ") == [
+        "DBA",
+        "Az PowerShell",
+        "Azure",
+        "VS Code + Copilot",
+        "MSSQL extension",
+        "DAB SQL MCP",
+        "Private SQL Server",
+        "Query Store",
+    ]
+    assert len(sequence.select("rect.diagram-node")) == 8
+    for invented_participant in ("AZ-", "SQL-", "MCP-", "VS-"):
+        assert invented_participant not in description
+    for reply in (
+        "Azure to Az PowerShell: Current subscription evidence",
+        "Private SQL Server to DAB SQL MCP: Typed evidence",
+        "DAB SQL MCP to VS Code + Copilot: Structured result",
+        "VS Code + Copilot to DBA: Observations, gaps, hypotheses, experiments",
+        "Private SQL Server to DBA: Actual outcome and evidence bundle",
+    ):
+        assert reply in message_text
 
 
 def test_script_contracts_cover_helpers_and_safe_dom_adapters(tmp_path: Path) -> None:

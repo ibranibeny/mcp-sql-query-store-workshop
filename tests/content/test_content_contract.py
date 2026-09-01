@@ -166,6 +166,20 @@ def test_deployment_and_workload_modules_match_repository_entry_points() -> None
     assert "Remove-WorkshopEnvironment.ps1" in teardown
 
 
+def test_bootstrap_stops_before_candidate_and_module_six_owns_explicit_approval() -> None:
+    setup = read("workshop/04-create-memory-pressure.md")
+    proof = read("workshop/06-optimize-and-prove.md")
+    facilitator = read("docs/facilitator-guide.md")
+    assert "sql/00-Preflight.sql` through `sql/05-CreateDiagnostics.sql" in setup
+    assert "through `sql/07-ValidateEquivalence.sql" not in setup
+    assert "must not run `sql/06-CreateOptimizedProcedure.sql`" in setup
+    for content in (proof, facilitator):
+        assert "deploy/Approve-WorkshopCandidate.ps1" in content
+        assert "APPROVE AdventureWorks2022 candidate" in content
+        assert "after" in content.lower() and "investigation" in content.lower()
+    assert proof.index("deploy/Approve-WorkshopCandidate.ps1") < proof.index("ABBA BAAB ABBA")
+
+
 def test_investigation_and_proof_modules_name_real_surfaces() -> None:
     investigation = read("workshop/05-investigate-with-vscode.md")
     proof = read("workshop/06-optimize-and-prove.md")

@@ -68,6 +68,11 @@ $configPath = Join-Path $PSScriptRoot 'WorkshopConfig.psd1'
 Import-Module $modulePath -Force
 $config = Import-PowerShellDataFile $configPath
 
+$normalizedRepositoryUrl = $RepositoryUrl -replace '\.git$', ''
+if ($normalizedRepositoryUrl -cne $config.ApprovedRepositoryUrl) {
+    throw "RepositoryUrl must identify the approved repository '$($config.ApprovedRepositoryUrl)'."
+}
+
 if (-not $WindowsClientLicenseAttested.IsPresent -or
     -not $SqlEnterpriseCostAcknowledged.IsPresent -or
     -not $BillableResourcesAcknowledged.IsPresent -or

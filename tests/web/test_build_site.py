@@ -179,7 +179,7 @@ def test_duration_must_be_a_nonnegative_integer(tmp_path: Path, duration: object
         load_manifest(path, root=tmp_path)
 
 
-def test_render_markdown_supports_tables_toc_highlighting_and_safe_mermaid() -> None:
+def test_render_markdown_supports_tables_toc_highlighting_and_safe_static_diagrams() -> None:
     rendered = render_markdown(
         "# Heading\n\n"
         "| A | B |\n|---|---|\n| 1 | 2 |\n\n"
@@ -190,7 +190,9 @@ def test_render_markdown_supports_tables_toc_highlighting_and_safe_mermaid() -> 
     assert '<a class="headerlink"' in rendered
     assert "<table>" in rendered
     assert "highlight" in rendered
-    assert '<pre class="mermaid">' in rendered
+    assert '<figure class="architecture-diagram flowchart-diagram">' in rendered
+    assert '<svg xmlns="http://www.w3.org/2000/svg"' in rendered
+    assert 'role="img"' in rendered
     assert "&lt;script&gt;alert(1)&lt;/script&gt;" in rendered
     assert "<script>alert(1)</script>" not in rendered
 
@@ -233,16 +235,30 @@ def test_render_markdown_does_not_transform_attributes_and_blocks_active_urls() 
     assert "javascript:" not in rendered
 
 
-def test_build_emits_title_mermaid_target_and_navigation(tmp_path: Path) -> None:
+def test_build_emits_title_static_diagram_target_and_navigation(tmp_path: Path) -> None:
     build_site(ROOT, tmp_path)
     html = (tmp_path / "index.html").read_text(encoding="utf-8")
 
     assert "MCP SQL Query Store Workshop" in html
-    assert '<pre class="mermaid">' in html
+    assert '<figure class="architecture-diagram flowchart-diagram">' in html
+    assert '<svg xmlns="http://www.w3.org/2000/svg"' in html
     assert 'data-evidence-label="TARGET"' in html
     assert 'aria-label="Workshop modules"' in html
     assert html.count("<main") == 1
     assert (tmp_path / "facilitator-guide.html").is_file()
+
+
+def test_architecture_route_contains_two_build_time_svg_diagrams(tmp_path: Path) -> None:
+    build_site(ROOT, tmp_path)
+    architecture = (tmp_path / "02-scenario-and-architecture.html").read_text(
+        encoding="utf-8"
+    )
+
+    assert architecture.count('<figure class="architecture-diagram ') == 2
+    assert architecture.count('<svg xmlns="http://www.w3.org/2000/svg"') == 2
+    assert '<figure class="architecture-diagram flowchart-diagram">' in architecture
+    assert '<figure class="architecture-diagram sequence-diagram">' in architecture
+    assert '<pre class="mermaid">' not in architecture
 
 
 def test_generated_text_files_have_no_trailing_whitespace(tmp_path: Path) -> None:

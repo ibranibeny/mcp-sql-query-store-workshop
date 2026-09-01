@@ -1582,6 +1582,85 @@ BEGIN
     THROW 51680, 'The MCP reader password session context remained set; identity setup was not changed.', 1;
 END;
 
+/* A workshop-named login is never adopted. An existing login is eligible only when
+   the ownership record is bound to this exact SQL-login SID and workshop contract. */
+IF SUSER_ID(@ReaderLoginName) IS NOT NULL AND NOT EXISTS
+(
+    SELECT 1
+    FROM master.sys.server_principals AS principal
+    INNER JOIN master.sys.sql_logins AS sql_login
+        ON sql_login.principal_id = principal.principal_id
+    INNER JOIN WorkshopAdmin.dbo.IdentityOwnership AS ownership
+        ON ownership.PrincipalSid = principal.sid
+    WHERE principal.name = @ReaderLoginName
+      AND principal.type_desc = N'SQL_LOGIN'
+      AND ownership.MarkerId = @WorkshopMarker
+      AND ownership.SchemaVersion = @WorkshopSchemaVersion
+      AND ownership.PrincipalType = 'SQL_LOGIN'
+      AND ownership.PrincipalName = @ReaderLoginName
+      AND ownership.PrincipalSid = SUSER_SID(@ReaderLoginName)
+      AND ownership.CreatedByWorkshop = 1
+)
+    THROW 51669, 'The existing reader login ownership contract is invalid; refusing to adopt it.', 1;
+
+/* An exact-owned login can be left behind by an interrupted deployment. Rotate its
+   password and restore the required login options before any later identity mutation. */
+IF SUSER_ID(@ReaderLoginName) IS NOT NULL
+BEGIN
+    IF @McpReaderPassword IS NULL
+        THROW 51670, 'McpReaderPassword session context is required when rotating mcp_workshop_reader.', 1;
+
+    IF LEN(@McpReaderPassword) NOT BETWEEN 20 AND 128
+       OR DATALENGTH(@McpReaderPassword) / 2 NOT BETWEEN 20 AND 128
+       OR @McpReaderPassword COLLATE Latin1_General_100_BIN2 NOT LIKE N'%[A-Z]%'
+       OR @McpReaderPassword COLLATE Latin1_General_100_BIN2 NOT LIKE N'%[a-z]%'
+       OR @McpReaderPassword COLLATE Latin1_General_100_BIN2 NOT LIKE N'%[0-9]%'
+       OR @McpReaderPassword COLLATE Latin1_General_100_BIN2 NOT LIKE N'%[^A-Za-z0-9]%'
+       OR CHARINDEX(NCHAR(0), @McpReaderPassword COLLATE Latin1_General_100_BIN2) > 0
+       OR PATINDEX(N'%[' + NCHAR(1) + N'-' + NCHAR(31) + NCHAR(127) + N']%',
+            @McpReaderPassword COLLATE Latin1_General_100_BIN2) > 0
+       OR CHARINDEX(LOWER(@ReaderLoginName), LOWER(@McpReaderPassword)) > 0
+    BEGIN
+        SET @McpReaderPassword = NULL;
+        THROW 51667, 'McpReaderPassword does not satisfy the workshop secret policy.', 1;
+    END;
+
+    DECLARE @EscapedMcpReaderPasswordForRotation nvarchar(8000) =
+        REPLACE(@McpReaderPassword, N'''', N'''''' );
+    DECLARE @ReaderLoginPasswordSql nvarchar(max) =
+        N'ALTER LOGIN ' + QUOTENAME(@ReaderLoginName)
+        + N' WITH PASS' + N'WORD = N''' + @EscapedMcpReaderPasswordForRotation
+        + N''', CHECK_POLICY = ON, CHECK_EXPIRATION = OFF, DEFAULT_DATABASE = [AdventureWorks2022];';
+    BEGIN TRY
+        EXEC master.sys.sp_executesql @ReaderLoginPasswordSql;
+        SET @McpReaderPassword = NULL;
+        SET @EscapedMcpReaderPasswordForRotation = NULL;
+        SET @ReaderLoginPasswordSql = NULL;
+    END TRY
+    BEGIN CATCH
+        SET @McpReaderPassword = NULL;
+        SET @EscapedMcpReaderPasswordForRotation = NULL;
+        SET @ReaderLoginPasswordSql = NULL;
+        THROW;
+    END CATCH;
+
+    IF NOT EXISTS
+    (
+        SELECT 1
+        FROM master.sys.server_principals AS principal
+        INNER JOIN master.sys.sql_logins AS sql_login
+            ON sql_login.principal_id = principal.principal_id
+        WHERE principal.name = @ReaderLoginName
+          AND principal.type_desc = N'SQL_LOGIN'
+          AND principal.is_disabled = 0
+          AND principal.default_database_name = N'AdventureWorks2022'
+          AND sql_login.is_policy_checked = 1
+          AND sql_login.is_expiration_checked = 0
+    )
+       OR IS_SRVROLEMEMBER(N'sysadmin', @ReaderLoginName) <> 0
+        THROW 51668, 'The mcp_workshop_reader server login contract is invalid.', 1;
+END;
+
 IF NOT EXISTS (SELECT 1 FROM sys.certificates WHERE name = N'mcp_workshop_diagnostics_certificate')
 BEGIN
     CREATE CERTIFICATE [mcp_workshop_diagnostics_certificate]
@@ -1699,18 +1778,26 @@ BEGIN
         + N' WITH PASS' + N'WORD = N''' + @EscapedMcpReaderPassword
         + N''', CHECK_POLICY = ON, CHECK_EXPIRATION = OFF, DEFAULT_DATABASE = [AdventureWorks2022];';
     BEGIN TRY
+        BEGIN TRANSACTION;
         EXEC master.sys.sp_executesql @CreateReaderLoginSql;
+        SET @ReaderLoginCreated = 1;
+        INSERT WorkshopAdmin.dbo.IdentityOwnership
+            (MarkerId, SchemaVersion, PrincipalType, PrincipalName, PrincipalSid, CreatedByWorkshop, RecordedAtUtc)
+        VALUES
+            (@WorkshopMarker, @WorkshopSchemaVersion, 'SQL_LOGIN', @ReaderLoginName,
+             SUSER_SID(@ReaderLoginName), 1, SYSUTCDATETIME());
+        COMMIT TRANSACTION;
         SET @McpReaderPassword = NULL;
         SET @EscapedMcpReaderPassword = NULL;
         SET @CreateReaderLoginSql = NULL;
     END TRY
     BEGIN CATCH
+        IF XACT_STATE() <> 0 ROLLBACK TRANSACTION;
         SET @McpReaderPassword = NULL;
         SET @EscapedMcpReaderPassword = NULL;
         SET @CreateReaderLoginSql = NULL;
         THROW;
     END CATCH;
-    SET @ReaderLoginCreated = 1;
 END
 ELSE
 BEGIN
@@ -1734,19 +1821,6 @@ IF NOT EXISTS
    OR IS_SRVROLEMEMBER(N'sysadmin', N'mcp_workshop_reader') <> 0
     THROW 51668, 'The mcp_workshop_reader server login contract is invalid.', 1;
 
-IF @ReaderLoginCreated = 1
-BEGIN
-    INSERT WorkshopAdmin.dbo.IdentityOwnership
-        (MarkerId, SchemaVersion, PrincipalType, PrincipalName, PrincipalSid, CreatedByWorkshop, RecordedAtUtc)
-    SELECT @WorkshopMarker, @WorkshopSchemaVersion, 'SQL_LOGIN', @ReaderLoginName,
-           SUSER_SID(@ReaderLoginName), 1, SYSUTCDATETIME()
-    WHERE NOT EXISTS
-    (
-        SELECT 1 FROM WorkshopAdmin.dbo.IdentityOwnership
-        WHERE MarkerId = @WorkshopMarker AND SchemaVersion = @WorkshopSchemaVersion
-          AND PrincipalType = 'SQL_LOGIN' AND PrincipalName = @ReaderLoginName
-    );
-END;
 GRANT VIEW SERVER PERFORMANCE STATE TO [mcp_workshop_diagnostics_certificate_login];
 REVOKE VIEW SERVER STATE FROM [mcp_workshop_diagnostics_certificate_login];
 
@@ -1832,15 +1906,30 @@ OR EXISTS
 
 IF USER_ID(N'mcp_workshop_reader') IS NULL
 BEGIN
-    CREATE USER [mcp_workshop_reader] FOR LOGIN [mcp_workshop_reader];
-    SET @ReaderUserCreated = 1;
+    BEGIN TRY
+        BEGIN TRANSACTION;
+        CREATE USER [mcp_workshop_reader] FOR LOGIN [mcp_workshop_reader];
+        SET @ReaderUserCreated = 1;
+        INSERT WorkshopAdmin.dbo.IdentityOwnership
+            (MarkerId, SchemaVersion, PrincipalType, PrincipalName, PrincipalSid, CreatedByWorkshop, RecordedAtUtc)
+        VALUES
+            (@WorkshopMarker, @WorkshopSchemaVersion, 'DATABASE_USER', N'mcp_workshop_reader',
+             SUSER_SID(@ReaderLoginName), 1, SYSUTCDATETIME());
+        COMMIT TRANSACTION;
+    END TRY
+    BEGIN CATCH
+        IF XACT_STATE() <> 0 ROLLBACK TRANSACTION;
+        THROW;
+    END CATCH;
 END;
-IF @ReaderUserCreated = 1
-    INSERT WorkshopAdmin.dbo.IdentityOwnership
-        (MarkerId, SchemaVersion, PrincipalType, PrincipalName, PrincipalSid, CreatedByWorkshop, RecordedAtUtc)
-    SELECT @WorkshopMarker, @WorkshopSchemaVersion, 'DATABASE_USER', N'mcp_workshop_reader',
-           SUSER_SID(N'mcp_workshop_reader'), 1, SYSUTCDATETIME()
-    WHERE NOT EXISTS (SELECT 1 FROM WorkshopAdmin.dbo.IdentityOwnership WHERE MarkerId = @WorkshopMarker AND SchemaVersion = @WorkshopSchemaVersion AND PrincipalType = 'DATABASE_USER' AND PrincipalName = N'mcp_workshop_reader');
+IF USER_ID(N'mcp_workshop_reader') IS NOT NULL AND NOT EXISTS
+(
+    SELECT 1 FROM WorkshopAdmin.dbo.IdentityOwnership
+    WHERE MarkerId = @WorkshopMarker AND SchemaVersion = @WorkshopSchemaVersion
+      AND PrincipalType = 'DATABASE_USER' AND PrincipalName = N'mcp_workshop_reader'
+      AND PrincipalSid = SUSER_SID(@ReaderLoginName) AND CreatedByWorkshop = 1
+)
+    THROW 51682, 'The existing reader database user ownership contract is invalid; refusing to grant access.', 1;
 IF NOT EXISTS
 (
     SELECT 1

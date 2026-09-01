@@ -120,21 +120,43 @@ def test_validation_workflow_runs_strict_validation_and_uploads_diagnostic_site(
     )
 
 
-def test_pages_workflow_has_exact_triggers_permissions_and_concurrency() -> None:
+def test_pages_workflow_has_exact_triggers_global_permissions_and_concurrency() -> None:
     text = workflow(PAGES)
     triggers = yaml_block(text, "on")
     assert child_keys(triggers, 2) == {"push", "workflow_dispatch"}
     assert re.search(r"(?m)^  push:\s*$\n^    branches: \[main\]\s*$", triggers)
 
     permissions = yaml_block(text, "permissions")
-    assert child_keys(permissions, 2) == {"contents", "pages", "id-token"}
+    assert child_keys(permissions, 2) == {"contents"}
     assert re.search(r"(?m)^  contents: read\s*$", permissions)
-    assert re.search(r"(?m)^  pages: write\s*$", permissions)
-    assert re.search(r"(?m)^  id-token: write\s*$", permissions)
 
     concurrency = yaml_block(text, "concurrency")
     assert re.search(r"(?m)^  group: pages\s*$", concurrency)
     assert re.search(r"(?m)^  cancel-in-progress: false\s*$", concurrency)
+
+
+def test_pages_jobs_have_exact_least_privilege_permissions() -> None:
+    text = workflow(PAGES)
+    build = yaml_block(text, "build", 2)
+    build_permissions = yaml_block(build, "permissions", 4)
+    assert child_keys(build_permissions, 6) == {"contents"}
+    assert re.search(r"(?m)^      contents: read\s*$", build_permissions)
+
+    deploy = yaml_block(text, "deploy", 2)
+    deploy_permissions = yaml_block(deploy, "permissions", 4)
+    assert child_keys(deploy_permissions, 6) == {"pages", "id-token"}
+    assert re.search(r"(?m)^      pages: write\s*$", deploy_permissions)
+    assert re.search(r"(?m)^      id-token: write\s*$", deploy_permissions)
+
+
+def test_pages_checkout_does_not_persist_credentials() -> None:
+    build = yaml_block(workflow(PAGES), "build", 2)
+    checkout = re.search(
+        r"(?ms)^      - name: Check out repository\s*$.*?(?=^      - name:|\Z)",
+        build,
+    )
+    assert checkout is not None
+    assert re.search(r"(?m)^          persist-credentials: false\s*$", checkout.group(0))
 
 
 def test_pages_build_repeats_validation_and_publishes_generated_site() -> None:

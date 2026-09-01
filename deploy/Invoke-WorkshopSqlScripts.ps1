@@ -150,14 +150,17 @@ function Write-WorkshopSessionContext {
     param(
         [Parameter(Mandatory)] [object] $Connection,
         [Parameter(Mandatory)] [ValidateNotNullOrEmpty()] [string] $Key,
-        [Parameter(Mandatory)] [AllowNull()] [object] $Value
+        [Parameter(Mandatory)] [AllowNull()] [object] $Value,
+        [switch] $ReadOnly
     )
 
     $command = $Connection.CreateCommand()
     try {
-        $command.CommandText = 'EXEC sys.sp_set_session_context @key = @ContextKey, @value = @ContextValue, @read_only = 0;'
+        $command.CommandText = 'EXEC sys.sp_set_session_context @key = @ContextKey, @value = @ContextValue, @read_only = @ReadOnly;'
         $null = $command.Parameters.Add('@ContextKey', [System.Data.SqlDbType]::NVarChar, 128)
         $command.Parameters['@ContextKey'].Value = $Key
+        $null = $command.Parameters.Add('@ReadOnly', [System.Data.SqlDbType]::Bit)
+        $command.Parameters['@ReadOnly'].Value = $ReadOnly.IsPresent
         if ($Value -is [Security.SecureString]) {
             $pointer = [IntPtr]::Zero
             $plainText = $null
@@ -213,9 +216,7 @@ $scriptNames = @(
     '02-RestoreAndConfigureDatabase.sql',
     '03-CreateScaledLabData.sql',
     '04-CreateBaselineProcedure.sql',
-    '05-CreateDiagnostics.sql',
-    '06-CreateOptimizedProcedure.sql',
-    '07-ValidateEquivalence.sql'
+    '05-CreateDiagnostics.sql'
 )
 foreach ($scriptName in $scriptNames) {
     if (-not (Test-Path -LiteralPath (Join-Path $SqlDirectory $scriptName) -PathType Leaf)) {

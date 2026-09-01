@@ -1,4 +1,3 @@
-const MERMAID_MODULE_URL = "https://cdn.jsdelivr.net/npm/mermaid@11.12.0/dist/mermaid.esm.min.mjs";
 const PROGRESS_STORAGE_KEY = "mcp-sql-workshop:v1:module-progress";
 
 export function grantUtilization(grantedKb, totalKb) {
@@ -187,18 +186,6 @@ function initializeGrantCalculator() {
   });
 }
 
-async function initializeMermaid() {
-  if (!document.querySelector(".mermaid")) return;
-  try {
-    const { default: mermaid } = await import(MERMAID_MODULE_URL);
-    const theme = document.documentElement.dataset.theme === "dark" ? "dark" : "default";
-    mermaid.initialize({ startOnLoad: false, securityLevel: "strict", theme });
-    await mermaid.run({ querySelector: ".mermaid" });
-  } catch {
-    document.documentElement.dataset.diagramStatus = "unavailable";
-  }
-}
-
 function initializeWorkbench() {
   document.documentElement.classList.add("js");
   initializeNavigation();
@@ -206,7 +193,6 @@ function initializeWorkbench() {
   initializeProgress();
   initializeCopyControls();
   initializeGrantCalculator();
-  void initializeMermaid();
 
   document.addEventListener("click", (event) => {
     if (!(event.target instanceof Element)) return;

@@ -810,6 +810,15 @@ def test_generator_defers_optimized_index_and_avoids_destructive_commands() -> N
     assert "WHILE 1 = 1" not in text
 
 
+def test_candidate_and_equivalence_scripts_require_the_explicit_approval_context() -> None:
+    for name in ("06-CreateOptimizedProcedure.sql", "07-ValidateEquivalence.sql"):
+        text = normalized(name)
+        assert "SESSION_CONTEXT(N'CANDIDATEAPPROVALID')" in text
+        assert "SESSION_CONTEXT(N'CANDIDATEAPPROVALGRANTED')" in text
+        assert re.search(r"CANDIDATEAPPROVALID.*?IS NULL.*?THROW", text)
+        assert re.search(r"CANDIDATEAPPROVALGRANTED.*?<>\s*1.*?THROW", text)
+
+
 def procedure_signature(name: str, procedure: str) -> list[tuple[str, str, str | None]]:
     text = sql(name)
     match = re.search(
@@ -1021,7 +1030,7 @@ def test_equivalence_harness_protects_and_restores_exact_session_context_values(
     assert first_try < set_run_id < set_manual < text.index("CREATE TABLE LAB.VALIDATIONRUN")
     assert "DECLARE @ORIGINALRUNID SQL_VARIANT = SESSION_CONTEXT(N'WORKSHOPRUNID')" in text
     assert "DECLARE @ORIGINALMANUALEXECUTION SQL_VARIANT = SESSION_CONTEXT(N'WORKSHOPMANUALEXECUTION')" in text
-    assert "DECLARE @VALIDATIONBATCHID UNIQUEIDENTIFIER = NEWID()" in text
+    assert "DECLARE @VALIDATIONBATCHID UNIQUEIDENTIFIER = TRY_CONVERT(UNIQUEIDENTIFIER, SESSION_CONTEXT(N'CANDIDATEAPPROVALID'))" in text
     assert "DECLARE @VALIDATIONRUNIDCONTEXT SQL_VARIANT = CONVERT(SQL_VARIANT, @VALIDATIONBATCHID)" in text
     assert "DECLARE @VALIDATIONMANUALEXECUTIONCONTEXT SQL_VARIANT = CONVERT(SQL_VARIANT, CONVERT(INT, 1))" in text
     assert "@VALUE = @ORIGINALRUNID" in text
@@ -1210,7 +1219,10 @@ def test_validation_run_contract_is_task9_compatible_and_verified() -> None:
     assert "RUNID NVARCHAR(128)" not in text
 
     task9 = normalized("07-ValidateEquivalence.sql")
-    assert "DECLARE @VALIDATIONBATCHID UNIQUEIDENTIFIER = NEWID()" in task9
+    assert (
+        "DECLARE @VALIDATIONBATCHID UNIQUEIDENTIFIER = TRY_CONVERT(UNIQUEIDENTIFIER, "
+        "SESSION_CONTEXT(N'CANDIDATEAPPROVALID'))"
+    ) in task9
     assert "VALIDATIONBATCHID UNIQUEIDENTIFIER NOT NULL" in task9
     assert "BASELINERUNID UNIQUEIDENTIFIER NULL" in task9
     assert "OPTIMIZEDRUNID UNIQUEIDENTIFIER NULL" in task9
@@ -1748,9 +1760,12 @@ def test_reader_login_creation_zeroes_secret_and_dynamic_sql_on_success_and_fail
     )
 
     assert re.search(
-        r"BEGIN TRY EXEC MASTER\.SYS\.SP_EXECUTESQL @CREATEREADERLOGINSQL; "
+        r"BEGIN TRY BEGIN TRANSACTION; "
+        r"EXEC MASTER\.SYS\.SP_EXECUTESQL @CREATEREADERLOGINSQL; .*?"
+        r"INSERT WORKSHOPADMIN\.DBO\.IDENTITYOWNERSHIP .*?"
+        r"COMMIT TRANSACTION; "
         + cleanup
-        + r" END TRY BEGIN CATCH "
+        + r" END TRY BEGIN CATCH IF XACT_STATE\(\) <> 0 ROLLBACK TRANSACTION; "
         + cleanup
         + r" THROW; END CATCH",
         login_creation,
@@ -1759,6 +1774,115 @@ def test_reader_login_creation_zeroes_secret_and_dynamic_sql_on_success_and_fail
         assert "@MCPREADERPASSWORD" not in statement
         assert "@ESCAPEDMCPREADERPASSWORD" not in statement
         assert "@CREATEREADERLOGINSQL" not in statement
+
+
+def test_existing_reader_login_is_rejected_unless_exactly_workshop_owned_before_access_mutation() -> None:
+    text = normalized("05-CreateDiagnostics.sql")
+    login_lifecycle = text[text.index("DECLARE @READERLOGINNAME SYSNAME"):]
+    ownership_guard = re.search(
+        r"IF SUSER_ID\(@READERLOGINNAME\) IS NOT NULL AND NOT EXISTS\s*\(.*?"
+        r"WORKSHOPADMIN\.DBO\.IDENTITYOWNERSHIP.*?"
+        r"MARKERID = @WORKSHOPMARKER.*?SCHEMAVERSION = @WORKSHOPSCHEMAVERSION.*?"
+        r"PRINCIPALTYPE = 'SQL_LOGIN'.*?PRINCIPALNAME = @READERLOGINNAME.*?"
+        r"PRINCIPALSID = SUSER_SID\(@READERLOGINNAME\).*?CREATEDBYWORKSHOP = 1.*?"
+        r"\)\s*THROW",
+        login_lifecycle,
+    )
+    assert ownership_guard, "a pre-existing reader login must fail closed without exact ownership"
+    guard_position = ownership_guard.start()
+    assert guard_position < login_lifecycle.index("CREATE USER [MCP_WORKSHOP_READER]")
+    assert guard_position < login_lifecycle.index("GRANT CONNECT TO [MCP_WORKSHOP_READER]")
+
+
+def test_existing_reader_login_ownership_is_bound_to_its_exact_sql_login_sid() -> None:
+    text = normalized("05-CreateDiagnostics.sql")
+    lifecycle = text[text.index("DECLARE @READERLOGINNAME SYSNAME"):]
+    ownership_guard = lifecycle[:lifecycle.index("THROW 51669")]
+    for predicate in (
+        "MASTER.SYS.SQL_LOGINS",
+        "PRINCIPAL.NAME = @READERLOGINNAME",
+        "PRINCIPAL.TYPE_DESC = N'SQL_LOGIN'",
+        "OWNERSHIP.PRINCIPALSID = PRINCIPAL.SID",
+        "OWNERSHIP.CREATEDBYWORKSHOP = 1",
+    ):
+        assert predicate in ownership_guard
+    assert "READER LOGIN OWNERSHIP" in lifecycle
+
+
+def test_exact_owned_reader_login_password_is_rotated_with_required_login_options() -> None:
+    text = normalized("05-CreateDiagnostics.sql")
+    lifecycle = text[text.index("DECLARE @READERLOGINNAME SYSNAME"):]
+    assert re.search(
+        r"IF SUSER_ID\(@READERLOGINNAME\) IS NOT NULL.*?"
+        r"ALTER LOGIN.*?WITH PASS' \+ N'WORD = N'''.*?CHECK_POLICY = ON.*?"
+        r"CHECK_EXPIRATION = OFF.*?DEFAULT_DATABASE = \[ADVENTUREWORKS2022\]",
+        lifecycle,
+    )
+    assert "SESSION_CONTEXT(N'MCPREADERPASSWORD')" in lifecycle
+
+
+def test_reader_rotation_clears_every_secret_variable_before_later_identity_or_grant_mutation() -> None:
+    text = normalized("05-CreateDiagnostics.sql")
+    lifecycle = text[text.index("DECLARE @MCPREADERPASSWORD NVARCHAR(4000)"):]
+    rotation = lifecycle.index("ALTER LOGIN")
+    later_identity_mutation = min(
+        lifecycle.index("CREATE USER [MCP_WORKSHOP_READER]", rotation),
+        lifecycle.index("GRANT CONNECT TO [MCP_WORKSHOP_READER]", rotation),
+    )
+    cleared_region = lifecycle[rotation:later_identity_mutation]
+    for secret in (
+        "@MCPREADERPASSWORD",
+        "@ESCAPEDMCPREADERPASSWORDFORROTATION",
+        "@READERLOGINPASSWORDSQL",
+    ):
+        assert cleared_region.count(f"SET {secret} = NULL") >= 2
+
+
+def test_existing_reader_database_user_requires_exact_ownership_before_grants() -> None:
+    text = normalized("05-CreateDiagnostics.sql")
+    user_lifecycle = text[text.index("IF USER_ID(N'MCP_WORKSHOP_READER') IS NULL"):]
+    ownership_guard = re.search(
+        r"IF USER_ID\(N'MCP_WORKSHOP_READER'\) IS NOT NULL AND NOT EXISTS\s*\(.*?"
+        r"WORKSHOPADMIN\.DBO\.IDENTITYOWNERSHIP.*?"
+        r"PRINCIPALTYPE = 'DATABASE_USER'.*?PRINCIPALNAME = N'MCP_WORKSHOP_READER'.*?"
+        r"PRINCIPALSID = SUSER_SID\(@READERLOGINNAME\).*?CREATEDBYWORKSHOP = 1.*?"
+        r"\)\s*THROW",
+        user_lifecycle,
+    )
+    assert ownership_guard
+    assert ownership_guard.start() < user_lifecycle.index("GRANT CONNECT TO [MCP_WORKSHOP_READER]")
+
+
+def test_new_reader_login_and_exact_ownership_record_are_one_transaction() -> None:
+    text = normalized("05-CreateDiagnostics.sql")
+    creation = text[
+        text.index("IF SUSER_ID(N'MCP_WORKSHOP_READER') IS NULL"):
+        text.index("GRANT VIEW SERVER PERFORMANCE STATE")
+    ]
+    assert re.search(
+        r"CREATE LOGIN.*?BEGIN TRANSACTION.*?"
+        r"EXEC MASTER\.SYS\.SP_EXECUTESQL @CREATEREADERLOGINSQL.*?"
+        r"INSERT WORKSHOPADMIN\.DBO\.IDENTITYOWNERSHIP.*?"
+        r"PRINCIPALSID.*?SUSER_SID\(@READERLOGINNAME\).*?COMMIT TRANSACTION",
+        creation,
+    )
+
+
+def test_cleanup_refuses_reader_identity_without_exact_ownership_and_only_then_drops() -> None:
+    text = normalized("09-Cleanup.sql")
+    lifecycle = text[text.index("DECLARE @READERSID VARBINARY(85)"):text.index("DECLARE @DATABASECERTIFICATETHUMBPRINT")]
+    for principal_type, drop_statement in (
+        ("DATABASE_USER", "DROP USER [MCP_WORKSHOP_READER]"),
+        ("SQL_LOGIN", "DROP LOGIN [MCP_WORKSHOP_READER]"),
+    ):
+        ownership = re.search(
+            rf"NOT EXISTS\s*\(.*?WORKSHOPADMIN\.DBO\.IDENTITYOWNERSHIP.*?"
+            rf"PRINCIPALTYPE = '{principal_type}'.*?PRINCIPALSID = @READERSID.*?"
+            rf"CREATEDBYWORKSHOP = 1.*?\).*?THROW",
+            lifecycle,
+        )
+        assert ownership, f"cleanup must fail closed for an unowned {principal_type}"
+        assert ownership.start() < lifecycle.index(drop_statement)
 
 
 def test_all_sql_is_bounded_and_avoids_destructive_or_public_network_commands() -> None:

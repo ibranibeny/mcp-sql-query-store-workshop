@@ -10,6 +10,11 @@ DECLARE @WorkshopMarker uniqueidentifier = '68A70D6E-62D8-4A77-8F0A-9DA7934DBA7C
 DECLARE @WorkshopSchemaVersion int = 1;
 DECLARE @WorkshopSetupName sysname = N'MCP SQL Query Store Workshop';
 DECLARE @WorkshopSetupHash varbinary(32) = 0xADA06F206D3DB321527A5AAB390FC814E28EBB59791967EB99841BF669E1B16B;
+DECLARE @CandidateApprovalId uniqueidentifier = TRY_CONVERT(uniqueidentifier, SESSION_CONTEXT(N'CandidateApprovalId'));
+DECLARE @CandidateApprovalGranted bit = COALESCE(TRY_CONVERT(bit, SESSION_CONTEXT(N'CandidateApprovalGranted')), 0);
+
+IF @CandidateApprovalId IS NULL OR @CandidateApprovalGranted <> 1
+    THROW 51410, 'Candidate creation requires the explicit DBA-approved candidate entry point.', 1;
 
 IF DB_NAME() <> N'AdventureWorks2022'
    OR OBJECT_ID(N'lab.WorkshopMarker', N'U') IS NULL

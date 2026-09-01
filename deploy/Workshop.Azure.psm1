@@ -3068,7 +3068,83 @@ function Get-WorkshopBootstrapArchiveUri {
     )
 
     $base = $RepositoryUrl -replace '\.git$', ''
+    if ($base -cne 'https://github.com/ibranibeny/mcp-sql-query-store-workshop') {
+        throw "RepositoryUrl must identify the approved repository 'https://github.com/ibranibeny/mcp-sql-query-store-workshop'."
+    }
     "$base/archive/$RepositoryCommit.zip"
+}
+
+function Expand-WorkshopBootstrapArchive {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string] $ArchivePath,
+        [Parameter(Mandatory)][string] $DestinationPath,
+        [Parameter(Mandatory)][ValidatePattern('^[0-9a-f]{40}$')][string] $RepositoryCommit,
+        [Parameter(Mandatory)][ValidateSet('Initialize-SqlVm.ps1', 'Invoke-AdminBootstrap.ps1')][string] $ApprovedBootstrapEntryPoint
+    )
+
+    $expectedRootName = "mcp-sql-query-store-workshop-$RepositoryCommit"
+    $expectedEntryPoint = "$expectedRootName/deploy/$ApprovedBootstrapEntryPoint"
+    $destinationParent = Split-Path -Parent $DestinationPath
+    $stagingPath = Join-Path $destinationParent ('.bootstrap-staging-' + [guid]::NewGuid().ToString('N'))
+    $archive = $null
+    $stream = $null
+    try {
+        $stream = [IO.File]::Open($ArchivePath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+        $archive = [IO.Compression.ZipArchive]::new($stream, [IO.Compression.ZipArchiveMode]::Read)
+        if ($archive.Entries.Count -eq 0) { throw 'Repository archive rejected: the archive is empty.' }
+        $entryPointPresent = $false
+        foreach ($entry in $archive.Entries) {
+            $entryName = ([string]$entry.FullName).Replace('\', '/')
+            $segments = @($entryName.Split('/') | Where-Object { $_.Length -gt 0 })
+            if ([string]::IsNullOrWhiteSpace($entryName) -or $entryName.StartsWith('/') -or
+                $segments.Count -eq 0 -or $segments[0] -cne $expectedRootName -or
+                @($segments | Where-Object { $_ -in @('.', '..') }).Count -gt 0 -or
+                $entryName -match '(^|/)[^/]*:[^/]*(/|$)' -or $entryName -match '//') {
+                throw "Repository archive rejected: entry '$entryName' is outside the single expected top-level directory."
+            }
+            $unixFileType = ([int64]$entry.ExternalAttributes -shr 16) -band 0xF000
+            $windowsAttributes = [int64]$entry.ExternalAttributes -band 0xFFFF
+            if ($unixFileType -eq 0xA000 -or
+                ($windowsAttributes -band [int][IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw "Repository archive rejected: reparse entry '$entryName' is not permitted."
+            }
+            if ($entryName.TrimEnd('/') -ceq $expectedEntryPoint) { $entryPointPresent = $true }
+        }
+        if (-not $entryPointPresent) {
+            throw "Repository archive rejected: approved bootstrap entry point '$ApprovedBootstrapEntryPoint' is missing."
+        }
+        $archive.Dispose()
+        $archive = $null
+        $stream.Dispose()
+        $stream = $null
+
+        $null = New-Item -ItemType Directory -Path $destinationParent -Force
+        [IO.Compression.ZipFile]::ExtractToDirectory($ArchivePath, $stagingPath)
+        $topLevelEntries = @(Get-ChildItem -LiteralPath $stagingPath -Force)
+        if ($topLevelEntries.Count -ne 1 -or -not $topLevelEntries[0].PSIsContainer -or
+            $topLevelEntries[0].Name -cne $expectedRootName) {
+            throw 'Repository archive rejected: extracted layout is not the single expected top-level directory.'
+        }
+        $reparseEntries = @(Get-ChildItem -LiteralPath $stagingPath -Force -Recurse | Where-Object {
+            ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0
+        })
+        if ($reparseEntries.Count -ne 0) {
+            throw 'Repository archive rejected: extracted content contains a reparse entry.'
+        }
+        $approvedEntryPointPath = Join-Path $topLevelEntries[0].FullName "deploy\$ApprovedBootstrapEntryPoint"
+        if (-not (Test-Path -LiteralPath $approvedEntryPointPath -PathType Leaf)) {
+            throw 'Repository archive rejected: approved bootstrap entry point did not extract as a regular file.'
+        }
+        if (Test-Path -LiteralPath $DestinationPath) { Remove-Item -LiteralPath $DestinationPath -Recurse -Force }
+        Move-Item -LiteralPath $topLevelEntries[0].FullName -Destination $DestinationPath
+        $DestinationPath
+    }
+    finally {
+        if ($null -ne $archive) { $archive.Dispose() }
+        if ($null -ne $stream) { $stream.Dispose() }
+        if (Test-Path -LiteralPath $stagingPath) { Remove-Item -LiteralPath $stagingPath -Recurse -Force }
+    }
 }
 
 function Get-DefaultWorkshopBootstrapOperationSet {
@@ -3115,31 +3191,32 @@ finally { Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue }
         SetExtension = {
             param($VmName, $ResourceGroupName, $Location, $ArchiveUri, $ProtectedEnvelope, $BootstrapScript, $RepositoryCommit)
             $envelopeBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($ProtectedEnvelope))
+            $archiveExpansionFunction = ${function:Expand-WorkshopBootstrapArchive}.ToString()
             $innerScript = @"
 `$ErrorActionPreference = 'Stop'
 `$root = 'C:\McpSqlWorkshop'
+function Expand-WorkshopBootstrapArchive {
+$archiveExpansionFunction
+}
 `$archives = @(Get-ChildItem -LiteralPath (Get-Location) -Filter '*.zip' -File)
 if (`$archives.Count -ne 1) { throw 'Exactly one immutable repository archive is required.' }
 `$archive = `$archives[0].FullName
 `$repo = Join-Path `$root 'repo'
 New-Item -ItemType Directory -Path `$root -Force | Out-Null
-if (Test-Path `$repo) { Remove-Item `$repo -Recurse -Force }
-Expand-Archive -LiteralPath `$archive -DestinationPath `$root -Force
-`$expanded = Get-ChildItem `$root -Directory | Where-Object Name -Like '*-$RepositoryCommit' | Select-Object -First 1
-if (`$null -eq `$expanded) { throw 'Repository archive layout could not be verified.' }
-Move-Item -LiteralPath `$expanded.FullName -Destination `$repo
-`$payloadPath = Join-Path `$root 'protected-bootstrap.cms'
-[IO.File]::WriteAllBytes(`$payloadPath, [Convert]::FromBase64String('$envelopeBase64'))
-`$acl = [Security.AccessControl.FileSecurity]::new()
-`$acl.SetAccessRuleProtection(`$true, `$false)
-foreach (`$identity in @('BUILTIN\Administrators','NT AUTHORITY\SYSTEM')) { `$acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(`$identity,'FullControl','Allow')) }
-Set-Acl -LiteralPath `$payloadPath -AclObject `$acl
 `$bootstrapEntryPoint = if ('$BootstrapScript' -ceq 'Initialize-AdminVm.ps1') {
     'Invoke-AdminBootstrap.ps1'
 }
 else {
     '$BootstrapScript'
 }
+`$null = Expand-WorkshopBootstrapArchive -ArchivePath `$archive -DestinationPath `$repo `
+    -RepositoryCommit '$RepositoryCommit' -ApprovedBootstrapEntryPoint `$bootstrapEntryPoint
+`$payloadPath = Join-Path `$root 'protected-bootstrap.cms'
+[IO.File]::WriteAllBytes(`$payloadPath, [Convert]::FromBase64String('$envelopeBase64'))
+`$acl = [Security.AccessControl.FileSecurity]::new()
+`$acl.SetAccessRuleProtection(`$true, `$false)
+foreach (`$identity in @('BUILTIN\Administrators','NT AUTHORITY\SYSTEM')) { `$acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(`$identity,'FullControl','Allow')) }
+Set-Acl -LiteralPath `$payloadPath -AclObject `$acl
 & (Join-Path `$repo "deploy\`$bootstrapEntryPoint") -ProtectedPayloadPath `$payloadPath
 "@
             $encodedCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($innerScript))
@@ -3252,6 +3329,11 @@ function Initialize-WorkshopSqlVm {
     if ($DatabaseMasterKeyPassword.Length -eq 0 -or $McpReaderPassword.Length -eq 0) {
         throw 'SQL bootstrap secrets must be nonempty SecureString values.'
     }
+    $archiveUri = Get-WorkshopBootstrapArchiveUri -RepositoryUrl $RepositoryUrl -RepositoryCommit $RepositoryCommit
+    if ($Config.AdventureWorksBackup.Uri -cne 'https://github.com/Microsoft/sql-server-samples/releases/download/adventureworks/AdventureWorks2022.bak' -or
+        $Config.AdventureWorksBackup.Sha256 -notmatch '^[A-F0-9]{64}$') {
+        throw 'AdventureWorks backup source or expected SHA256 is not approved.'
+    }
     if ($null -eq $Operations) { $Operations = Get-DefaultWorkshopBootstrapOperationSet }
     Assert-WorkshopBootstrapOperationSet -Operations $Operations
     $masterKeySecret = $null
@@ -3268,11 +3350,12 @@ function Initialize-WorkshopSqlVm {
             LogDiskGiB = [int] $Config.SqlVm.LogDiskGiB
             RepositoryRoot = 'C:\McpSqlWorkshop\repo'
             RepositoryCommit = $RepositoryCommit
+            AdventureWorksBackupUri = [string] $Config.AdventureWorksBackup.Uri
+            AdventureWorksBackupSha256 = [string] $Config.AdventureWorksBackup.Sha256
             DeploymentId = $DeploymentId
             DatabaseMasterKeySecret = $masterKeySecret
             McpReaderSecret = $readerSecret
         }
-        $archiveUri = Get-WorkshopBootstrapArchiveUri -RepositoryUrl $RepositoryUrl -RepositoryCommit $RepositoryCommit
         Invoke-WorkshopBootstrapExtension -Role Sql -Config $Config -ArchiveUri $archiveUri `
             -ProtectedPayload $payload -Operations $Operations
     }
@@ -3303,6 +3386,7 @@ function Initialize-WorkshopAdminVm {
     )
 
     if ($McpReaderPassword.Length -eq 0) { throw 'MCP reader secret must be a nonempty SecureString.' }
+    $archiveUri = Get-WorkshopBootstrapArchiveUri -RepositoryUrl $RepositoryUrl -RepositoryCommit $RepositoryCommit
     if ($null -eq $Operations) { $Operations = Get-DefaultWorkshopBootstrapOperationSet }
     Assert-WorkshopBootstrapOperationSet -Operations $Operations -Admin
     if (-not $SqlReadiness.Completed -or -not $SqlReadiness.Certificate.PublicCertificateSha256) {
@@ -3331,7 +3415,6 @@ function Initialize-WorkshopAdminVm {
             NugetPackagesPath = $NugetPackagesPath
             NugetConfigPath = $NugetConfigPath
         }
-        $archiveUri = Get-WorkshopBootstrapArchiveUri -RepositoryUrl $RepositoryUrl -RepositoryCommit $RepositoryCommit
         Invoke-WorkshopBootstrapExtension -Role Admin -Config $Config -ArchiveUri $archiveUri `
             -ProtectedPayload $payload -Operations $Operations
     }
@@ -3342,6 +3425,39 @@ function Initialize-WorkshopAdminVm {
             $payload.PublicCertificateBase64 = $null
         }
     }
+}
+
+function ConvertTo-WorkshopCanonicalValue {
+    [CmdletBinding()]
+    param([AllowNull()][object] $Value)
+
+    if ($null -eq $Value -or $Value -is [string] -or $Value -is [ValueType]) {
+        return $Value
+    }
+    if ($Value -is [System.Collections.IDictionary]) {
+        $canonical = [ordered]@{}
+        foreach ($key in @($Value.Keys | ForEach-Object { [string]$_ } | Sort-Object)) {
+            $canonical[$key] = ConvertTo-WorkshopCanonicalValue $Value[$key]
+        }
+        return $canonical
+    }
+    if ($Value -is [System.Collections.IEnumerable]) {
+        return @($Value | ForEach-Object { ConvertTo-WorkshopCanonicalValue $_ })
+    }
+    $canonical = [ordered]@{}
+    foreach ($property in @($Value.PSObject.Properties | Sort-Object Name)) {
+        $canonical[$property.Name] = ConvertTo-WorkshopCanonicalValue $property.Value
+    }
+    $canonical
+}
+
+function Get-WorkshopCanonicalRecordSha256 {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][psobject] $Record)
+
+    $canonicalJson = ConvertTo-WorkshopCanonicalValue $Record | ConvertTo-Json -Depth 100 -Compress
+    $bytes = [Text.UTF8Encoding]::new($false).GetBytes($canonicalJson)
+    [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes))
 }
 
 function Test-WorkshopReadiness {
@@ -3418,7 +3534,7 @@ function Test-WorkshopReadiness {
         @{ Name = 'TempDB complete approved placement'; Passed = (Get-ReadinessValue $SqlReadiness 'TempDb.EnoughSpace') -eq $true -and (Get-ReadinessValue $SqlReadiness 'TempDb.FileCount') -eq $tempDbFiles.Count -and $tempDbPathsValid -and (Get-ReadinessValue $SqlReadiness 'TempDb.AllFilesUnderApprovedRoot') -eq $true -and (Get-ReadinessValue $SqlReadiness 'TempDb.OldPathCount') -eq 0 -and ((Get-ReadinessValue $SqlReadiness 'TempDb.Storage') -ceq 'Temporary' -or ((Get-ReadinessValue $SqlReadiness 'TempDb.Storage') -ceq 'ManagedData' -and -not [string]::IsNullOrWhiteSpace([string](Get-ReadinessValue $SqlReadiness 'TempDb.Deviation')))) }
         @{ Name = 'SQL firewall and Browser boundary'; Passed = (Get-ReadinessValue $SqlReadiness 'Firewall.Rule') -ceq 'MCP SQL Workshop 1433' -and (Get-ReadinessValue $SqlReadiness 'Firewall.RemoteAddress') -ceq '10.20.1.0/24' -and (Get-ReadinessValue $SqlReadiness 'Firewall.BroadRule') -eq $false }
         @{ Name = 'SQL exact TLS registry and certificate'; Passed = $thumbprint -match '^[A-F0-9]{40}$' -and (Get-ReadinessValue $SqlReadiness 'Certificate.RegistryCertificate') -ceq $thumbprint -and (Get-ReadinessValue $SqlReadiness 'Certificate.StoreThumbprint') -ceq $thumbprint -and (Get-ReadinessValue $SqlReadiness 'Certificate.PublicCertificateThumbprint') -ceq $thumbprint -and (Get-ReadinessValue $SqlReadiness 'Certificate.ForceEncryption') -eq 1 -and (Get-ReadinessValue $SqlReadiness 'Certificate.HasPrivateKey') -eq $true -and (Get-ReadinessValue $SqlReadiness 'Certificate.ServerAuthenticationEku') -eq $true -and (Get-ReadinessValue $SqlReadiness 'Certificate.SanVerified') -eq $true -and (Get-ReadinessValue $SqlReadiness 'Certificate.ServiceKeyAclVerified') -eq $true -and (Get-ReadinessValue $SqlReadiness 'Certificate.PrivateKeyExported') -eq $false -and $publicHash -match '^[A-F0-9]{64}$' -and (Get-ReadinessValue $SqlReadiness 'Certificate.TlsLoadFailures') -eq 0 -and (Get-ReadinessValue $SqlReadiness 'Certificate.StartupBindingEvidence') -in @('ExactThumbprint', 'DeferredRemoteValidation') }
-        @{ Name = 'SQL backup and database configuration'; Passed = (Get-ReadinessValue $SqlReadiness 'Backup.VerifyOnly') -eq $true -and ([string](Get-ReadinessValue $SqlReadiness 'Backup.Sha256')) -match '^[A-F0-9]{64}$' -and (Get-ReadinessValue $SqlReadiness 'Database.Marker') -ceq '68A70D6E-62D8-4A77-8F0A-9DA7934DBA7C' -and (Get-ReadinessValue $SqlReadiness 'Database.QueryStore') -ceq 'READ_WRITE' -and (Get-ReadinessValue $SqlReadiness 'Database.ResourceGovernor') -ceq 'Enabled' -and (Get-ReadinessValue $SqlReadiness 'Database.ProcedureCount') -eq 8 }
+        @{ Name = 'SQL backup and pre-candidate database configuration'; Passed = (Get-ReadinessValue $SqlReadiness 'Backup.VerifyOnly') -eq $true -and (Get-ReadinessValue $SqlReadiness 'Backup.ChecksumClassification') -ceq 'expected-verified' -and ([string](Get-ReadinessValue $SqlReadiness 'Backup.Sha256')) -ceq ([string](Get-ReadinessValue $SqlReadiness 'Backup.ExpectedSha256')) -and ([string](Get-ReadinessValue $SqlReadiness 'Backup.ExpectedSha256')) -match '^[A-F0-9]{64}$' -and (Get-ReadinessValue $SqlReadiness 'Database.Marker') -ceq '68A70D6E-62D8-4A77-8F0A-9DA7934DBA7C' -and (Get-ReadinessValue $SqlReadiness 'Database.QueryStore') -ceq 'READ_WRITE' -and (Get-ReadinessValue $SqlReadiness 'Database.ResourceGovernor') -ceq 'Enabled' -and (Get-ReadinessValue $SqlReadiness 'Database.ProcedureCount') -eq 7 }
         @{ Name = 'Administration VM exact identity and security'; Passed = (Get-ReadinessValue $AdminReadiness 'Vm.Name') -ceq 'vm-mcpsql-admin' -and (Get-ReadinessValue $AdminReadiness 'Vm.Size') -ceq 'Standard_D4s_v5' -and (Get-ReadinessValue $AdminReadiness 'Vm.Location') -ceq 'indonesiacentral' -and (Get-ReadinessValue $AdminReadiness 'Vm.AdminPublicIpBoundaryObserved') -eq $true -and (Get-ReadinessValue $AdminReadiness 'Vm.PublicIpCount') -eq 1 -and (Get-ReadinessValue $AdminReadiness 'Vm.SecureBoot') -eq $true -and (Get-ReadinessValue $AdminReadiness 'Vm.Tpm') -eq $true -and ([string](Get-ReadinessValue $AdminReadiness 'Vm.Os')) -match 'Windows 11 Enterprise' -and [int](Get-ReadinessValue $AdminReadiness 'Vm.Build') -ge 26100 -and (Get-ReadinessValue $AdminReadiness 'Vm.WindowsClientLicenseAttested') -eq $true -and $activation -in @('Licensed', 'ObservedUnknown') }
         @{ Name = 'Administration exact tools and extensions'; Passed = (Test-ExactSet -Actual $packageIds -Expected $expectedPackages) -and $packageVersionsObserved -and (Test-ExactSet -Actual $extensionIds -Expected $expectedExtensions) -and $dabVersionValid }
         @{ Name = 'Administration workspace and environment ACLs'; Passed = (Get-ReadinessValue $AdminReadiness 'Workspace.WorkspaceUserModify') -eq $true -and (Get-ReadinessValue $AdminReadiness 'RootEnvAcl.Path') -ceq 'C:\McpSqlWorkshop\workspace\.env' -and (Get-ReadinessValue $AdminReadiness 'RootEnvAcl.Restricted') -eq $true -and (Get-ReadinessValue $AdminReadiness 'RootEnvAcl.EnvAclRestricted') -eq $true }
@@ -3442,6 +3558,12 @@ function Test-WorkshopReadiness {
     [pscustomobject][ordered]@{
         Passed = @($checks | Where-Object Status -EQ 'Failed').Count -eq 0
         Checks = $checks.ToArray()
+        SourceHashes = [pscustomobject][ordered]@{
+            Algorithm = 'SHA-256'
+            Canonicalization = 'SortedObjectPropertiesUtf8JsonV1'
+            SqlReadinessSha256 = Get-WorkshopCanonicalRecordSha256 -Record $SqlReadiness
+            AdminReadinessSha256 = Get-WorkshopCanonicalRecordSha256 -Record $AdminReadiness
+        }
     }
 }
 
@@ -3450,11 +3572,12 @@ function Export-WorkshopDeploymentEvidence {
     param(
         [Parameter(Mandatory)][psobject] $SqlReadiness,
         [Parameter(Mandatory)][psobject] $AdminReadiness,
+        [Parameter(Mandatory)][psobject] $ReadinessResult,
         [Parameter(Mandatory)][string] $OutputDirectory
     )
 
     & (Join-Path $PSScriptRoot 'Capture-DeploymentEvidence.ps1') -SqlReadiness $SqlReadiness `
-        -AdminReadiness $AdminReadiness -OutputDirectory $OutputDirectory
+        -AdminReadiness $AdminReadiness -ReadinessResult $ReadinessResult -OutputDirectory $OutputDirectory
 }
 
 Export-ModuleMember -Function @(

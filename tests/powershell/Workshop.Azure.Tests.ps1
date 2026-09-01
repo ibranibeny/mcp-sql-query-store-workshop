@@ -2231,3 +2231,129 @@ Describe 'Default Task 6 Az command contracts' {
         }
     }
 }
+
+Describe 'Bootstrap repository supply-chain boundary' {
+    BeforeAll {
+        $script:RepositoryCommit = '0123456789abcdef0123456789abcdef01234567'
+
+        function Write-BootstrapTestArchive {
+            param(
+                [Parameter(Mandatory)][string] $Path,
+                [Parameter(Mandatory)][object[]] $Entries
+            )
+            $stream = [IO.File]::Open($Path, [IO.FileMode]::Create)
+            $archive = [IO.Compression.ZipArchive]::new($stream, [IO.Compression.ZipArchiveMode]::Create)
+            try {
+                foreach ($definition in $Entries) {
+                    $entry = $archive.CreateEntry([string]$definition.Name)
+                    if ($definition.PSObject.Properties.Name -contains 'ExternalAttributes') {
+                        $entry.ExternalAttributes = [int]$definition.ExternalAttributes
+                    }
+                    if ($definition.PSObject.Properties.Name -contains 'Content') {
+                        $writer = [IO.StreamWriter]::new($entry.Open())
+                        try { $writer.Write([string]$definition.Content) }
+                        finally { $writer.Dispose() }
+                    }
+                }
+            }
+            finally {
+                $archive.Dispose()
+                $stream.Dispose()
+            }
+        }
+    }
+
+    It 'normalizes only the optional git suffix for the exact approved repository' {
+        InModuleScope Workshop.Azure -Parameters @{ Commit = $script:RepositoryCommit } {
+            param($Commit)
+            Get-WorkshopBootstrapArchiveUri `
+                -RepositoryUrl 'https://github.com/ibranibeny/mcp-sql-query-store-workshop.git' `
+                -RepositoryCommit $Commit |
+                Should -Be "https://github.com/ibranibeny/mcp-sql-query-store-workshop/archive/$Commit.zip"
+        }
+    }
+
+    It 'rejects every repository other than the exact approved public repository' -ForEach @(
+        'https://github.com/example/mcp-sql-query-store-workshop'
+        'https://github.com/ibranibeny/another-repository'
+        'https://github.com/IBRANIBENY/mcp-sql-query-store-workshop'
+    ) {
+        $unapprovedRepository = $_
+        InModuleScope Workshop.Azure -Parameters @{
+            Repository = $unapprovedRepository
+            Commit = $script:RepositoryCommit
+        } {
+            param($Repository, $Commit)
+            $null = $Repository, $Commit
+            { Get-WorkshopBootstrapArchiveUri -RepositoryUrl $Repository -RepositoryCommit $Commit } |
+                Should -Throw '*approved repository*'
+        }
+    }
+
+    It 'rejects traversal, multiple roots, and reparse entries before extracting repository content' -ForEach @(
+        @{
+            Case = 'path traversal'
+            Entries = @([pscustomobject]@{ Name = 'mcp-sql-query-store-workshop-0123456789abcdef0123456789abcdef01234567/../escape.ps1'; Content = 'bad' })
+        }
+        @{
+            Case = 'multiple top-level roots'
+            Entries = @(
+                [pscustomobject]@{ Name = 'mcp-sql-query-store-workshop-0123456789abcdef0123456789abcdef01234567/deploy/Initialize-SqlVm.ps1'; Content = 'good' }
+                [pscustomobject]@{ Name = 'other-root/payload.ps1'; Content = 'bad' }
+            )
+        }
+        @{
+            Case = 'reparse entry'
+            Entries = @([pscustomobject]@{ Name = 'mcp-sql-query-store-workshop-0123456789abcdef0123456789abcdef01234567/link'; Content = 'target'; ExternalAttributes = [int](0xA000 -shl 16) })
+        }
+    ) {
+        $archivePath = Join-Path $TestDrive "$($Case -replace ' ', '-').zip"
+        $destination = Join-Path $TestDrive "$($Case -replace ' ', '-')-destination"
+        Write-BootstrapTestArchive -Path $archivePath -Entries $Entries
+
+        InModuleScope Workshop.Azure -Parameters @{
+            ArchivePath = $archivePath
+            Destination = $destination
+            Commit = $script:RepositoryCommit
+        } {
+            param($ArchivePath, $Destination, $Commit)
+            $null = $ArchivePath, $Destination, $Commit
+            { Expand-WorkshopBootstrapArchive -ArchivePath $ArchivePath -DestinationPath $Destination `
+                    -RepositoryCommit $Commit -ApprovedBootstrapEntryPoint 'Initialize-SqlVm.ps1' } |
+                Should -Throw '*repository archive rejected*'
+        }
+        Test-Path -LiteralPath $destination | Should -BeFalse
+    }
+
+    It 'extracts one exact repository root containing the approved bootstrap entry point' {
+        $archivePath = Join-Path $TestDrive 'approved.zip'
+        $destination = Join-Path $TestDrive 'approved-repository'
+        Write-BootstrapTestArchive -Path $archivePath -Entries @(
+            [pscustomobject]@{ Name = 'mcp-sql-query-store-workshop-0123456789abcdef0123456789abcdef01234567/deploy/Initialize-SqlVm.ps1'; Content = '# approved' }
+            [pscustomobject]@{ Name = 'mcp-sql-query-store-workshop-0123456789abcdef0123456789abcdef01234567/sql/00-Preflight.sql'; Content = 'SELECT 1;' }
+        )
+
+        InModuleScope Workshop.Azure -Parameters @{
+            ArchivePath = $archivePath
+            Destination = $destination
+            Commit = $script:RepositoryCommit
+        } {
+            param($ArchivePath, $Destination, $Commit)
+            $null = $ArchivePath, $Destination, $Commit
+            Expand-WorkshopBootstrapArchive -ArchivePath $ArchivePath -DestinationPath $Destination `
+                -RepositoryCommit $Commit -ApprovedBootstrapEntryPoint 'Initialize-SqlVm.ps1' |
+                Should -Be $Destination
+        }
+        Test-Path -LiteralPath (Join-Path $destination 'deploy/Initialize-SqlVm.ps1') -PathType Leaf |
+            Should -BeTrue
+    }
+
+    It 'validates and extracts the archive before invoking the approved bootstrap entry point' {
+        $moduleText = Get-Content -LiteralPath (Join-Path $PSScriptRoot '../../deploy/Workshop.Azure.psm1') -Raw
+        $setExtensionAt = $moduleText.IndexOf('SetExtension = {')
+        $validationAt = $moduleText.IndexOf('$null = Expand-WorkshopBootstrapArchive', $setExtensionAt)
+        $executionAt = $moduleText.IndexOf('& (Join-Path `$repo', $setExtensionAt)
+        $validationAt | Should -BeGreaterThan $setExtensionAt
+        $executionAt | Should -BeGreaterThan $validationAt
+    }
+}

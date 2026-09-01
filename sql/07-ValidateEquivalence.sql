@@ -11,11 +11,15 @@ SET XACT_ABORT ON;
 
 DECLARE @OriginalRunId sql_variant = SESSION_CONTEXT(N'WorkshopRunId');
 DECLARE @OriginalManualExecution sql_variant = SESSION_CONTEXT(N'WorkshopManualExecution');
-DECLARE @ValidationBatchID uniqueidentifier = NEWID();
+DECLARE @ValidationBatchID uniqueidentifier = TRY_CONVERT(uniqueidentifier, SESSION_CONTEXT(N'CandidateApprovalId'));
+DECLARE @CandidateApprovalGranted bit = COALESCE(TRY_CONVERT(bit, SESSION_CONTEXT(N'CandidateApprovalGranted')), 0);
 DECLARE @ValidationRunIdContext sql_variant = CONVERT(sql_variant, @ValidationBatchID);
 DECLARE @ValidationManualExecutionContext sql_variant = CONVERT(sql_variant, CONVERT(int, 1));
 DECLARE @RunIdContextChanged bit = 0;
 DECLARE @ManualExecutionContextChanged bit = 0;
+
+IF @ValidationBatchID IS NULL OR @CandidateApprovalGranted <> 1
+    THROW 51516, 'Equivalence validation requires the explicit DBA-approved candidate entry point.', 1;
 
 BEGIN TRY
     EXEC sys.sp_set_session_context

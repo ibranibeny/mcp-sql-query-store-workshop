@@ -8,6 +8,11 @@
     SqlAsg = 'asg-mcpsql-sql'
     PrivateDnsZone = 'mcpworkshop.internal'
     SqlPrivateIp = '10.20.2.10'
+    ApprovedRepositoryUrl = 'https://github.com/ibranibeny/mcp-sql-query-store-workshop'
+    AdventureWorksBackup = @{
+        Uri = 'https://github.com/Microsoft/sql-server-samples/releases/download/adventureworks/AdventureWorks2022.bak'
+        Sha256 = 'D17567ADB1521F972E1DC183A7216CEA869C4580B5D75632425BCADBAF82CE5E'
+    }
     AdminVm = @{
         Name = 'vm-mcpsql-admin'
         Size = 'Standard_D4s_v5'
