@@ -265,7 +265,7 @@
       "graphql": { "enabled": false }
     },
     "CompareWorkshopRuns": {
-      "description": "Compares one completed, frozen workshop comparison using exactly twelve correct paired trials. Parameter bounds: RunID and ValidationBatchID are required UUIDs. Returns measured peak and median grant utilization plus duration, CPU, reads, spills, waits, regression flags, and final evidence outcome.",
+      "description": "Compares one completed, frozen workshop comparison using exactly twelve correct paired trials. Parameter bounds: RunID and ValidationBatchID are required UUIDs. Returns measured peak and median grant utilization plus duration, CPU, reads, spills, waits, regression flags, and the final evidence outcome band.",
       "source": {
         "object": "lab.usp_CompareWorkshopRuns",
         "type": "stored-procedure",
@@ -299,7 +299,7 @@
         { "name": "SpillsImprovedMaterially", "description": "True when mean optimized spills improved by at least ten percent." },
         { "name": "WaitsImprovedMaterially", "description": "True when mean optimized wait time improved by at least ten percent." },
         { "name": "MedianUtilizationReductionPoints", "description": "Baseline minus optimized median grant utilization in percentage points." },
-        { "name": "Outcome", "description": "Evidence-based final outcome classification; target bands alone never imply measured success." }
+        { "name": "OutcomeBand", "description": "Evidence-based final outcome band classification; target bands alone never imply measured success." }
       ],
       "permissions": [{ "role": "workshop-reader", "actions": ["execute"] }],
       "mcp": { "dml-tools": true, "custom-tool": true },

@@ -5,6 +5,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 DAB_CONFIG = ROOT / "mcp" / "dab-config.json"
+DIAGNOSTICS_SQL = ROOT / "sql" / "05-CreateDiagnostics.sql"
 MCP_CONFIG = ROOT / ".vscode" / "mcp.json"
 EXTENSIONS_CONFIG = ROOT / ".vscode" / "extensions.json"
 ENV_EXAMPLE = ROOT / "mcp" / ".env.example"
@@ -53,6 +54,100 @@ def actions(entity: dict) -> list:
         for permission in entity["permissions"]
         for action in permission["actions"]
     ]
+
+
+def sql_batches(text: str) -> list[str]:
+    return [
+        batch.strip()
+        for batch in re.split(r"(?im)^\s*GO(?:\s+\d+)?\s*(?:--.*)?$", text)
+        if batch.strip()
+    ]
+
+
+def top_level_keyword(text: str, keyword: str, start: int = 0) -> int:
+    depth = 0
+    in_string = False
+    index = start
+    while index < len(text):
+        character = text[index]
+        if in_string:
+            if character == "'" and index + 1 < len(text) and text[index + 1] == "'":
+                index += 2
+                continue
+            if character == "'":
+                in_string = False
+            index += 1
+            continue
+        if character == "'":
+            in_string = True
+        elif character == "(":
+            depth += 1
+        elif character == ")":
+            depth -= 1
+        elif depth == 0 and text[index:index + len(keyword)].upper() == keyword:
+            before = text[index - 1] if index else " "
+            after = text[index + len(keyword)] if index + len(keyword) < len(text) else " "
+            if not (before.isalnum() or before == "_") and not (after.isalnum() or after == "_"):
+                return index
+        index += 1
+    raise AssertionError(f"missing top-level {keyword}")
+
+
+def split_top_level_expressions(text: str) -> list[str]:
+    expressions: list[str] = []
+    depth = 0
+    in_string = False
+    start = 0
+    index = 0
+    while index < len(text):
+        character = text[index]
+        if in_string:
+            if character == "'" and index + 1 < len(text) and text[index + 1] == "'":
+                index += 2
+                continue
+            if character == "'":
+                in_string = False
+        elif character == "'":
+            in_string = True
+        elif character == "(":
+            depth += 1
+        elif character == ")":
+            depth -= 1
+        elif character == "," and depth == 0:
+            expressions.append(text[start:index].strip())
+            start = index + 1
+        index += 1
+    expressions.append(text[start:].strip())
+    return expressions
+
+
+def first_result_column_names(procedure: str) -> list[str]:
+    procedure_pattern = re.compile(
+        rf"^CREATE\s+OR\s+ALTER\s+PROCEDURE\s+{re.escape(procedure)}\b",
+        re.IGNORECASE,
+    )
+    batch = next(
+        batch
+        for batch in sql_batches(DIAGNOSTICS_SQL.read_text(encoding="utf-8"))
+        if procedure_pattern.search(batch)
+    )
+    batch = re.sub(r"/\*.*?\*/", " ", batch, flags=re.DOTALL)
+    batch = re.sub(r"--[^\r\n]*", " ", batch)
+    select_start = top_level_keyword(batch, "SELECT")
+    from_start = top_level_keyword(batch, "FROM", select_start + len("SELECT"))
+    select_list = batch[select_start + len("SELECT"):from_start]
+    select_list = re.sub(r"^\s*TOP\s*\([^)]*\)\s*", "", select_list, flags=re.IGNORECASE)
+
+    names: list[str] = []
+    for expression in split_top_level_expressions(select_list):
+        alias = re.search(r"\bAS\s+(?:\[([^]]+)\]|([A-Za-z_]\w*))\s*$", expression, re.IGNORECASE)
+        if alias:
+            names.append(alias.group(1) or alias.group(2))
+            continue
+        column = re.fullmatch(r"(?:\[[^]]+\]|[A-Za-z_]\w*)(?:\.(?:\[([^]]+)\]|([A-Za-z_]\w*)))*", expression)
+        assert column, f"result expression requires an explicit alias: {expression!r}"
+        names.append(column.group(1) or column.group(2) or expression.strip("[]"))
+    return names
 
 
 def test_dab_config_has_only_documented_top_level_and_runtime_properties():
@@ -167,6 +262,13 @@ def test_every_entity_and_configured_field_has_a_description():
             assert set(field) <= {"name", "alias", "description", "primary-key"}
             assert field["name"].strip()
             assert field["description"].strip()
+
+
+def test_stored_procedure_field_metadata_exactly_matches_first_result_columns():
+    entities = load_json(DAB_CONFIG)["entities"]
+    for entity_name, procedure in PROCEDURE_ENTITIES.items():
+        configured_names = [field["name"] for field in entities[entity_name]["fields"]]
+        assert configured_names == first_result_column_names(procedure)
 
 
 def test_entity_sources_exclude_unsupported_object_description():
