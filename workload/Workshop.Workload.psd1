@@ -17,6 +17,7 @@
         'Get-WorkshopApplicationName'
         'Get-WorkshopParameterSchedule'
         'Get-WorkshopTrialSequence'
+        'Get-WorkshopComparisonBudget'
         'ConvertFrom-WorkshopTrialReader'
         'Get-WorkshopTrialAssessment'
         'Test-WorkshopFingerprintMatch'

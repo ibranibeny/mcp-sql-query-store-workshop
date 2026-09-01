@@ -133,6 +133,7 @@ Describe 'Workshop workload module contract' {
             'Export-WorkshopEvidenceFile'
             'Get-GrantUtilization'
             'Get-WorkshopApplicationName'
+            'Get-WorkshopComparisonBudget'
             'Get-WorkshopKillPlan'
             'Get-WorkshopOutcome'
             'Get-WorkshopParameterSchedule'
@@ -1085,9 +1086,12 @@ Describe 'Task 12 workload orchestration' {
                     $handle
                 }
                 Sample = {
-                    param($RunId, $Phase, $Kind, $TrialPhase, $ScheduleEntry, $RemainingSeconds)
+                    param($RunId, $Phase, $Kind, $TrialPhase, $ScheduleEntry, $RemainingSeconds, $OperationDeadline)
                     Write-Verbose "$RunId $ScheduleEntry"
-                    $state.Events.Add([pscustomobject]@{ Phase=$Phase; Kind=$Kind; TrialPhase=$TrialPhase; At=$state.Now; RemainingSeconds=$RemainingSeconds })
+                    $state.Events.Add([pscustomobject]@{
+                        Phase=$Phase; Kind=$Kind; TrialPhase=$TrialPhase; At=$state.Now
+                        RemainingSeconds=$RemainingSeconds; OperationDeadline=$OperationDeadline
+                    })
                     if ($Kind -eq 'Fingerprint') { return $state.Preflight }
                     if ($Kind -eq 'Trial') {
                         $optimizedTrial = $TrialPhase -eq 'Optimized'
@@ -1112,7 +1116,11 @@ Describe 'Task 12 workload orchestration' {
                     $state.HealthChecks++
                     [pscustomobject]@{ Healthy = $true; Reason = $null; ActiveHandleCount = $Handles.Count }
                 }
-                StopWorker = { param($Handle) $state.Stops.Add($Handle) }
+                StopWorker = {
+                    param($Handle)
+                    $state.Stops.Add($Handle)
+                    if ($Handle.psobject.Methods['Dispose']) { $Handle.Dispose() }
+                }
                 KillTagged = { param($RunId) Write-Verbose $RunId; $state.KillCalls++; @() }
                 Persist = { param($Record) $state.Persisted.Add($Record) }
                 Delay = { param([int] $Seconds) $state.Now = $state.Now.AddSeconds($Seconds) }
@@ -1203,10 +1211,10 @@ Describe 'Task 12 workload orchestration' {
         $baseline = 1..20 | ForEach-Object { Get-TestSample Baseline 70 }
         $fixture = Get-TestOperationSet -Baseline $baseline
         $result = Invoke-WorkshopExperiment -RunId ([guid]::NewGuid()) -OperationSet $fixture.Operations `
-            -MaximumWorkers 3 -MaximumDurationSeconds 60 -SampleIntervalSeconds 6 -WorkerRampSeconds 20
+            -MaximumWorkers 3 -MaximumDurationSeconds 120 -SampleIntervalSeconds 6 -WorkerRampSeconds 20
 
         $result.Outcome | Should -Be 'BaselineTargetNotReached'
-        $result.FrozenSettings.maximumDurationSeconds | Should -Be 60
+        $result.FrozenSettings.maximumDurationSeconds | Should -Be 120
         $result.FrozenSettings.sampleIntervalSeconds | Should -Be 6
         $result.FrozenSettings.workerRampSeconds | Should -Be 20
     }
@@ -1262,16 +1270,18 @@ Describe 'Task 12 workload orchestration' {
     It 'passes a positive bounded remaining deadline to every synchronous sample operation' {
         $fixture = Get-TestOperationSet
         [void](Invoke-WorkshopExperiment -RunId ([guid]::NewGuid()) -OperationSet $fixture.Operations `
-            -MaximumDurationSeconds 60 -WorkerRampSeconds 20)
+            -MaximumDurationSeconds 120 -WorkerRampSeconds 20)
 
         @($fixture.State.Events).Count | Should -BeGreaterThan 0
         foreach ($sampleCall in $fixture.State.Events) {
             $sampleCall.RemainingSeconds | Should -BeGreaterOrEqual 1
-            $sampleCall.RemainingSeconds | Should -BeLessOrEqual 60
+            $sampleCall.RemainingSeconds | Should -BeLessOrEqual 120
+            $sampleCall.OperationDeadline | Should -Not -BeNullOrEmpty
+            $sampleCall.OperationDeadline | Should -BeLessOrEqual ([datetimeoffset]'2026-09-01T10:02:00Z')
         }
     }
 
-    It 'passes one shared bounded deadline to workers in each measurement phase' {
+    It 'passes one shared phase deadline that leaves the complete comparison reserve' {
         $fixture = Get-TestOperationSet
         [void](Invoke-WorkshopExperiment -RunId ([guid]::NewGuid()) -OperationSet $fixture.Operations `
             -MaximumDurationSeconds 600 -WorkerRampSeconds 20)
@@ -1281,9 +1291,11 @@ Describe 'Task 12 workload orchestration' {
             Select-Object -ExpandProperty Deadline -Unique)
         $optimizedDeadlines = @($fixture.State.Starts | Where-Object Phase -eq Optimized |
             Select-Object -ExpandProperty Deadline -Unique)
-        $baselineDeadlines | Should -Be @([datetimeoffset]'2026-09-01T10:10:00Z')
+        $baselineDeadlines | Should -Be @([datetimeoffset]'2026-09-01T10:06:00Z')
         $optimizedDeadlines.Count | Should -Be 1
-        $optimizedDeadlines[0] | Should -BeExactly $baselineDeadlines[0]
+        $optimizedDeadlines[0] | Should -BeExactly ([datetimeoffset]'2026-09-01T10:09:14Z')
+        $optimizedDeadlines[0] | Should -BeGreaterThan $baselineDeadlines[0]
+        $optimizedDeadlines[0] | Should -BeLessThan ([datetimeoffset]'2026-09-01T10:10:00Z')
 
         $remaining = @($fixture.State.Events.RemainingSeconds)
         for ($index = 1; $index -lt $remaining.Count; $index++) {
@@ -1305,42 +1317,165 @@ Describe 'Task 12 workload orchestration' {
         @($fixture.State.Starts | Where-Object Phase -eq Optimized).Count | Should -Be 0
     }
 
-    It 'shrinks trial command timeouts against the original global deadline' {
+    It 'allocates a complete comparison budget with twelve positive capped trials and every ancillary operation' {
+        $budget = Get-WorkshopComparisonBudget -MaximumDurationSeconds 600 `
+            -CommandTimeoutSeconds 60 -SampleIntervalSeconds 5 -MaximumWorkers 4
+
+        $budget.TotalReservedSeconds | Should -BeLessOrEqual 600
+        $budget.TrialBudgets.Count | Should -BeExactly 12
+        @($budget.TrialBudgets | Where-Object { $_ -lt 1 -or $_ -gt 60 }).Count | Should -Be 0
+        $budget.TrialBudgets[0] | Should -BeLessThan 60
+        $budget.AncillaryOperations.Name | Should -Contain 'OptimizedWorkerCleanup'
+        $budget.AncillaryOperations.Name | Should -Contain 'CurrentFingerprint'
+        $budget.AncillaryOperations.Name | Should -Contain 'PreTrialSnapshot'
+        $budget.AncillaryOperations.Name | Should -Contain 'PostTrialSnapshot'
+        $budget.AncillaryOperations.Name | Should -Contain 'FinalFingerprint'
+        $budget.AncillaryOperations.Name | Should -Contain 'CorrectnessLinkage'
+        $budget.AncillaryOperations.Name | Should -Contain 'Persistence'
+        $budget.CleanupMarginSeconds | Should -BeGreaterOrEqual 1
+        ($budget.PreComparisonMinimumSeconds + $budget.TotalReservedSeconds) |
+            Should -BeLessOrEqual 600
+    }
+
+    It 'shrinks comparison budgets for shorter durations and rejects sixty seconds before workload starts' {
+        $long = Get-WorkshopComparisonBudget -MaximumDurationSeconds 600 `
+            -CommandTimeoutSeconds 60 -SampleIntervalSeconds 5 -MaximumWorkers 4
+        $short = Get-WorkshopComparisonBudget -MaximumDurationSeconds 120 `
+            -CommandTimeoutSeconds 60 -SampleIntervalSeconds 5 -MaximumWorkers 4
+        $short.TotalReservedSeconds | Should -BeLessThan $long.TotalReservedSeconds
+        $short.TrialBudgets[0] | Should -BeLessThan $long.TrialBudgets[0]
+
+        $fixture = Get-TestOperationSet
+        $result = Invoke-WorkshopExperiment -RunId ([guid]::NewGuid()) `
+            -OperationSet $fixture.Operations -MaximumDurationSeconds 60 -WorkerRampSeconds 20
+        $result.Outcome | Should -BeExactly 'Failed'
+        $result.Evidence.terminationEvidence.failure.code | Should -BeExactly 'COMPARISON_BUDGET_INSUFFICIENT'
+        $result.Evidence.terminationEvidence.failure.startupFailure | Should -BeTrue
+        $fixture.State.Starts.Count | Should -Be 0
+        $fixture.State.Events.Count | Should -Be 0
+    }
+
+    It 'rejects an insufficient public startup budget before resolving a provider or operation set' {
+        $script:operationFactoryCalls = 0
+        $result = Invoke-WorkshopStartup -RunId ([guid]::NewGuid()) -RepositoryRoot $TestDrive `
+            -MaximumDurationSeconds 60 -OperationFactory {
+                $script:operationFactoryCalls++
+                throw 'the operation factory must not run'
+            } -SemanticValidator { $true }
+
+        $result.Outcome | Should -BeExactly 'Failed'
+        $result.Evidence.terminationEvidence.failure.code | Should -BeExactly 'COMPARISON_BUDGET_INSUFFICIENT'
+        $script:operationFactoryCalls | Should -Be 0
+    }
+
+    It 'fails before optimized work when a baseline query crosses its phase deadline' {
         $fixture = Get-TestOperationSet
         $inner = $fixture.Operations.Sample
-        $fixture.State | Add-Member NoteProperty OptimizedMemoryCalls 0
         $fixture.Operations.Sample = {
             param($RunId,$Phase,$Kind,$TrialPhase,$ScheduleEntry,$RemainingSeconds)
-            if ($Phase -eq 'Optimized' -and $Kind -eq 'Memory') {
-                $fixture.State.OptimizedMemoryCalls++
-                if ($fixture.State.OptimizedMemoryCalls -eq 3) {
-                    $fixture.State.Now = [datetimeoffset]'2026-09-01T10:06:59Z'
-                }
-            }
             $value = & $inner $RunId $Phase $Kind $TrialPhase $ScheduleEntry $RemainingSeconds
-            if ($Phase -in @('Baseline','Optimized') -and $Kind -eq 'Memory' -and $fixture.State.Trials.Count -gt 0) {
-                $fixture.State.Now = $fixture.State.Now.AddMilliseconds(250)
-            }
-            if ($Kind -eq 'Trial') {
-                $advance = if ($RemainingSeconds -lt 15) {
-                    [math]::Max(0, $RemainingSeconds - 1)
-                }
-                else { 15 }
-                $fixture.State.Now = $fixture.State.Now.AddSeconds($advance)
+            if ($Phase -eq 'Baseline' -and $Kind -eq 'Memory') {
+                $fixture.State.Now = [datetimeoffset]'2026-09-01T10:06:01Z'
             }
             return $value
         }.GetNewClosure()
 
+        $result = Invoke-WorkshopExperiment -RunId ([guid]::NewGuid()) `
+            -OperationSet $fixture.Operations -MaximumDurationSeconds 600 -WorkerRampSeconds 20
+
+        $result.Outcome | Should -BeExactly 'Failed'
+        @($fixture.State.Starts | Where-Object Phase -eq 'Optimized').Count | Should -Be 0
+    }
+
+    It 'gives baseline drain one dedicated budget and never consumes optimized or comparison reserve' {
+        $fixture = Get-TestOperationSet -Baseline @(
+            (Get-TestSample Baseline 75),
+            (Get-TestSample Baseline 80),
+            (Get-TestSample Baseline 82)
+        )
+        $inner = $fixture.Operations.Sample
+        $fixture.Operations.Sample = {
+            param($RunId,$Phase,$Kind,$TrialPhase,$ScheduleEntry,$RemainingSeconds)
+            $value = & $inner $RunId $Phase $Kind $TrialPhase $ScheduleEntry $RemainingSeconds
+            if ($Kind -eq 'Drain') {
+                $fixture.State.Now = $fixture.State.Now.AddSeconds($RemainingSeconds + 1)
+            }
+            return $value
+        }.GetNewClosure()
+
+        $result = Invoke-WorkshopExperiment -RunId ([guid]::NewGuid()) `
+            -OperationSet $fixture.Operations -MaximumDurationSeconds 600 -WorkerRampSeconds 20
+
+        $result.Outcome | Should -BeExactly 'Failed'
+        @($fixture.State.Starts | Where-Object Phase -eq 'Optimized').Count | Should -Be 0
+        @($fixture.State.Events | Where-Object Kind -eq 'Drain').Count | Should -BeExactly 1
+    }
+
+    It 'preserves all twelve trial reservations when fingerprints and snapshots consume their budgets' {
+        $fixture = Get-TestOperationSet
+        $inner = $fixture.Operations.Sample
+        $fixture.Operations.Sample = {
+            param($RunId,$Phase,$Kind,$TrialPhase,$ScheduleEntry,$RemainingSeconds)
+            $comparisonActive = @($fixture.State.Starts | Where-Object Phase -eq Optimized).Count -gt 0 -and
+                @($fixture.State.Stops).Count -eq @($fixture.State.Starts).Count
+            $value = & $inner $RunId $Phase $Kind $TrialPhase $ScheduleEntry $RemainingSeconds
+            if ($comparisonActive -and $Kind -in @('Fingerprint','Memory')) {
+                $fixture.State.Now = $fixture.State.Now.AddSeconds($RemainingSeconds)
+            }
+            elseif ($comparisonActive -and $Kind -eq 'Trial') {
+                $fixture.State.Now = $fixture.State.Now.AddSeconds($RemainingSeconds)
+            }
+            return $value
+        }.GetNewClosure()
+
+        $result = Invoke-WorkshopExperiment -RunId ([guid]::NewGuid()) `
+            -OperationSet $fixture.Operations -MaximumDurationSeconds 600 `
+            -WorkerRampSeconds 20 -CommandTimeoutSeconds 15
+
+        $result.Outcome | Should -BeExactly 'TargetMet'
+        $result.Trials.Count | Should -BeExactly 12
+        @($fixture.State.Events | Where-Object Kind -eq 'Trial').Count | Should -BeExactly 12
+        $fixture.State.Now | Should -BeLessOrEqual ([datetimeoffset]'2026-09-01T10:10:00Z')
+    }
+
+    It 'rebuilds a successful comparison as Failed when bounded persistence fails' {
+        $fixture = Get-TestOperationSet
+        $innerPersist = $fixture.Operations.Persist
+        $fixture.State | Add-Member NoteProperty PersistAttempts 0
+        $fixture.Operations.Persist = {
+            param($Record,$RemainingSeconds)
+            $fixture.State.PersistAttempts++
+            if ($fixture.State.PersistAttempts -eq 1) { throw 'injected bounded persistence failure' }
+            & $innerPersist $Record $RemainingSeconds
+        }.GetNewClosure()
+
+        $result = Invoke-WorkshopExperiment -RunId ([guid]::NewGuid()) `
+            -OperationSet $fixture.Operations -MaximumDurationSeconds 600 -WorkerRampSeconds 20
+
+        $result.Outcome | Should -BeExactly 'Failed'
+        $result.Evidence.outcome | Should -BeExactly 'Failed'
+        $result.Evidence.terminationEvidence.failure.code | Should -BeExactly 'PERSISTENCE_FAILED'
+        $fixture.State.PersistAttempts | Should -Be 2
+    }
+
+    It 'uses the deterministic per-trial budget instead of the full generic timeout' {
+        $fixture = Get-TestOperationSet -Baseline @(
+            (Get-TestSample Baseline 75),
+            (Get-TestSample Baseline 80),
+            (Get-TestSample Baseline 82)
+        )
         $result = Invoke-WorkshopExperiment -RunId ([guid]::NewGuid()) -OperationSet $fixture.Operations `
-            -MaximumDurationSeconds 600 -WorkerRampSeconds 20 -CommandTimeoutSeconds 15
+            -MaximumDurationSeconds 300 -WorkerRampSeconds 20 -CommandTimeoutSeconds 60
+        $budget = Get-WorkshopComparisonBudget -MaximumDurationSeconds 300 `
+            -CommandTimeoutSeconds 60 -SampleIntervalSeconds 5 -MaximumWorkers 4
 
         $trialTimeouts = @($fixture.State.Events | Where-Object Kind -eq 'Trial' |
             Select-Object -ExpandProperty RemainingSeconds)
         $result.Trials.Count | Should -BeExactly 12
         $trialTimeouts.Count | Should -BeExactly 12
-        $trialTimeouts[0] | Should -BeExactly 15
-        $trialTimeouts[-1] | Should -BeLessThan 15 -Because ($trialTimeouts -join ',')
-        $fixture.State.Now | Should -BeLessOrEqual ([datetimeoffset]'2026-09-01T10:10:00Z')
+        $trialTimeouts | Should -BeExactly $budget.TrialBudgets
+        $trialTimeouts[0] | Should -BeLessThan 60
+        $fixture.State.Now | Should -BeLessOrEqual ([datetimeoffset]'2026-09-01T10:05:00Z')
     }
 
     It 'never schedules work after 600 seconds and reports an incomplete comparison truthfully' {
@@ -1373,14 +1508,14 @@ Describe 'Task 12 workload orchestration' {
             param($RunId,$Phase,$Kind,$TrialPhase,$ScheduleEntry,$RemainingSeconds)
             $value = & $inner $RunId $Phase $Kind $TrialPhase $ScheduleEntry $RemainingSeconds
             if ($Kind -eq 'Drain') {
-                $fixture.State.Now = [datetimeoffset]'2026-09-01T10:01:00Z'
+                $fixture.State.Now = [datetimeoffset]'2026-09-01T10:02:00Z'
                 $value.ActiveGrantCount = 1
             }
             return $value
         }.GetNewClosure()
 
         $result = Invoke-WorkshopExperiment -RunId ([guid]::NewGuid()) -OperationSet $fixture.Operations `
-            -MaximumDurationSeconds 60 -WorkerRampSeconds 20
+            -MaximumDurationSeconds 120 -WorkerRampSeconds 20
 
         $result.Outcome | Should -BeExactly 'Failed'
         $result.TerminationEvidence.Timeout | Should -BeTrue
@@ -1401,7 +1536,7 @@ Describe 'Task 12 workload orchestration' {
         }.GetNewClosure()
 
         $result = Invoke-WorkshopExperiment -RunId ([guid]::NewGuid()) -OperationSet $fixture.Operations `
-            -MaximumDurationSeconds 60 -WorkerRampSeconds 20
+            -MaximumDurationSeconds 120 -WorkerRampSeconds 20
 
         $result.Outcome | Should -BeExactly 'Failed'
         $result.TerminationEvidence.Timeout | Should -BeTrue
@@ -1421,7 +1556,7 @@ Describe 'Task 12 workload orchestration' {
         }.GetNewClosure()
 
         $result = Invoke-WorkshopExperiment -RunId ([guid]::NewGuid()) -OperationSet $fixture.Operations `
-            -MaximumDurationSeconds 60 -WorkerRampSeconds 20
+            -MaximumDurationSeconds 120 -WorkerRampSeconds 20
 
         $result.Outcome | Should -BeExactly 'SafetyStop'
         $result.Trials.Count | Should -Be 0
@@ -1503,7 +1638,7 @@ Describe 'Task 12 workload orchestration' {
         }
 
         $result = Invoke-WorkshopExperiment -RunId ([guid]::NewGuid()) -OperationSet $fixture.Operations `
-            -MaximumDurationSeconds 60 -WorkerRampSeconds 20
+            -MaximumDurationSeconds 120 -WorkerRampSeconds 20
 
         $result.Outcome | Should -BeExactly 'Failed'
         $result.Samples.Count | Should -BeGreaterThan 0
@@ -1640,7 +1775,7 @@ Describe 'Task 12 workload orchestration' {
         $fixture.Operations.Persist = { throw 'injected persistence failure' }
 
         $result = Invoke-WorkshopExperiment -RunId ([guid]::NewGuid()) -OperationSet $fixture.Operations `
-            -MaximumDurationSeconds 60 -WorkerRampSeconds 20
+            -MaximumDurationSeconds 120 -WorkerRampSeconds 20
 
         $result.Outcome | Should -BeExactly 'Failed'
         $result.Evidence.terminationEvidence.failure.code | Should -BeExactly 'PERSISTENCE_FAILED'
@@ -1751,7 +1886,7 @@ Describe 'Task 12 workload orchestration' {
         $baseline = 1..130 | ForEach-Object { Get-TestSample Baseline 70 }
         $fixture = Get-TestOperationSet -Baseline $baseline
         $result = Invoke-WorkshopExperiment -RunId ([guid]::NewGuid()) -OperationSet $fixture.Operations `
-            -MaximumWorkers 4 -MaximumDurationSeconds 60 -SampleIntervalSeconds 5 -WorkerRampSeconds 20
+            -MaximumWorkers 4 -MaximumDurationSeconds 120 -SampleIntervalSeconds 5 -WorkerRampSeconds 20
         $result.Outcome | Should -Be 'BaselineTargetNotReached'
         @($fixture.State.Starts | Where-Object Phase -eq Optimized).Count | Should -Be 0
         $result.Trials.Count | Should -Be 0
@@ -1763,7 +1898,7 @@ Describe 'Task 12 workload orchestration' {
         $fixture = Get-TestOperationSet -Optimized $optimized
 
         $result = Invoke-WorkshopExperiment -RunId ([guid]::NewGuid()) -OperationSet $fixture.Operations `
-            -MaximumDurationSeconds 60 -SampleIntervalSeconds 5 -WorkerRampSeconds 20
+            -MaximumDurationSeconds 120 -SampleIntervalSeconds 5 -WorkerRampSeconds 20
 
         $result.Outcome | Should -BeExactly 'ImprovedOutsideTarget' `
             -Because ($result.Evidence.terminationEvidence | ConvertTo-Json -Compress)
@@ -1799,7 +1934,7 @@ Describe 'Task 12 workload orchestration' {
         }.GetNewClosure()
 
         $result = Invoke-WorkshopExperiment -RunId ([guid]::NewGuid()) -OperationSet $fixture.Operations `
-            -MaximumDurationSeconds 60 -SampleIntervalSeconds 5 -WorkerRampSeconds 20
+            -MaximumDurationSeconds 120 -SampleIntervalSeconds 5 -WorkerRampSeconds 20
 
         $result.Outcome | Should -BeExactly 'NoMaterialImprovement' `
             -Because ($result.Evidence.terminationEvidence | ConvertTo-Json -Compress)
@@ -1942,6 +2077,36 @@ Describe 'Task 12 stop and export safety' {
         $rows[1].ResultHash | Should -BeExactly ('ab'*32)
     }
 
+    It 'bounds export independently and removes partial output when a file operation overruns' {
+        $run = '12121212-1212-1212-1212-121212121212'
+        $clockState = [pscustomobject]@{ Now = [datetimeoffset]'2026-09-01T10:00:00Z' }
+        $ops = @{
+            WriteText = {
+                param($Path,$Text,$Encoding)
+                [IO.File]::WriteAllText($Path,$Text,$Encoding)
+                $clockState.Now = $clockState.Now.AddSeconds(2)
+            }.GetNewClosure()
+        }
+        $clock = { $clockState.Now }.GetNewClosure()
+
+        { Export-WorkshopEvidenceFile -RunId $run `
+                -Evidence ([ordered]@{ runId=$run; samples=@(); trials=@() }) `
+                -RepositoryRoot $TestDrive -SemanticValidator { $true } `
+                -TimeoutSeconds 1 -Clock $clock `
+                -FileOperations $ops } | Should -Throw '*export deadline*'
+        Test-Path -LiteralPath (Join-Path $TestDrive "evidence/runs/$run") | Should -BeFalse
+    }
+
+    It 'cancels the production semantic validator process at the export deadline' {
+        $module = Get-Content (Join-Path $PSScriptRoot '../../workload/Workshop.Workload.psm1') -Raw
+        $module | Should -Match 'ProcessStartInfo'
+        $module | Should -Match 'WaitForExit\('
+        $module | Should -Not -Match 'WaitForExit\(\)'
+        $module | Should -Match '\.Kill\(\$true\)'
+        $module | Should -Match 'WriteAllTextAsync'
+        $module | Should -Match 'WriteAllLinesAsync'
+    }
+
     It 'declares strict entry bounds, ShouldProcess, and an explicit encrypted SQL fallback without Start-Sleep' {
         $start = Get-Content (Join-Path $PSScriptRoot '../../workload/Start-MemoryGrantLab.ps1') -Raw
         $stop = Get-Content (Join-Path $PSScriptRoot '../../workload/Stop-MemoryGrantLab.ps1') -Raw
@@ -2008,6 +2173,14 @@ Describe 'Task 12 stop and export safety' {
             $workerRegion | Should -Match $operation
         }
         $workerRegion | Should -Match 'catch\s*\{[\s\S]*PowerShell\.Stop\(\)[\s\S]*PowerShell\.Dispose\(\)[\s\S]*Runspace\.Dispose\(\)[\s\S]*ReadySignal\.Dispose\(\)'
+    }
+
+    It 'bounds optimized worker stop and join before comparison work' {
+        $module = Get-Content (Join-Path $PSScriptRoot '../../workload/Workshop.Workload.psm1') -Raw
+        $module | Should -Match 'BeginStop\(\$null,\s*\$null\)'
+        $module | Should -Match 'AsyncWaitHandle\.WaitOne\('
+        $module | Should -Match 'EndStop\('
+        $module | Should -Match 'StopWithin\(\$RemainingSeconds\)'
     }
 }
 

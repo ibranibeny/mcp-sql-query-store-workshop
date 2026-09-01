@@ -1454,6 +1454,62 @@ function Get-WorkshopTrialSequence {
     return @('A', 'B', 'B', 'A', 'B', 'A', 'A', 'B', 'A', 'B', 'B', 'A')
 }
 
+function Get-WorkshopComparisonBudget {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][ValidateRange(60, 600)][int] $MaximumDurationSeconds,
+        [Parameter(Mandatory)][ValidateRange(1, 60)][int] $CommandTimeoutSeconds,
+        [Parameter(Mandatory)][ValidateRange(5, 30)][int] $SampleIntervalSeconds,
+        [Parameter(Mandatory)][ValidateRange(1, 4)][int] $MaximumWorkers
+    )
+
+    $trialCount = 12
+    $cleanupMarginSeconds = 2
+    $ancillary = @(
+        [pscustomobject]@{ Name = 'OptimizedWorkerCleanup'; Count = $MaximumWorkers; SecondsEach = 1 }
+        [pscustomobject]@{ Name = 'CurrentFingerprint'; Count = 1; SecondsEach = 1 }
+        [pscustomobject]@{ Name = 'PreTrialSnapshot'; Count = $trialCount; SecondsEach = 1 }
+        [pscustomobject]@{ Name = 'PostTrialSnapshot'; Count = $trialCount; SecondsEach = 1 }
+        [pscustomobject]@{ Name = 'FinalFingerprint'; Count = 1; SecondsEach = 1 }
+        [pscustomobject]@{ Name = 'CorrectnessLinkage'; Count = 1; SecondsEach = 1 }
+        [pscustomobject]@{ Name = 'Persistence'; Count = 1; SecondsEach = 1 }
+    )
+    $ancillarySeconds = [int](($ancillary | ForEach-Object {
+        $_.Count * $_.SecondsEach
+    } | Measure-Object -Sum).Sum)
+    $minimumBaselineObservationSeconds = 3 + (2 * $SampleIntervalSeconds)
+    $optimizedPreparationAndObservationSeconds = $MaximumWorkers + 3 + (2 * $SampleIntervalSeconds)
+    $postBaselineMinimumSeconds = $MaximumWorkers + 1 + 1 + $optimizedPreparationAndObservationSeconds
+    $preComparisonMinimumSeconds = 3 + $minimumBaselineObservationSeconds + $postBaselineMinimumSeconds
+    $availableForTrials = $MaximumDurationSeconds - $preComparisonMinimumSeconds - `
+        $ancillarySeconds - $cleanupMarginSeconds
+    $trialSeconds = [math]::Min(
+        $CommandTimeoutSeconds,
+        [int][math]::Floor($availableForTrials / $trialCount)
+    )
+    if ($trialSeconds -lt 1) {
+        $minimumRequired = $preComparisonMinimumSeconds + $ancillarySeconds + `
+            $cleanupMarginSeconds + $trialCount
+        throw "MaximumDurationSeconds must be at least $minimumRequired seconds for the minimum complete comparison budget."
+    }
+
+    $trialBudgets = [int[]]@(1..$trialCount | ForEach-Object { $trialSeconds })
+    $comparisonReserve = $ancillarySeconds + $cleanupMarginSeconds + `
+        [int](($trialBudgets | Measure-Object -Sum).Sum)
+    return [pscustomobject][ordered]@{
+        MaximumDurationSeconds = $MaximumDurationSeconds
+        CommandTimeoutCapSeconds = $CommandTimeoutSeconds
+        TrialBudgets = $trialBudgets
+        AncillaryOperations = $ancillary
+        AncillaryReservedSeconds = $ancillarySeconds
+        CleanupMarginSeconds = $cleanupMarginSeconds
+        PreComparisonMinimumSeconds = $preComparisonMinimumSeconds
+        PostBaselineMinimumSeconds = $postBaselineMinimumSeconds
+        OptimizedPreparationAndObservationSeconds = $optimizedPreparationAndObservationSeconds
+        TotalReservedSeconds = $comparisonReserve
+    }
+}
+
 function ConvertFrom-WorkshopTrialReader {
     [CmdletBinding()]
     param([Parameter(Mandatory)][object] $Reader)
@@ -1978,15 +2034,31 @@ function Invoke-WorkshopExperiment {
         return $healthState.ConsecutiveFailures
     }.GetNewClosure()
     $invokeBoundedSample = {
-        param([string]$Phase, [string]$Kind, [AllowNull()][string]$TrialPhase, [AllowNull()][string]$ScheduleEntry)
-        $remaining = & $getRemainingSeconds
-        if ($remaining -le 0) { return $null }
-        $remaining = [math]::Min($CommandTimeoutSeconds, $remaining)
+        param(
+            [string]$Phase,
+            [string]$Kind,
+            [AllowNull()][string]$TrialPhase,
+            [AllowNull()][string]$ScheduleEntry,
+            [int]$MaximumOperationSeconds = $CommandTimeoutSeconds,
+            [datetimeoffset]$OperationDeadline = $runtimeState.Deadline
+        )
+        $activeDeadline = @($runtimeState.Deadline, $OperationDeadline | Sort-Object)[0]
+        $remaining = ($activeDeadline - [datetimeoffset](& $OperationSet.Clock)).TotalSeconds
+        if ($remaining -le 0) { throw "The $Phase $Kind operation deadline elapsed before execution." }
+        $remaining = [math]::Min($MaximumOperationSeconds, [math]::Max(1, [int][math]::Ceiling($remaining)))
         $operationState.Stage = if ($Kind -in @('Memory','Drain')) { 'Sample' } else { $Kind }
-        return & $OperationSet.Sample $RunId $Phase $Kind $TrialPhase $ScheduleEntry $remaining
+        $value = & $OperationSet.Sample $RunId $Phase $Kind $TrialPhase $ScheduleEntry `
+            $remaining $activeDeadline
+        if ([datetimeoffset](& $OperationSet.Clock) -gt $activeDeadline) {
+            $operationState.Stage = 'PhaseDeadline'
+            throw "The $Phase $Kind operation exceeded its dedicated deadline."
+        }
+        return $value
     }.GetNewClosure()
     $assertFrozenFingerprint = {
-        $actual = & $invokeBoundedSample 'Optimized' 'Fingerprint' $null $null
+        param([datetimeoffset]$OperationDeadline = $runtimeState.Deadline)
+        $actual = & $invokeBoundedSample 'Optimized' 'Fingerprint' $null $null `
+            $CommandTimeoutSeconds $OperationDeadline
         if ($null -eq $actual -or -not (Test-WorkshopFingerprintMatch -Expected $runtimeState.Preflight -Actual $actual)) {
             throw 'Optimized phase rejected because configuration or data drift was detected.'
         }
@@ -2031,10 +2103,27 @@ function Invoke-WorkshopExperiment {
         $sampleClockState.Last = $start.AddTicks(-1)
         $deadline = $start.AddSeconds($MaximumDurationSeconds)
         $runtimeState.Deadline = $deadline
-        $comparisonReserveSeconds = 12 * $CommandTimeoutSeconds
+        try {
+            $comparisonBudget = Get-WorkshopComparisonBudget `
+                -MaximumDurationSeconds $MaximumDurationSeconds `
+                -CommandTimeoutSeconds $CommandTimeoutSeconds `
+                -SampleIntervalSeconds $SampleIntervalSeconds `
+                -MaximumWorkers $MaximumWorkers
+        }
+        catch {
+            $failure = ConvertTo-WorkshopFailureEvidence -Code 'COMPARISON_BUDGET_INSUFFICIENT' `
+                -Stage 'ComparisonBudgetValidation' -Message $_.Exception.Message -StartupFailure $true
+            $result = Build-WorkshopStartupFailureResult -RunId $RunId -Failure $failure `
+                -StartedAtUtc $start -CompletedAtUtc $start -MaximumWorkers $MaximumWorkers `
+                -MaximumDurationSeconds $MaximumDurationSeconds `
+                -SampleIntervalSeconds $SampleIntervalSeconds -WorkerRampSeconds $WorkerRampSeconds
+            & $OperationSet.Export $result 5
+            return $result
+        }
+        $comparisonReserveSeconds = $comparisonBudget.TotalReservedSeconds
         $optimizedObservationDeadline = $deadline.AddSeconds(-$comparisonReserveSeconds)
         $baselineFractionDeadline = $start.AddSeconds([math]::Floor($MaximumDurationSeconds * $BaselineCalibrationFraction))
-        $baselineReserveDeadline = $optimizedObservationDeadline.AddSeconds(-(2 * $SampleIntervalSeconds))
+        $baselineReserveDeadline = $optimizedObservationDeadline.AddSeconds(-$comparisonBudget.PostBaselineMinimumSeconds)
         $baselineDeadline = @($baselineFractionDeadline, $baselineReserveDeadline | Sort-Object)[0]
         $operationState.Stage = 'OpenConnection'
         [void](& $OperationSet.OpenConnection 'Preflight' ([math]::Min($CommandTimeoutSeconds, (& $getRemainingSeconds))))
@@ -2052,7 +2141,7 @@ function Invoke-WorkshopExperiment {
         $operationState.Stage = 'StartWorker'
         if ($null -eq $outcome) {
             $applicationName = Get-WorkshopApplicationName -RunId $RunId -Phase Baseline -Worker 1
-            $workerHandle = & $OperationSet.StartWorker $RunId 'Baseline' 1 $applicationName $schedule $deadline
+            $workerHandle = & $OperationSet.StartWorker $RunId 'Baseline' 1 $applicationName $schedule $baselineDeadline
             $workers.Add($workerHandle)
             $workerCountStarted = 1
             $lastRamp = [datetimeoffset] (& $OperationSet.Clock)
@@ -2066,7 +2155,9 @@ function Invoke-WorkshopExperiment {
                 break
             }
             $elapsed = ($now - $start).TotalSeconds
-            $sample = & $recordSample (& $invokeBoundedSample 'Baseline' 'Memory' $null $null) $now
+            $sample = & $recordSample `
+                (& $invokeBoundedSample 'Baseline' 'Memory' $null $null `
+                    $CommandTimeoutSeconds $baselineDeadline) $now
             $now = [datetimeoffset] (& $OperationSet.Clock)
             $elapsed = ($now - $start).TotalSeconds
             $workersHealthy = [bool](& $testActiveWorkers)
@@ -2118,7 +2209,7 @@ function Invoke-WorkshopExperiment {
                     [void](& $OperationSet.KillTagged $RunId)
                     break
                 }
-                $workerHandle = & $OperationSet.StartWorker $RunId 'Baseline' $workerNumber $applicationName $schedule $deadline
+                $workerHandle = & $OperationSet.StartWorker $RunId 'Baseline' $workerNumber $applicationName $schedule $baselineDeadline
                 $workers.Add($workerHandle)
                 $workerCountStarted = [math]::Max($workerCountStarted, $workerNumber)
                 $lastRamp = [datetimeoffset] (& $OperationSet.Clock)
@@ -2132,8 +2223,7 @@ function Invoke-WorkshopExperiment {
             }
         }
 
-        foreach ($worker in @($workers)) { & $OperationSet.StopWorker $worker }
-        foreach ($worker in @($workers)) { if ($worker -is [System.IDisposable] -or $worker.psobject.Methods['Dispose']) { $worker.Dispose() } }
+        foreach ($worker in @($workers)) { & $OperationSet.StopWorker $worker 1 }
         $workers.Clear()
 
         if ($null -ne $outcome) {
@@ -2150,30 +2240,10 @@ function Invoke-WorkshopExperiment {
             return $result
         }
 
-        $drainDeadline = @($deadline, ([datetimeoffset] (& $OperationSet.Clock)).AddSeconds(60) | Sort-Object)[0]
-        $drain = $null
-        do {
-            if (([datetimeoffset] (& $OperationSet.Clock)) -ge $drainDeadline) {
-                $outcome = 'Failed'
-                $timeout = $true
-                [void](& $OperationSet.KillTagged $RunId)
-                break
-            }
-            $drain = & $invokeBoundedSample 'Baseline' 'Drain' $null $null
-            if (([datetimeoffset] (& $OperationSet.Clock)) -ge $deadline) {
-                $outcome = 'Failed'
-                $timeout = $true
-                [void](& $OperationSet.KillTagged $RunId)
-                break
-            }
-            if ([int] $drain.ActiveGrantCount -eq 0) { break }
-            $remaining = & $getRemainingSeconds
-            if ($remaining -gt 0) {
-                & $OperationSet.Delay ([math]::Min($SampleIntervalSeconds, $remaining))
-            }
-        } while (([datetimeoffset] (& $OperationSet.Clock)) -lt $drainDeadline)
-        if ($null -eq $outcome -and [int] $drain.ActiveGrantCount -ne 0) {
-            throw 'Baseline grants did not drain within the bounded interval.'
+        $drainDeadline = ([datetimeoffset](& $OperationSet.Clock)).AddSeconds(1)
+        $drain = & $invokeBoundedSample 'Baseline' 'Drain' $null $null 1 $drainDeadline
+        if ([int] $drain.ActiveGrantCount -ne 0) {
+            throw 'Baseline grants did not drain within the dedicated bounded operation.'
         }
 
         if ($null -ne $outcome) {
@@ -2191,7 +2261,7 @@ function Invoke-WorkshopExperiment {
         }
 
         $terminalPhase = 'Optimized'
-        & $assertFrozenFingerprint
+        & $assertFrozenFingerprint $optimizedObservationDeadline
 
         $consecutive = 0
         for ($index = 1; $index -le [int] $frozen.workers; $index++) {
@@ -2207,7 +2277,7 @@ function Invoke-WorkshopExperiment {
             }
             $applicationName = Get-WorkshopApplicationName -RunId $RunId -Phase Optimized -Worker $index
             $operationState.Stage = 'StartWorker'
-            $workers.Add((& $OperationSet.StartWorker $RunId 'Optimized' $index $applicationName $schedule $deadline))
+            $workers.Add((& $OperationSet.StartWorker $RunId 'Optimized' $index $applicationName $schedule $optimizedObservationDeadline))
         }
         while ($null -eq $outcome) {
             $now = [datetimeoffset] (& $OperationSet.Clock)
@@ -2215,8 +2285,10 @@ function Invoke-WorkshopExperiment {
                 $timeout = $true
                 break
             }
-            $sample = & $recordSample (& $invokeBoundedSample 'Optimized' 'Memory' $null $null) $now
-            & $assertFrozenFingerprint
+            $sample = & $recordSample `
+                (& $invokeBoundedSample 'Optimized' 'Memory' $null $null `
+                    $CommandTimeoutSeconds $optimizedObservationDeadline) $now
+            & $assertFrozenFingerprint $optimizedObservationDeadline
             $now = [datetimeoffset] (& $OperationSet.Clock)
             if ($now -ge $deadline) {
                 $outcome = 'Failed'
@@ -2265,11 +2337,78 @@ function Invoke-WorkshopExperiment {
             }
         }
 
-        foreach ($worker in @($workers)) { & $OperationSet.StopWorker $worker }
-        foreach ($worker in @($workers)) { if ($worker -is [System.IDisposable] -or $worker.psobject.Methods['Dispose']) { $worker.Dispose() } }
+        $comparisonOperations = [System.Collections.Generic.List[object]]::new()
+        if ($null -eq $outcome) {
+            foreach ($worker in @($workers)) {
+                $comparisonOperations.Add([pscustomobject]@{ Name = 'OptimizedWorkerCleanup'; Seconds = 1 })
+            }
+            $comparisonOperations.Add([pscustomobject]@{ Name = 'CurrentFingerprint'; Seconds = 1 })
+            for ($budgetIndex = 0; $budgetIndex -lt 12; $budgetIndex++) {
+                $comparisonOperations.Add([pscustomobject]@{ Name = 'PreTrialSnapshot'; Seconds = 1 })
+                $comparisonOperations.Add([pscustomobject]@{
+                    Name = 'Trial'
+                    Seconds = [int]$comparisonBudget.TrialBudgets[$budgetIndex]
+                })
+                $comparisonOperations.Add([pscustomobject]@{ Name = 'PostTrialSnapshot'; Seconds = 1 })
+            }
+            $comparisonOperations.Add([pscustomobject]@{ Name = 'FinalFingerprint'; Seconds = 1 })
+            $comparisonOperations.Add([pscustomobject]@{ Name = 'CorrectnessLinkage'; Seconds = 1 })
+            $comparisonOperations.Add([pscustomobject]@{ Name = 'Persistence'; Seconds = 1 })
+        }
+        $comparisonState = [pscustomobject]@{
+            Index = 0
+            FutureReservedSeconds = [int](($comparisonOperations | Measure-Object Seconds -Sum).Sum)
+        }
+        $beginComparisonOperation = {
+            param([string]$ExpectedName)
+            $operationState.Stage = 'ComparisonDeadline'
+            if ($comparisonState.Index -ge $comparisonOperations.Count) {
+                throw "Comparison operation '$ExpectedName' was not budgeted."
+            }
+            $operation = $comparisonOperations[$comparisonState.Index]
+            if ($operation.Name -cne $ExpectedName) {
+                throw "Comparison operation '$ExpectedName' was scheduled out of order."
+            }
+            $comparisonState.FutureReservedSeconds -= [int]$operation.Seconds
+            $remainingAfterFuture = [math]::Floor(
+                ($deadline - [datetimeoffset](& $OperationSet.Clock)).TotalSeconds
+            ) - $comparisonState.FutureReservedSeconds - $comparisonBudget.CleanupMarginSeconds
+            if ($remainingAfterFuture -lt 1) {
+                throw "Insufficient reserved time to start comparison operation '$ExpectedName'."
+            }
+            $comparisonState.Index++
+            return [math]::Min([int]$operation.Seconds, [int]$remainingAfterFuture)
+        }.GetNewClosure()
+        $completeComparisonOperation = {
+            param([string]$Name)
+            $operationState.Stage = 'ComparisonDeadline'
+            $mustRemain = $comparisonState.FutureReservedSeconds + $comparisonBudget.CleanupMarginSeconds
+            if (($deadline - [datetimeoffset](& $OperationSet.Clock)).TotalSeconds -lt $mustRemain) {
+                throw "Comparison operation '$Name' consumed time reserved for later work."
+            }
+        }.GetNewClosure()
+
+        foreach ($worker in @($workers)) {
+            if ($null -eq $outcome) {
+                $stopBudget = & $beginComparisonOperation 'OptimizedWorkerCleanup'
+                & $OperationSet.StopWorker $worker $stopBudget
+                & $completeComparisonOperation 'OptimizedWorkerCleanup'
+            }
+            else {
+                & $OperationSet.StopWorker $worker 1
+            }
+        }
         $workers.Clear()
 
-        if ($null -eq $outcome -and -not $timeout) { & $assertFrozenFingerprint }
+        if ($null -eq $outcome) {
+            $fingerprintBudget = & $beginComparisonOperation 'CurrentFingerprint'
+            $actualFingerprint = & $invokeBoundedSample 'Optimized' 'Fingerprint' $null $null $fingerprintBudget
+            if ($null -eq $actualFingerprint -or
+                -not (Test-WorkshopFingerprintMatch -Expected $runtimeState.Preflight -Actual $actualFingerprint)) {
+                throw 'Comparison rejected because configuration or data drift was detected.'
+            }
+            & $completeComparisonOperation 'CurrentFingerprint'
+        }
 
         if ($null -eq $outcome) {
             $terminalPhase = 'Comparison'
@@ -2287,10 +2426,10 @@ function Invoke-WorkshopExperiment {
                 $trialPhase = if ($sequence[$index] -eq 'A') { 'Baseline' } else { 'Optimized' }
                 $slot = [math]::Floor($index / 2) + 1
                 $entry = $schedule[$slot - 1]
-                & $assertFrozenFingerprint
                 foreach ($position in @('Before','After')) {
                     if ($position -eq 'After') {
-                        $trial = & $invokeBoundedSample 'Comparison' 'Trial' $trialPhase $entry
+                        $trialBudget = & $beginComparisonOperation 'Trial'
+                        $trial = & $invokeBoundedSample 'Comparison' 'Trial' $trialPhase $entry $trialBudget
                         if ($null -eq $trial -or ([datetimeoffset] (& $OperationSet.Clock)) -ge $deadline) {
                             $outcome = 'Failed'
                             $timeout = $true
@@ -2300,6 +2439,7 @@ function Invoke-WorkshopExperiment {
                             [void](& $OperationSet.KillTagged $RunId)
                             break
                         }
+                        & $completeComparisonOperation 'Trial'
                         $trial | Add-Member NoteProperty TrialSequence ($index + 1) -Force
                         $trial | Add-Member NoteProperty ParameterSlot $slot -Force
                         $trial | Add-Member NoteProperty Phase $trialPhase -Force
@@ -2315,8 +2455,11 @@ function Invoke-WorkshopExperiment {
                         [void](& $OperationSet.KillTagged $RunId)
                         break
                     }
+                    $snapshotName = if ($position -eq 'Before') { 'PreTrialSnapshot' } else { 'PostTrialSnapshot' }
+                    $snapshotBudget = & $beginComparisonOperation $snapshotName
                     $safetySample = & $recordSample `
-                        (& $invokeBoundedSample $trialPhase 'Memory' $null $null) $safetyNow
+                        (& $invokeBoundedSample $trialPhase 'Memory' $null $null $snapshotBudget) $safetyNow
+                    & $completeComparisonOperation $snapshotName
                     $safetyNow = [datetimeoffset](& $OperationSet.Clock)
                     if ($safetyNow -ge $deadline) {
                         $outcome = 'Failed'
@@ -2347,10 +2490,17 @@ function Invoke-WorkshopExperiment {
                     }
                 }
                 if ($null -ne $outcome) { break }
-                & $assertFrozenFingerprint
             }
             if ($null -eq $outcome -and $trials.Count -ne 12) { $outcome = 'Failed' }
             if ($null -eq $outcome) {
+                $finalFingerprintBudget = & $beginComparisonOperation 'FinalFingerprint'
+                $finalFingerprint = & $invokeBoundedSample 'Optimized' 'Fingerprint' $null $null $finalFingerprintBudget
+                if ($null -eq $finalFingerprint -or
+                    -not (Test-WorkshopFingerprintMatch -Expected $runtimeState.Preflight -Actual $finalFingerprint)) {
+                    throw 'Comparison rejected because configuration or data drift was detected.'
+                }
+                & $completeComparisonOperation 'FinalFingerprint'
+                [void](& $beginComparisonOperation 'CorrectnessLinkage')
                 $assessment = Get-WorkshopTrialAssessment -Trials $trials.ToArray()
                 $trials.Clear()
                 foreach ($trial in $assessment.Trials) { $trials.Add($trial) }
@@ -2361,6 +2511,7 @@ function Invoke-WorkshopExperiment {
                         -CorrectnessPassed $true -MaterialRegression $assessment.MaterialRegression `
                         -AdditionalMetricImproved $assessment.AdditionalMetricImproved
                 }
+                    & $completeComparisonOperation 'CorrectnessLinkage'
             }
         }
 
@@ -2374,8 +2525,24 @@ function Invoke-WorkshopExperiment {
             -SafetyReasons $safetyReasons -Timeout $timeout -Workers $workerCountStarted -Schedule $schedule `
             -MaximumDurationSeconds $MaximumDurationSeconds -SampleIntervalSeconds $SampleIntervalSeconds `
             -WorkerRampSeconds $WorkerRampSeconds -Failure $failure
-        & $OperationSet.Persist $result
-        & $OperationSet.Export $result
+        if ($comparisonState.Index -lt $comparisonOperations.Count -and
+            $comparisonOperations[$comparisonState.Index].Name -ceq 'Persistence') {
+            $persistenceBudget = & $beginComparisonOperation 'Persistence'
+            try {
+                $operationState.Stage = 'Persistence'
+                & $OperationSet.Persist $result $persistenceBudget
+                & $completeComparisonOperation 'Persistence'
+            }
+            catch {
+                $result = $null
+                $operationState.Stage = 'Persistence'
+                throw
+            }
+        }
+        else {
+            & $OperationSet.Persist $result 5
+        }
+        & $OperationSet.Export $result 5
         return $result
     }
     catch {
@@ -2395,10 +2562,19 @@ function Invoke-WorkshopExperiment {
                     'Preflight' { 'PREFLIGHT_FAILED' }
                     'InitializePersistence' { 'PERSISTENCE_INITIALIZATION_FAILED' }
                     'StartWorker' { 'WORKER_START_FAILED' }
+                    'Persistence' { 'PERSISTENCE_FAILED' }
+                    'ComparisonDeadline' { 'GLOBAL_DEADLINE_BEFORE_COMPARISON_COMPLETE' }
+                    'PhaseDeadline' { 'GLOBAL_DEADLINE_BEFORE_COMPARISON_COMPLETE' }
                     default { 'WORKSHOP_OPERATION_FAILED' }
                 }
+                $failureStage = if ($operationState.Stage -in @('ComparisonDeadline','PhaseDeadline')) {
+                    'GlobalDeadlineBeforeComparisonComplete'
+                }
+                else {
+                    $operationState.Stage
+                }
                 $failure = ConvertTo-WorkshopFailureEvidence -Code $failureCode `
-                    -Stage $operationState.Stage -Message $originalText `
+                    -Stage $failureStage -Message $originalText `
                     -StartupFailure ($samples.Count -eq 0)
                 if ($null -eq $preflight -or
                     ($samples.Count -eq 0 -and $operationState.Stage -in @('OpenConnection','CaptureEnvironment','Preflight','InitializePersistence'))) {
@@ -2413,7 +2589,8 @@ function Invoke-WorkshopExperiment {
                         -Samples $samples.ToArray() -RequestSamples $requestSamples.ToArray() -Trials $trials.ToArray() `
                         -StartedAtUtc $start -CompletedAtUtc $completedAt `
                         -ManualStopRequested $false -SafetyStopTriggered $false -SafetyReasons @() `
-                        -Timeout $false -Workers $workerCountStarted -Schedule $schedule `
+                        -Timeout ($operationState.Stage -in @('ComparisonDeadline','PhaseDeadline')) `
+                        -Workers $workerCountStarted -Schedule $schedule `
                         -MaximumDurationSeconds $MaximumDurationSeconds -SampleIntervalSeconds $SampleIntervalSeconds `
                         -WorkerRampSeconds $WorkerRampSeconds -Failure $failure
                 }
@@ -2476,10 +2653,9 @@ function Invoke-WorkshopExperiment {
     }
     finally {
         foreach ($worker in @($workers)) {
-            try { & $OperationSet.StopWorker $worker } catch { Write-Verbose 'Worker stop failed during cleanup.' }
-            try { if ($worker -is [System.IDisposable] -or $worker.psobject.Methods['Dispose']) { $worker.Dispose() } } catch { Write-Verbose 'Worker disposal failed during cleanup.' }
+            try { & $OperationSet.StopWorker $worker 1 } catch { Write-Verbose 'Worker stop failed during cleanup.' }
         }
-        if ($workers.Count -gt 0) { [void] (& $OperationSet.KillTagged $RunId) }
+        if ($workers.Count -gt 0) { [void] (& $OperationSet.KillTagged $RunId 5) }
     }
 }
 
@@ -2573,6 +2749,23 @@ function Invoke-WorkshopStartup {
 
     $startedAt = [datetimeoffset]::UtcNow
     try {
+        [void](Get-WorkshopComparisonBudget -MaximumDurationSeconds $MaximumDurationSeconds `
+            -CommandTimeoutSeconds $CommandTimeoutSeconds `
+            -SampleIntervalSeconds $SampleIntervalSeconds -MaximumWorkers $MaximumWorkers)
+    }
+    catch {
+        $completedAt = [datetimeoffset]::UtcNow
+        $failure = ConvertTo-WorkshopFailureEvidence -Code 'COMPARISON_BUDGET_INSUFFICIENT' `
+            -Stage 'ComparisonBudgetValidation' -Message $_.Exception.Message -StartupFailure $true
+        $result = Build-WorkshopStartupFailureResult -RunId $RunId -Failure $failure `
+            -StartedAtUtc $startedAt -CompletedAtUtc $completedAt -MaximumWorkers $MaximumWorkers `
+            -MaximumDurationSeconds $MaximumDurationSeconds -SampleIntervalSeconds $SampleIntervalSeconds `
+            -WorkerRampSeconds $WorkerRampSeconds
+        Export-WorkshopEvidenceFile -RunId $RunId.ToString('D') -Evidence $result.Evidence `
+            -RepositoryRoot $RepositoryRoot -SemanticValidator $SemanticValidator -Confirm:$false | Out-Null
+        return $result
+    }
+    try {
         if ($null -eq $OperationFactory) {
             $operationSet = Get-WorkshopSqlOperationSet -Server $Server -Database $Database `
                 -Credential $Credential -HostNameInCertificate $HostNameInCertificate
@@ -2637,9 +2830,23 @@ function Export-WorkshopEvidenceFile {
         [Parameter(Mandatory)][string] $RepositoryRoot,
         [Parameter()][scriptblock] $SemanticValidator,
         [Parameter()][switch] $AllowReplaceCompletedRun,
+        [Parameter()][ValidateRange(1, 60)][int] $TimeoutSeconds = 30,
+        [Parameter(DontShow)][scriptblock] $Clock = { [datetimeoffset]::UtcNow },
         [Parameter(DontShow)][System.Collections.IDictionary] $FileOperations
     )
 
+    $exportDeadline = ([datetimeoffset](& $Clock)).AddSeconds($TimeoutSeconds)
+    $assertExportDeadline = {
+        if ([datetimeoffset](& $Clock) -gt $exportDeadline) {
+            throw 'The evidence export deadline elapsed.'
+        }
+    }.GetNewClosure()
+    $getExportRemaining = {
+        $remaining = $exportDeadline - [datetimeoffset](& $Clock)
+        if ($remaining -le [TimeSpan]::Zero) { throw 'The evidence export deadline elapsed.' }
+        return $remaining
+    }.GetNewClosure()
+    & $assertExportDeadline
     $parsedRunId = [guid]::Empty
     if (-not [guid]::TryParseExact($RunId, 'D', [ref] $parsedRunId) -or $parsedRunId.ToString('D') -cne $RunId) {
         throw 'RunId must be a lowercase canonical GUID.'
@@ -2661,8 +2868,26 @@ function Export-WorkshopEvidenceFile {
         MoveDirectory = { param($Source, $Target) [IO.Directory]::Move($Source, $Target) }
         RemoveDirectory = { param($Path) if (Test-Path -LiteralPath $Path) { Remove-Item -LiteralPath $Path -Recurse -Force } }
         ReadText = { param($Path) Get-Content -LiteralPath $Path -Raw }
-        WriteText = { param($Path, $Text, $Encoding) [IO.File]::WriteAllText($Path, $Text, $Encoding) }
-        WriteLines = { param($Path, $Lines, $Encoding) [IO.File]::WriteAllLines($Path, [string[]] $Lines, $Encoding) }
+        WriteText = {
+            param($Path, $Text, $Encoding)
+            $cancellation = [Threading.CancellationTokenSource]::new((& $getExportRemaining))
+            try {
+                [void][IO.File]::WriteAllTextAsync(
+                    $Path, $Text, $Encoding, $cancellation.Token
+                ).GetAwaiter().GetResult()
+            }
+            finally { $cancellation.Dispose() }
+        }.GetNewClosure()
+        WriteLines = {
+            param($Path, $Lines, $Encoding)
+            $cancellation = [Threading.CancellationTokenSource]::new((& $getExportRemaining))
+            try {
+                [void][IO.File]::WriteAllLinesAsync(
+                    $Path, [string[]]$Lines, $Encoding, $cancellation.Token
+                ).GetAwaiter().GetResult()
+            }
+            finally { $cancellation.Dispose() }
+        }.GetNewClosure()
     }
     if ($null -eq $FileOperations) { $FileOperations = @{} }
     foreach ($name in $defaultFileOperations.Keys) {
@@ -2684,6 +2909,7 @@ function Export-WorkshopEvidenceFile {
         }
     }.GetNewClosure()
     & $FileOperations.CreateDirectory $runsRoot
+    & $assertExportDeadline
     & $assertNoReparseAncestor $runsRoot
     & $assertNoReparseAncestor $directory
     $jsonPath = Join-Path $directory 'evidence.json'
@@ -2705,18 +2931,44 @@ function Export-WorkshopEvidenceFile {
     $jsonTemp = Join-Path $stagingDirectory 'evidence.json'
     $csvTemp = Join-Path $stagingDirectory 'samples.csv'
     $backupCreated = $false
+    $python = if ($SemanticValidator) { $null } else { Join-Path $RepositoryRoot '.venv/Scripts/python.exe' }
+    $validator = Join-Path $RepositoryRoot 'evidence/validate_evidence.py'
+    $schema = Join-Path $RepositoryRoot 'evidence/evidence-schema.json'
+    $invokePythonValidator = {
+        param([string]$EvidencePath, [string]$FailureMessage)
+        $remaining = & $getExportRemaining
+        $startInfo = [Diagnostics.ProcessStartInfo]::new()
+        $startInfo.FileName = $python
+        $startInfo.UseShellExecute = $false
+        $startInfo.CreateNoWindow = $true
+        [void]$startInfo.ArgumentList.Add($validator)
+        [void]$startInfo.ArgumentList.Add('--schema')
+        [void]$startInfo.ArgumentList.Add($schema)
+        [void]$startInfo.ArgumentList.Add($EvidencePath)
+        $process = [Diagnostics.Process]::new()
+        $process.StartInfo = $startInfo
+        try {
+            if (-not $process.Start()) { throw $FailureMessage }
+            $waitMilliseconds = [math]::Max(1, [int][math]::Floor($remaining.TotalMilliseconds))
+            if (-not $process.WaitForExit($waitMilliseconds)) {
+                $process.Kill($true)
+                [void]$process.WaitForExit(1000)
+                throw 'The evidence export deadline elapsed during semantic validation.'
+            }
+            if ($process.ExitCode -ne 0) { throw $FailureMessage }
+        }
+        finally { $process.Dispose() }
+    }.GetNewClosure()
     try {
         & $FileOperations.WriteText $jsonTemp (ConvertTo-Json $Evidence -Depth 30) $utf8
+        & $assertExportDeadline
         if ($SemanticValidator) {
             if (-not (& $SemanticValidator $jsonTemp)) { throw 'Canonical semantic evidence validation failed.' }
         }
         else {
-            $python = Join-Path $RepositoryRoot '.venv/Scripts/python.exe'
-            $validator = Join-Path $RepositoryRoot 'evidence/validate_evidence.py'
-            $schema = Join-Path $RepositoryRoot 'evidence/evidence-schema.json'
-            & $python $validator --schema $schema $jsonTemp | Out-Null
-            if ($LASTEXITCODE -ne 0) { throw 'Canonical semantic evidence validation failed.' }
+            & $invokePythonValidator $jsonTemp 'Canonical semantic evidence validation failed.'
         }
+        & $assertExportDeadline
         $csvRows = @(
             @((Get-ObjectValue $Evidence samples) | Where-Object { $null -ne $_ }) | ForEach-Object {
                 $row = [ordered]@{ recordType = 'Sample' }
@@ -2747,6 +2999,7 @@ function Export-WorkshopEvidenceFile {
         })
         $csv = if ($projectedRows.Count -eq 0) { @('recordType') } else { @($projectedRows | ConvertTo-Csv -NoTypeInformation) }
         & $FileOperations.WriteLines $csvTemp $csv $utf8
+        & $assertExportDeadline
         & $assertNoReparseAncestor $stagingDirectory
         & $assertNoReparseAncestor $backupDirectory
         & $assertNoReparseAncestor $directory
@@ -2755,18 +3008,21 @@ function Export-WorkshopEvidenceFile {
             & $assertNoReparseAncestor $directory
             & $assertNoReparseAncestor $backupDirectory
             & $FileOperations.MoveDirectory $directory $backupDirectory
+            & $assertExportDeadline
             $backupCreated = (& $FileOperations.TestPath $backupDirectory) -and -not (& $FileOperations.TestPath $directory)
         }
         & $assertNoReparseAncestor $stagingDirectory
         & $assertNoReparseAncestor $directory
         & $FileOperations.MoveDirectory $stagingDirectory $directory
+        & $assertExportDeadline
         if ($SemanticValidator) {
             if (-not (& $SemanticValidator $jsonPath)) { throw 'Canonical semantic evidence validation failed after promotion.' }
         }
         else {
-            & $python $validator --schema $schema $jsonPath | Out-Null
-            if ($LASTEXITCODE -ne 0) { throw 'Canonical semantic evidence validation failed after promotion.' }
+            & $invokePythonValidator $jsonPath `
+                'Canonical semantic evidence validation failed after promotion.'
         }
+        & $assertExportDeadline
         if ($backupCreated) { & $FileOperations.RemoveDirectory $backupDirectory; $backupCreated = $false }
     }
     catch {
@@ -2946,7 +3202,14 @@ function Get-WorkshopSqlOperationSet {
     Write-Verbose "Preparing SQL operations for database '$Database' and credential user '$($Credential.UserName)'."
 
     $invokeTable = {
-        param([string] $ApplicationName, [string] $CommandText, [hashtable] $Parameters, [scriptblock] $ReaderParser, [int] $CommandTimeoutSeconds = 60)
+        param(
+            [string] $ApplicationName,
+            [string] $CommandText,
+            [hashtable] $Parameters,
+            [scriptblock] $ReaderParser,
+            [int] $CommandTimeoutSeconds = 60,
+            [datetimeoffset] $OperationDeadline = [datetimeoffset]::MaxValue
+        )
         $builder = Get-WorkshopSqlConnectionBuilder -Provider $provider -Server $Server -Database $Database `
             -ApplicationName $ApplicationName -UserName $Credential.UserName `
             -HostNameInCertificate $HostNameInCertificate
@@ -2960,12 +3223,19 @@ function Get-WorkshopSqlOperationSet {
             $builder.Password = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
             $connection = Get-WorkshopSqlConnection -ConnectionType $provider.ConnectionType `
                 -ConnectionString $builder.ConnectionString
-            $cancellation = [Threading.CancellationTokenSource]::new(
-                [TimeSpan]::FromSeconds([math]::Max(1, $CommandTimeoutSeconds)))
+            $timeout = [TimeSpan]::FromSeconds([math]::Max(1, $CommandTimeoutSeconds))
+            if ($OperationDeadline -ne [datetimeoffset]::MaxValue) {
+                $deadlineRemaining = $OperationDeadline - [datetimeoffset]::UtcNow
+                if ($deadlineRemaining -le [TimeSpan]::Zero) {
+                    throw 'The bounded SQL operation deadline elapsed before execution.'
+                }
+                if ($deadlineRemaining -lt $timeout) { $timeout = $deadlineRemaining }
+            }
+            $cancellation = [Threading.CancellationTokenSource]::new($timeout)
             $connection.OpenAsync($cancellation.Token).GetAwaiter().GetResult()
             $command = $connection.CreateCommand()
             $command.CommandText = $CommandText
-            $command.CommandTimeout = [math]::Max(1, $CommandTimeoutSeconds)
+            $command.CommandTimeout = [math]::Max(1, [int][math]::Ceiling($timeout.TotalSeconds))
             foreach ($name in @($Parameters.Keys)) {
                 $specification = $Parameters[$name]
                 $parameter = $command.Parameters.Add($name, $specification.Type)
@@ -3323,6 +3593,24 @@ OUTER APPLY
             else { 'Worker failed while its phase was active.' }
             return [pscustomobject]@{ Healthy = $false; Reason = $reason; Terminal = $true }
         }
+        $handle | Add-Member ScriptMethod StopWithin {
+            param([int] $TimeoutSeconds)
+            if ($this.Disposed) { return }
+            if ($TimeoutSeconds -lt 1) { throw 'Worker cleanup requires a positive timeout.' }
+            if (-not $this.AsyncResult.IsCompleted) {
+                $stopResult = $this.PowerShell.BeginStop($null, $null)
+                if (-not $stopResult.AsyncWaitHandle.WaitOne([TimeSpan]::FromSeconds($TimeoutSeconds))) {
+                    throw 'Worker cancellation did not complete within its bounded cleanup budget.'
+                }
+                $this.PowerShell.EndStop($stopResult)
+            }
+            if (-not $this.EndInvoked) {
+                try { [void] $this.PowerShell.EndInvoke($this.AsyncResult) }
+                catch { Write-Verbose 'Worker ended after bounded cancellation.' }
+                $this.EndInvoked = $true
+            }
+            $this.Dispose()
+        }
         $handle | Add-Member ScriptMethod Dispose {
             if ($this.Disposed) { return }
             try {
@@ -3355,18 +3643,35 @@ OUTER APPLY
     }
 
     $sample = {
-        param([guid] $RunId, [string] $Phase, [string] $Kind, [string] $TrialPhase, [string] $ScheduleEntry, [int] $RemainingSeconds)
+        param(
+            [guid] $RunId,
+            [string] $Phase,
+            [string] $Kind,
+            [string] $TrialPhase,
+            [string] $ScheduleEntry,
+            [int] $RemainingSeconds,
+            [datetimeoffset] $OperationDeadline = [datetimeoffset]::MaxValue
+        )
         $commandTimeout = [math]::Max(1, $RemainingSeconds)
-        if ($Kind -eq 'Fingerprint') { return (& $getPreflight $commandTimeout) }
+        $timeoutDeadline = [datetimeoffset]::UtcNow.AddSeconds($commandTimeout)
+        $operationDeadline = @($OperationDeadline, $timeoutDeadline | Sort-Object)[0]
+        if ($Kind -eq 'Fingerprint') {
+            $rows = @(& $invokeTable 'MCP-SQL-Workshop-Controller-Preflight' $preflightSql @{} $null `
+                $commandTimeout $operationDeadline)
+            if ($rows.Count -ne 1) { throw 'Workshop SQL fingerprint did not return exactly one row.' }
+            return $rows[0]
+        }
         if ($Kind -eq 'Memory' -or $Kind -eq 'Drain') {
-            $rows = @(& $invokeTable 'MCP-SQL-Workshop-Controller-Sample' 'EXEC lab.usp_GetMemorySnapshot;' @{} $null $commandTimeout)
+            $rows = @(& $invokeTable 'MCP-SQL-Workshop-Controller-Sample' `
+                'EXEC lab.usp_GetMemorySnapshot;' @{} $null $commandTimeout $operationDeadline)
             if ($rows.Count -ne 1) { throw 'Memory snapshot did not return exactly one row.' }
             $row = $rows[0]
             $totalHost = [decimal] $row.HostAvailableMemoryKB + [decimal] $row.HostUsedMemoryKB
             $requestRows = if ($Kind -eq 'Memory') {
                 @(& $invokeTable 'MCP-SQL-Workshop-Controller-Sample' `
                     'EXEC lab.usp_GetActiveWorkshopGrants @Top=100, @RunID=@RunID;' `
-                    @{ '@RunID' = @{ Type = [Data.SqlDbType]::UniqueIdentifier; Value = $RunId } } $null $commandTimeout)
+                    @{ '@RunID' = @{ Type = [Data.SqlDbType]::UniqueIdentifier; Value = $RunId } } `
+                    $null $commandTimeout $operationDeadline)
             }
             else { @() }
             return [pscustomobject]@{
@@ -3497,27 +3802,38 @@ WHERE s.session_id=@@SPID;
                 '@ValidationBatchID' = @{ Type = [Data.SqlDbType]::UniqueIdentifier; Value = [guid]$preflightSnapshot.Value.ValidationBatchID }
             }
             $applicationName = Get-WorkshopApplicationName -RunId $RunId -Phase $TrialPhase -Worker 1
-            $row = & $invokeTable $applicationName $sql $parameters { param($Reader) ConvertFrom-WorkshopTrialReader $Reader } $commandTimeout
+            $row = & $invokeTable $applicationName $sql $parameters `
+                { param($Reader) ConvertFrom-WorkshopTrialReader $Reader } `
+                $commandTimeout $operationDeadline
             $row | Add-Member NoteProperty Phase $TrialPhase -PassThru
         }
     }.GetNewClosure()
 
     $stopWorker = {
-        param($Handle)
-        if ($null -ne $Handle -and $Handle.psobject.Methods['Dispose']) { $Handle.Dispose() }
+        param($Handle, [int] $RemainingSeconds = 1)
+        if ($RemainingSeconds -lt 1) { throw 'Worker cleanup requires a positive timeout.' }
+        if ($null -ne $Handle -and $Handle.psobject.Methods['StopWithin']) {
+            $Handle.StopWithin($RemainingSeconds)
+        }
+        elseif ($null -ne $Handle -and $Handle.psobject.Methods['Dispose']) {
+            $Handle.Dispose()
+        }
     }
 
     $getKillPlan = ${function:Get-WorkshopKillPlan}
     $killTagged = {
-        param([guid] $RunId)
+        param([guid] $RunId, [int] $RemainingSeconds = 5)
+        $operationDeadline = [datetimeoffset]::UtcNow.AddSeconds([math]::Max(1, $RemainingSeconds))
         $sessionSql = "SELECT CONVERT(int,s.session_id) AS SessionId, CONVERT(bit,s.is_user_process) AS IsUserProcess, CONVERT(bit,CASE WHEN r.session_id IS NOT NULL THEN 1 ELSE 0 END) AS IsActive, CONVERT(nvarchar(128),s.program_name) AS ProgramName, CONVERT(varbinary(128),s.context_info) AS ContextInfo, CONVERT(int,@@SPID) AS CurrentSessionId FROM sys.dm_exec_sessions AS s LEFT JOIN sys.dm_exec_requests AS r ON r.session_id=s.session_id WHERE s.program_name LIKE @Prefix;"
         $parameters = @{ '@Prefix' = @{ Type = [Data.SqlDbType]::NVarChar; Size = 128; Value = "MCP-SQL-Workshop-$($RunId.ToString('D'))-%" } }
-        $sessions = @(& $invokeTable 'MCP-SQL-Workshop-Controller-Stop' $sessionSql $parameters)
+        $sessions = @(& $invokeTable 'MCP-SQL-Workshop-Controller-Stop' $sessionSql $parameters `
+            $null $RemainingSeconds $operationDeadline)
         if ($sessions.Count -eq 0) { return @() }
         $plan = @(& $getKillPlan -RunId $RunId -Sessions $sessions -CurrentSessionId $sessions[0].CurrentSessionId)
         foreach ($entry in $plan) {
             # Persist the exact captured row before executing a KILL generated solely from a validated integer SPID.
-            [void] (& $invokeTable 'MCP-SQL-Workshop-Controller-Stop' $entry.Statement @{})
+            [void] (& $invokeTable 'MCP-SQL-Workshop-Controller-Stop' $entry.Statement @{} `
+                $null $RemainingSeconds $operationDeadline)
         }
         return @($plan.SessionId)
     }.GetNewClosure()
@@ -3525,7 +3841,8 @@ WHERE s.session_id=@@SPID;
     $getSha256ForPersistence = ${function:Get-Sha256}
     $getObjectEntryForPersistence = ${function:Get-ObjectEntry}
     $persist = {
-        param($Record)
+        param($Record, [int] $RemainingSeconds = 5)
+        $operationDeadline = [datetimeoffset]::UtcNow.AddSeconds([math]::Max(1, $RemainingSeconds))
         $settingsJson = if ($null -eq $Record.FrozenSettingsJson) { '{}' } else { [string]$Record.FrozenSettingsJson }
         $settingsHash = if ($null -eq $Record.FrozenSettingsHash) { & $getSha256ForPersistence $settingsJson } else { [string]$Record.FrozenSettingsHash }
         $hashBytes = [Convert]::FromHexString($settingsHash)
@@ -3769,7 +4086,7 @@ END CATCH;
             '@ExpectedSampleCount' = @{ Type = [Data.SqlDbType]::Int; Value = @($Record.Samples).Count }
             '@ExpectedRequestSampleCount' = @{ Type = [Data.SqlDbType]::Int; Value = @($Record.RequestSamples).Count }
             '@ExpectedTrialCount' = @{ Type = [Data.SqlDbType]::Int; Value = @($Record.Trials).Count }
-        })
+        } $null $RemainingSeconds $operationDeadline)
         if ($rows.Count -ne 1 -or [int]$rows[0].InsertedSampleCount -ne @($Record.Samples).Count -or
             [int]$rows[0].InsertedRequestSampleCount -ne @($Record.RequestSamples).Count -or
             [int]$rows[0].InsertedTrialCount -ne @($Record.Trials).Count) {
@@ -3816,7 +4133,18 @@ SELECT CONVERT(bit, CASE WHEN
         Persist = $persist
         Delay = { param([int] $Seconds) [Threading.Tasks.Task]::Delay([TimeSpan]::FromSeconds($Seconds)).GetAwaiter().GetResult() }
         Clock = { [datetimeoffset]::UtcNow }
-        Export = { param($Result) if ($Result.psobject.Properties['Evidence']) { Export-WorkshopEvidenceFile -RunId $Result.RunId.ToString('D') -Evidence $Result.Evidence -RepositoryRoot (Split-Path -Parent $PSScriptRoot) -Confirm:$false } else { Write-Verbose "Run $($Result.RunId) persisted; canonical evidence is exported after evidence conversion." } }
+        Export = {
+            param($Result, [int] $RemainingSeconds = 5)
+            if ($RemainingSeconds -lt 1) { throw 'Evidence export requires a positive timeout.' }
+            if ($Result.psobject.Properties['Evidence']) {
+                Export-WorkshopEvidenceFile -RunId $Result.RunId.ToString('D') `
+                    -Evidence $Result.Evidence -RepositoryRoot (Split-Path -Parent $PSScriptRoot) `
+                    -TimeoutSeconds $RemainingSeconds -Confirm:$false
+            }
+            else {
+                Write-Verbose "Run $($Result.RunId) persisted; canonical evidence is exported after evidence conversion."
+            }
+        }
     }
 }
 
@@ -3830,6 +4158,7 @@ Export-ModuleMember -Function @(
     'Get-WorkshopApplicationName',
     'Get-WorkshopParameterSchedule',
     'Get-WorkshopTrialSequence',
+    'Get-WorkshopComparisonBudget',
     'ConvertFrom-WorkshopTrialReader',
     'Get-WorkshopTrialAssessment',
     'Test-WorkshopFingerprintMatch',
