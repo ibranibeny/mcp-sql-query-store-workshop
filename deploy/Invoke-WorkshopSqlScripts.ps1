@@ -226,11 +226,13 @@ if ($DatabaseMasterKeyPassword.Length -eq 0 -or $McpReaderPassword.Length -eq 0)
     throw 'Database master key and MCP reader passwords must be nonempty SecureString values.'
 }
 
+$clientNamespace = 'Microsoft.Data.SqlClient'
 try {
     Add-Type -AssemblyName Microsoft.Data.SqlClient -ErrorAction Stop
 }
 catch {
-    throw 'Microsoft.Data.SqlClient is required. Install it before running the workshop SQL setup.'
+    $clientNamespace = 'System.Data.SqlClient'
+    Write-Warning 'Microsoft.Data.SqlClient is unavailable; using the built-in System.Data.SqlClient fallback.'
 }
 
 $builder = $null
@@ -242,7 +244,8 @@ try {
         try {
             $pointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($SqlConnectionString)
             $plainConnectionString = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($pointer)
-            $builder = [Microsoft.Data.SqlClient.SqlConnectionStringBuilder]::new($plainConnectionString)
+            $builderType = "$clientNamespace.SqlConnectionStringBuilder"
+            $builder = New-Object -TypeName $builderType -ArgumentList $plainConnectionString
             $plainConnectionString = $null
         }
         finally {
@@ -256,14 +259,17 @@ try {
         if ($null -eq $Credential -or [string]::IsNullOrWhiteSpace($Credential.UserName) -or $Credential.Password.Length -eq 0) {
             throw 'A nonempty SQL credential is required.'
         }
-        $builder = [Microsoft.Data.SqlClient.SqlConnectionStringBuilder]::new()
+        $builderType = "$clientNamespace.SqlConnectionStringBuilder"
+        $builder = New-Object -TypeName $builderType
         $builder.DataSource = $ServerInstance
         $builder.InitialCatalog = 'master'
         $builder.UserID = $Credential.UserName
         $builder.IntegratedSecurity = $false
         $builder.Encrypt = $true
         $builder.TrustServerCertificate = $false
-        $builder.HostNameInCertificate = $ExpectedServerName
+        if ($clientNamespace -eq 'Microsoft.Data.SqlClient') {
+            $builder.HostNameInCertificate = $ExpectedServerName
+        }
         $builder.ApplicationName = 'MCP-SQL-Workshop-Setup'
         $passwordPointer = [IntPtr]::Zero
         $plainPassword = $null
@@ -284,15 +290,24 @@ try {
     if (-not $builder.Encrypt -or $builder.TrustServerCertificate) {
         throw 'The SQL connection must specify Encrypt=True and TrustServerCertificate=False.'
     }
-    if ([string]::IsNullOrWhiteSpace($builder.HostNameInCertificate)) {
-        $builder.HostNameInCertificate = $ExpectedServerName
+    if ($clientNamespace -eq 'Microsoft.Data.SqlClient') {
+        if ([string]::IsNullOrWhiteSpace($builder.HostNameInCertificate)) {
+            $builder.HostNameInCertificate = $ExpectedServerName
+        }
+        if ($builder.HostNameInCertificate -cne $ExpectedServerName) {
+            throw 'HostNameInCertificate must exactly match ExpectedServerName.'
+        }
     }
-    if ($builder.HostNameInCertificate -cne $ExpectedServerName) {
-        throw 'HostNameInCertificate must exactly match ExpectedServerName.'
+    else {
+        $serverName = ([string]$builder.DataSource -split ',')[0].Trim()
+        if ($serverName -cne $ExpectedServerName) {
+            throw 'System.Data.SqlClient fallback requires DataSource to exactly match ExpectedServerName for certificate DNS validation.'
+        }
     }
     $builder.InitialCatalog = 'master'
 
-    $connection = [Microsoft.Data.SqlClient.SqlConnection]::new($builder.ConnectionString)
+    $connectionType = "$clientNamespace.SqlConnection"
+    $connection = New-Object -TypeName $connectionType -ArgumentList $builder.ConnectionString
     $builder.Clear()
     $builder = $null
     $connection.Open()
@@ -307,6 +322,10 @@ try {
     Write-WorkshopSessionContext -Connection $connection -Key 'BackupPath' -Value $BackupPath
     Write-WorkshopSessionContext -Connection $connection -Key 'DataPath' -Value $DataPath
     Write-WorkshopSessionContext -Connection $connection -Key 'LogPath' -Value $LogPath
+
+    $escapedBackupPath = $BackupPath.Replace("'", "''")
+    Invoke-WorkshopSqlCommand -Connection $connection `
+        -CommandText "RESTORE VERIFYONLY FROM DISK = N'$escapedBackupPath' WITH CHECKSUM;"
 
     foreach ($scriptName in $scriptNames) {
         $sqlText = Get-Content -LiteralPath (Join-Path $SqlDirectory $scriptName) -Raw -Encoding UTF8

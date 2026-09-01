@@ -23,6 +23,10 @@
         'Test-WorkshopNetworkBoundary'
         'Test-WorkshopVmBoundary'
         'Format-WorkshopPlanCard'
+        'Initialize-WorkshopSqlVm'
+        'Initialize-WorkshopAdminVm'
+        'Test-WorkshopReadiness'
+        'Export-WorkshopDeploymentEvidence'
     )
     CmdletsToExport = @()
     VariablesToExport = @()

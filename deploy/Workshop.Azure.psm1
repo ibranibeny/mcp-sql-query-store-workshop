@@ -3041,6 +3041,344 @@ function Remove-WorkshopEnvironment {
     }
 }
 
+function ConvertFrom-WorkshopSecureString {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][Security.SecureString] $Value)
+
+    $pointer = [IntPtr]::Zero
+    $plainText = $null
+    try {
+        $pointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($Value)
+        $plainText = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($pointer)
+        return $plainText
+    }
+    finally {
+        $plainText = $null
+        if ($pointer -ne [IntPtr]::Zero) {
+            [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($pointer)
+        }
+    }
+}
+
+function Get-WorkshopBootstrapArchiveUri {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][ValidatePattern('^https://github\.com/[^/]+/[^/]+(?:\.git)?$')][string] $RepositoryUrl,
+        [Parameter(Mandatory)][ValidatePattern('^[0-9a-f]{40}$')][string] $RepositoryCommit
+    )
+
+    $base = $RepositoryUrl -replace '\.git$', ''
+    "$base/archive/$RepositoryCommit.zip"
+}
+
+function Get-DefaultWorkshopBootstrapOperationSet {
+    [CmdletBinding()]
+    param()
+
+    @{
+        GetRecipientCertificate = {
+            param($VmName, $ResourceGroupName)
+            $command = @'
+$ErrorActionPreference = 'Stop'
+$subject = 'CN=McpSqlWorkshopBootstrapPayload'
+$certificate = Get-ChildItem Cert:\LocalMachine\My | Where-Object {
+    $_.Subject -ceq $subject -and $_.HasPrivateKey -and $_.NotAfter -gt (Get-Date).AddDays(1)
+} | Sort-Object NotAfter -Descending | Select-Object -First 1
+if ($null -eq $certificate) {
+    $certificate = New-SelfSignedCertificate -Type DocumentEncryptionCert -Subject $subject `
+        -CertStoreLocation Cert:\LocalMachine\My -KeyExportPolicy NonExportable `
+        -NotAfter (Get-Date).AddDays(7)
+}
+$path = Join-Path $env:TEMP 'mcp-workshop-bootstrap-public.cer'
+$null = Export-Certificate -Cert $certificate -FilePath $path -Force
+try { [Convert]::ToBase64String([IO.File]::ReadAllBytes($path)) }
+finally { Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue }
+'@
+            $result = Invoke-AzVMRunCommand -ResourceGroupName $ResourceGroupName -VMName $VmName `
+                -CommandId RunPowerShellScript -ScriptString $command -ErrorAction Stop
+            (@($result.Value | ForEach-Object Message) -join '').Trim()
+        }
+        ProtectPayload = {
+            param($RecipientCertificateBase64, $Payload)
+            $certificateBytes = [Convert]::FromBase64String($RecipientCertificateBase64)
+            $certificate = [Security.Cryptography.X509Certificates.X509Certificate2]::new($certificateBytes)
+            try {
+                $json = $Payload | ConvertTo-Json -Depth 12 -Compress
+                Protect-CmsMessage -To $certificate -Content $json
+            }
+            finally {
+                $json = $null
+                $certificate.Dispose()
+                [Array]::Clear($certificateBytes, 0, $certificateBytes.Length)
+            }
+        }
+        SetExtension = {
+            param($VmName, $ResourceGroupName, $Location, $ArchiveUri, $ProtectedEnvelope, $BootstrapScript, $RepositoryCommit)
+            $envelopeBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($ProtectedEnvelope))
+            $innerScript = @"
+`$ErrorActionPreference = 'Stop'
+`$root = 'C:\McpSqlWorkshop'
+`$archives = @(Get-ChildItem -LiteralPath (Get-Location) -Filter '*.zip' -File)
+if (`$archives.Count -ne 1) { throw 'Exactly one immutable repository archive is required.' }
+`$archive = `$archives[0].FullName
+`$repo = Join-Path `$root 'repo'
+New-Item -ItemType Directory -Path `$root -Force | Out-Null
+if (Test-Path `$repo) { Remove-Item `$repo -Recurse -Force }
+Expand-Archive -LiteralPath `$archive -DestinationPath `$root -Force
+`$expanded = Get-ChildItem `$root -Directory | Where-Object Name -Like '*-$RepositoryCommit' | Select-Object -First 1
+if (`$null -eq `$expanded) { throw 'Repository archive layout could not be verified.' }
+Move-Item -LiteralPath `$expanded.FullName -Destination `$repo
+`$payloadPath = Join-Path `$root 'protected-bootstrap.cms'
+[IO.File]::WriteAllBytes(`$payloadPath, [Convert]::FromBase64String('$envelopeBase64'))
+`$acl = [Security.AccessControl.FileSecurity]::new()
+`$acl.SetAccessRuleProtection(`$true, `$false)
+foreach (`$identity in @('BUILTIN\Administrators','NT AUTHORITY\SYSTEM')) { `$acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(`$identity,'FullControl','Allow')) }
+Set-Acl -LiteralPath `$payloadPath -AclObject `$acl
+& (Join-Path `$repo 'deploy\$BootstrapScript') -ProtectedPayloadPath `$payloadPath
+"@
+            $encodedCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($innerScript))
+            $publicSettings = @{ timestamp = [DateTime]::UtcNow.ToString('yyyyMMddHHmmss') }
+            $protectedSettings = @{
+                fileUris = @($ArchiveUri)
+                commandToExecute = "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand $encodedCommand"
+            }
+            Set-AzVMExtension -ResourceGroupName $ResourceGroupName -VMName $VmName -Location $Location `
+                -Name "McpSqlWorkshop-$BootstrapScript" -Publisher 'Microsoft.Compute' `
+                -ExtensionType 'CustomScriptExtension' -TypeHandlerVersion '1.10' `
+                -SettingString ($publicSettings | ConvertTo-Json -Compress) `
+                -ProtectedSettingString ($protectedSettings | ConvertTo-Json -Depth 6 -Compress) `
+                -ErrorAction Stop
+        }
+        GetExtension = {
+            param($VmName, $ResourceGroupName, $BootstrapScript)
+            Get-AzVMExtension -ResourceGroupName $ResourceGroupName -VMName $VmName `
+                -Name "McpSqlWorkshop-$BootstrapScript" -Status -ErrorAction Stop
+        }
+        ReadReadiness = {
+            param($VmName, $ResourceGroupName, $Path)
+            $command = "`$ErrorActionPreference='Stop'; Get-Content -LiteralPath '$($Path.Replace("'", "''"))' -Raw"
+            $result = Invoke-AzVMRunCommand -ResourceGroupName $ResourceGroupName -VMName $VmName `
+                -CommandId RunPowerShellScript -ScriptString $command -ErrorAction Stop
+            $text = @($result.Value | ForEach-Object Message) -join [Environment]::NewLine
+            $text | ConvertFrom-Json
+        }
+        ReadPublicCertificate = {
+            param($VmName, $ResourceGroupName, $Path)
+            $command = "`$ErrorActionPreference='Stop'; [Convert]::ToBase64String([IO.File]::ReadAllBytes('$($Path.Replace("'", "''"))'))"
+            $result = Invoke-AzVMRunCommand -ResourceGroupName $ResourceGroupName -VMName $VmName `
+                -CommandId RunPowerShellScript -ScriptString $command -ErrorAction Stop
+            (@($result.Value | ForEach-Object Message) -join '').Trim()
+        }
+    }
+}
+
+function Assert-WorkshopBootstrapOperationSet {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][hashtable] $Operations, [switch] $Admin)
+
+    $required = @('GetRecipientCertificate', 'ProtectPayload', 'SetExtension', 'GetExtension', 'ReadReadiness')
+    if ($Admin) { $required += 'ReadPublicCertificate' }
+    foreach ($name in $required) {
+        if (-not $Operations.ContainsKey($name) -or $Operations[$name] -isnot [scriptblock]) {
+            throw "Operations must provide scriptblock '$name'."
+        }
+    }
+}
+
+function Invoke-WorkshopBootstrapExtension {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][ValidateSet('Sql', 'Admin')][string] $Role,
+        [Parameter(Mandatory)][hashtable] $Config,
+        [Parameter(Mandatory)][string] $ArchiveUri,
+        [Parameter(Mandatory)][hashtable] $ProtectedPayload,
+        [Parameter(Mandatory)][hashtable] $Operations
+    )
+
+    $isSql = $Role -eq 'Sql'
+    $vm = if ($isSql) { $Config.SqlVm } else { $Config.AdminVm }
+    $scriptName = if ($isSql) { 'Initialize-SqlVm.ps1' } else { 'Initialize-AdminVm.ps1' }
+    $readinessPath = if ($isSql) {
+        'C:\McpSqlWorkshop\evidence\sql-vm-readiness.json'
+    }
+    else {
+        'C:\McpSqlWorkshop\evidence\admin-vm-readiness.json'
+    }
+    $recipientCertificate = & $Operations.GetRecipientCertificate $vm.Name $Config.ResourceGroupName
+    if ([string]::IsNullOrWhiteSpace([string]$recipientCertificate)) {
+        throw "$Role bootstrap payload recipient certificate was not returned."
+    }
+    $protectedEnvelope = & $Operations.ProtectPayload $recipientCertificate $ProtectedPayload
+    if ([string]::IsNullOrWhiteSpace([string]$protectedEnvelope)) {
+        throw "$Role bootstrap payload encryption did not return a CMS envelope."
+    }
+    $null = & $Operations.SetExtension $vm.Name $Config.ResourceGroupName $Config.Location `
+        $ArchiveUri $protectedEnvelope $scriptName $ProtectedPayload.RepositoryCommit
+    $protectedEnvelope = $null
+    $extension = & $Operations.GetExtension $vm.Name $Config.ResourceGroupName $scriptName
+    $status = [string] @($extension.Statuses | Select-Object -Last 1).Code
+    if ($status -notmatch '/succeeded$') {
+        throw "$Role bootstrap extension did not report a succeeded provisioning state."
+    }
+    $readiness = & $Operations.ReadReadiness $vm.Name $Config.ResourceGroupName $readinessPath
+    if ($null -eq $readiness -or $readiness.Completed -isnot [bool] -or -not $readiness.Completed) {
+        throw "$Role bootstrap readiness did not report Completed=true."
+    }
+    [pscustomobject][ordered]@{
+        Completed = $true
+        Checkpoint = @("$Role bootstrap extension succeeded", "$Role readiness positively read")
+        Readiness = $readiness
+    }
+}
+
+function Initialize-WorkshopSqlVm {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][hashtable] $Config,
+        [Parameter(Mandatory)][Security.SecureString] $DatabaseMasterKeyPassword,
+        [Parameter(Mandatory)][Security.SecureString] $McpReaderPassword,
+        [Parameter(Mandatory)][ValidatePattern('^https://github\.com/[^/]+/[^/]+(?:\.git)?$')][string] $RepositoryUrl,
+        [Parameter(Mandatory)][ValidatePattern('^[0-9a-f]{40}$')][string] $RepositoryCommit,
+        [hashtable] $Operations
+    )
+
+    if ($DatabaseMasterKeyPassword.Length -eq 0 -or $McpReaderPassword.Length -eq 0) {
+        throw 'SQL bootstrap secrets must be nonempty SecureString values.'
+    }
+    if ($null -eq $Operations) { $Operations = Get-DefaultWorkshopBootstrapOperationSet }
+    Assert-WorkshopBootstrapOperationSet -Operations $Operations
+    $masterKeySecret = $null
+    $readerSecret = $null
+    $payload = $null
+    try {
+        $masterKeySecret = ConvertFrom-WorkshopSecureString $DatabaseMasterKeyPassword
+        $readerSecret = ConvertFrom-WorkshopSecureString $McpReaderPassword
+        $payload = @{
+            ExpectedVmName = [string] $Config.SqlVm.Name
+            ExpectedVmSize = [string] $Config.SqlVm.Size
+            ExpectedLocation = [string] $Config.Location
+            DataDiskGiB = [int] $Config.SqlVm.DataDiskGiB
+            LogDiskGiB = [int] $Config.SqlVm.LogDiskGiB
+            RepositoryRoot = 'C:\McpSqlWorkshop\repo'
+            RepositoryCommit = $RepositoryCommit
+            DatabaseMasterKeySecret = $masterKeySecret
+            McpReaderSecret = $readerSecret
+        }
+        $archiveUri = Get-WorkshopBootstrapArchiveUri -RepositoryUrl $RepositoryUrl -RepositoryCommit $RepositoryCommit
+        Invoke-WorkshopBootstrapExtension -Role Sql -Config $Config -ArchiveUri $archiveUri `
+            -ProtectedPayload $payload -Operations $Operations
+    }
+    finally {
+        $masterKeySecret = $null
+        $readerSecret = $null
+        if ($null -ne $payload) {
+            $payload.DatabaseMasterKeySecret = $null
+            $payload.McpReaderSecret = $null
+        }
+    }
+}
+
+function Initialize-WorkshopAdminVm {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][hashtable] $Config,
+        [Parameter(Mandatory)][Security.SecureString] $McpReaderPassword,
+        [Parameter(Mandatory)][ValidatePattern('^https://github\.com/[^/]+/[^/]+(?:\.git)?$')][string] $RepositoryUrl,
+        [Parameter(Mandatory)][ValidatePattern('^[0-9a-f]{40}$')][string] $RepositoryCommit,
+        [Parameter(Mandatory)][ValidateNotNullOrEmpty()][string] $InteractiveUserName,
+        [Parameter(Mandatory)][psobject] $SqlReadiness,
+        [string] $NugetPackagesPath,
+        [string] $NugetConfigPath,
+        [hashtable] $Operations
+    )
+
+    if ($McpReaderPassword.Length -eq 0) { throw 'MCP reader secret must be a nonempty SecureString.' }
+    if ($null -eq $Operations) { $Operations = Get-DefaultWorkshopBootstrapOperationSet }
+    Assert-WorkshopBootstrapOperationSet -Operations $Operations -Admin
+    if (-not $SqlReadiness.Completed -or -not $SqlReadiness.Certificate.PublicCertificateSha256) {
+        throw 'Verified SQL readiness with a public certificate fingerprint is required.'
+    }
+    $publicCertificate = & $Operations.ReadPublicCertificate $Config.SqlVm.Name $Config.ResourceGroupName `
+        ([string]$SqlReadiness.Certificate.PublicCertificatePath)
+    $readerSecret = $null
+    $payload = $null
+    try {
+        $readerSecret = ConvertFrom-WorkshopSecureString $McpReaderPassword
+        $payload = @{
+            ExpectedVmName = [string] $Config.AdminVm.Name
+            ExpectedVmSize = [string] $Config.AdminVm.Size
+            ExpectedLocation = [string] $Config.Location
+            RepositoryRoot = 'C:\McpSqlWorkshop\workspace'
+            RepositoryUrl = $RepositoryUrl
+            RepositoryCommit = $RepositoryCommit
+            InteractiveUserName = $InteractiveUserName
+            McpReaderSecret = $readerSecret
+            PublicCertificateBase64 = [string] $publicCertificate
+            CertificateFingerprint = [string] $SqlReadiness.Certificate.PublicCertificateSha256
+            NugetPackagesPath = $NugetPackagesPath
+            NugetConfigPath = $NugetConfigPath
+        }
+        $archiveUri = Get-WorkshopBootstrapArchiveUri -RepositoryUrl $RepositoryUrl -RepositoryCommit $RepositoryCommit
+        Invoke-WorkshopBootstrapExtension -Role Admin -Config $Config -ArchiveUri $archiveUri `
+            -ProtectedPayload $payload -Operations $Operations
+    }
+    finally {
+        $readerSecret = $null
+        if ($null -ne $payload) {
+            $payload.McpReaderSecret = $null
+            $payload.PublicCertificateBase64 = $null
+        }
+    }
+}
+
+function Test-WorkshopReadiness {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][psobject] $SqlReadiness,
+        [Parameter(Mandatory)][psobject] $AdminReadiness
+    )
+
+    $checks = [System.Collections.Generic.List[object]]::new()
+    $expectedTools = @(
+        'aggregate_records', 'compare_workshop_runs', 'describe_entities', 'execute_entity',
+        'get_active_workshop_grants', 'get_memory_snapshot', 'get_procedure_plan_summary',
+        'get_query_store_top_queries', 'get_query_store_waits', 'read_records'
+    )
+    $actualTools = @($AdminReadiness.Mcp.ToolNames | Sort-Object -Unique)
+    $exactToolAllowlist = ($actualTools | ConvertTo-Json -Compress) -ceq
+        (($expectedTools | Sort-Object) | ConvertTo-Json -Compress)
+    foreach ($check in @(
+        @{ Name = 'SQL readiness completed'; Passed = $SqlReadiness.Completed -eq $true }
+        @{ Name = 'SQL private boundary'; Passed = $SqlReadiness.Vm.PublicIp -eq $false }
+        @{ Name = 'SQL encryption forced'; Passed = $SqlReadiness.Sql.Encryption -ceq 'Forced' -and $SqlReadiness.Sql.EncryptOption -ceq 'TRUE' }
+        @{ Name = 'SQL backup verified'; Passed = $SqlReadiness.Backup.VerifyOnly -eq $true }
+        @{ Name = 'Administration readiness completed'; Passed = $AdminReadiness.Completed -eq $true }
+        @{ Name = 'Administration SQL TLS'; Passed = $AdminReadiness.SqlTls.EncryptOption -ceq 'TRUE' -and $AdminReadiness.SqlTls.TrustServerCertificate -eq $false }
+        @{ Name = 'MCP configuration and exact tool allowlist valid'; Passed = $AdminReadiness.Mcp.ConfigValid -eq $true -and $AdminReadiness.Mcp.ForbiddenMutationTools -eq $false -and $exactToolAllowlist }
+        @{ Name = 'Interactive authentication remains explicit'; Passed = $AdminReadiness.AuthStatus -ceq 'AuthRequired' }
+    )) {
+        Add-WorkshopCheck -Checks $checks -Name $check.Name -Passed ([bool]$check.Passed) `
+            -Detail $(if ($check.Passed) { 'Verified.' } else { 'Not verified.' }) `
+            -Remediation 'Correct the failed bootstrap checkpoint and rerun the idempotent bootstrap.'
+    }
+    [pscustomobject][ordered]@{
+        Passed = @($checks | Where-Object Status -EQ 'Failed').Count -eq 0
+        Checks = $checks.ToArray()
+    }
+}
+
+function Export-WorkshopDeploymentEvidence {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][psobject] $SqlReadiness,
+        [Parameter(Mandatory)][psobject] $AdminReadiness,
+        [Parameter(Mandatory)][string] $OutputDirectory
+    )
+
+    & (Join-Path $PSScriptRoot 'Capture-DeploymentEvidence.ps1') -SqlReadiness $SqlReadiness `
+        -AdminReadiness $AdminReadiness -OutputDirectory $OutputDirectory
+}
+
 Export-ModuleMember -Function @(
     'Assert-WorkshopHostCidr'
     'New-WorkshopNetworkModel'
@@ -3057,4 +3395,8 @@ Export-ModuleMember -Function @(
     'Test-WorkshopNetworkBoundary'
     'Test-WorkshopVmBoundary'
     'Format-WorkshopPlanCard'
+    'Initialize-WorkshopSqlVm'
+    'Initialize-WorkshopAdminVm'
+    'Test-WorkshopReadiness'
+    'Export-WorkshopDeploymentEvidence'
 )

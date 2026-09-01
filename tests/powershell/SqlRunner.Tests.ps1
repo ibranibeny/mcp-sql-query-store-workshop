@@ -62,6 +62,22 @@ Describe 'Workshop SQL runner security and ordering' {
         $text | Should -Not -Match '(?i)(Write-(Host|Verbose|Debug|Information)|Out-Host).*password'
     }
 
+    It 'uses Microsoft Data SqlClient when present and a System Data SqlClient fallback without package installation' {
+        $text = Get-Content -LiteralPath $script:RunnerPath -Raw
+        $text | Should -Match 'Microsoft\.Data\.SqlClient'
+        $text | Should -Match 'System\.Data\.SqlClient'
+        $text | Should -Match 'fallback'
+        $text | Should -Not -Match '(?i)(Install-Package|Install-Module|dotnet\s+add\s+package|nuget)'
+    }
+
+    It 'verifies the backup before restore scripts execute' {
+        $text = Get-Content -LiteralPath $script:RunnerPath -Raw
+        $verifyAt = $text.IndexOf('RESTORE VERIFYONLY')
+        $scriptsAt = $text.LastIndexOf('foreach ($scriptName in $scriptNames)')
+        $verifyAt | Should -BeGreaterThan -1
+        $verifyAt | Should -BeLessThan $scriptsAt
+    }
+
     It 'uses one executor connection, parameterized contexts, and prepares secrets immediately before diagnostics' {
         $text = Get-Content -LiteralPath $script:RunnerPath -Raw
         foreach ($key in @(

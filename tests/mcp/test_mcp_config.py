@@ -295,8 +295,12 @@ def test_vscode_uses_exact_local_stdio_invocation():
     server = config["servers"]["mcp-sql-query-store-workshop"]
     assert server == {
         "type": "stdio",
-        "command": "dab",
+        "command": "dotnet",
         "args": [
+            "tool",
+            "run",
+            "dab",
+            "--",
             "start",
             "--mcp-stdio",
             "role:workshop-reader",

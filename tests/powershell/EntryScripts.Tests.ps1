@@ -95,6 +95,9 @@ Describe 'Workshop deployment entry script gates' {
             SqlIaas = 0
             Shutdown = 0
             VmBoundary = 0
+            SqlBootstrap = 0
+            AdminBootstrap = 0
+            Readiness = 0
             PreflightPassed = $true
         }
         $script:Sequence = [System.Collections.Generic.List[string]]::new()
@@ -184,6 +187,31 @@ Describe 'Workshop deployment entry script gates' {
                 $sequence.Add('vm-boundary')
                 [pscustomobject]@{ Passed = $true; Checks = @() }
             }).GetNewClosure()
+            InitializeSqlVm = ({
+                param($Parameters)
+                $null = $Parameters
+                $counters.SqlBootstrap++
+                $sequence.Add('sql-bootstrap')
+                [pscustomobject]@{
+                    Completed = $true
+                    Checkpoint = @('SQL bootstrap complete')
+                    Readiness = [pscustomobject]@{ Completed = $true; Certificate = [pscustomobject]@{ PublicCertificatePath = 'C:\public.cer'; PublicCertificateSha256 = ('A' * 64) } }
+                }
+            }).GetNewClosure()
+            InitializeAdminVm = ({
+                param($Parameters)
+                $null = $Parameters
+                $counters.AdminBootstrap++
+                $sequence.Add('admin-bootstrap')
+                [pscustomobject]@{ Completed = $true; Checkpoint = @('admin bootstrap complete'); Readiness = [pscustomobject]@{ Completed = $true } }
+            }).GetNewClosure()
+            TestReadiness = ({
+                param($Parameters)
+                $null = $Parameters
+                $counters.Readiness++
+                $sequence.Add('readiness')
+                [pscustomobject]@{ Passed = $true; Checks = @() }
+            }).GetNewClosure()
         }
         $securePassword = [Security.SecureString]::new()
         foreach ($character in 'unit-test-only'.ToCharArray()) {
@@ -197,6 +225,10 @@ Describe 'Workshop deployment entry script gates' {
             FacilitatorCidr = '8.8.8.8/32'
             ExpiresOn = (Get-Date).Date.AddDays(2)
             Credential = $script:Credential
+            DatabaseMasterKeyPassword = $script:Credential.Password
+            McpReaderPassword = $script:Credential.Password
+            RepositoryUrl = 'https://github.com/example/mcp-sql-workshop.git'
+            RepositoryCommit = '0123456789abcdef0123456789abcdef01234567'
             WindowsClientLicenseAttested = $true
             SqlEnterpriseCostAcknowledged = $true
             BillableResourcesAcknowledged = $true
@@ -219,13 +251,34 @@ Describe 'Workshop deployment entry script gates' {
         $script:Counters.SqlIaas | Should -Be 1
         $script:Counters.Shutdown | Should -Be 1
         $script:Counters.VmBoundary | Should -Be 1
+        $script:Counters.SqlBootstrap | Should -Be 1
+        $script:Counters.AdminBootstrap | Should -Be 1
+        $script:Counters.Readiness | Should -Be 1
         $script:Sequence | Should -Be @(
             'context', 'preflight', 'network', 'network-boundary', 'admin-vm', 'sql-vm',
-            'sql-iaas', 'shutdown', 'vm-boundary'
+            'sql-iaas', 'shutdown', 'vm-boundary', 'sql-bootstrap', 'admin-bootstrap', 'readiness'
         )
         $result[-1].Checkpoint | Should -Contain 'network complete'
         $result[-1].Checkpoint | Should -Contain 'shutdown complete'
+        $result[-1].Checkpoint | Should -Contain 'admin bootstrap complete'
         ($result | Out-String) | Should -Not -Match 'unit-test-only'
+    }
+
+    It 'requires secure bootstrap inputs and an immutable repository commit' {
+        $tokens = $null
+        $errors = $null
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile(
+            $script:DeployPath, [ref] $tokens, [ref] $errors
+        )
+        foreach ($name in @('DatabaseMasterKeyPassword', 'McpReaderPassword')) {
+            $parameter = $ast.ParamBlock.Parameters |
+                Where-Object { $_.Name.VariablePath.UserPath -eq $name }
+            $parameter.StaticType.FullName | Should -Be 'System.Security.SecureString'
+            @($parameter.Attributes | Where-Object { $_.Extent.Text -match 'Mandatory' }) | Should -HaveCount 1
+        }
+        $commit = $ast.ParamBlock.Parameters |
+            Where-Object { $_.Name.VariablePath.UserPath -eq 'RepositoryCommit' }
+        $commit.Extent.Text | Should -Match "ValidatePattern\('\^\[0-9a-f\]\{40\}\$'\)"
     }
 
     It 'creates nothing when preflight fails' {

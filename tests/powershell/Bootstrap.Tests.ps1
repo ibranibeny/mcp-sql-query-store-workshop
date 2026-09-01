@@ -1,0 +1,337 @@
+Set-StrictMode -Version Latest
+
+BeforeAll {
+    $script:DeployRoot = Join-Path $PSScriptRoot '../../deploy'
+    $script:SqlBootstrapPath = Join-Path $script:DeployRoot 'Initialize-SqlVm.ps1'
+    $script:AdminBootstrapPath = Join-Path $script:DeployRoot 'Initialize-AdminVm.ps1'
+    $script:EvidencePath = Join-Path $script:DeployRoot 'Capture-DeploymentEvidence.ps1'
+    $script:ModulePath = Join-Path $script:DeployRoot 'Workshop.Azure.psd1'
+    $script:ToolManifestPath = Join-Path $PSScriptRoot '../../.config/dotnet-tools.json'
+    $script:McpConfigPath = Join-Path $PSScriptRoot '../../.vscode/mcp.json'
+
+    function Get-ScriptContract {
+        param([Parameter(Mandatory)][string] $Path)
+        $tokens = $null
+        $errors = $null
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile(
+            $Path, [ref] $tokens, [ref] $errors
+        )
+        [pscustomobject]@{
+            Ast = $ast
+            Errors = @($errors)
+            Text = if (Test-Path -LiteralPath $Path) { Get-Content -LiteralPath $Path -Raw } else { '' }
+        }
+    }
+}
+
+Describe 'SQL VM bootstrap static contract' {
+    BeforeAll { $script:SqlContract = Get-ScriptContract -Path $script:SqlBootstrapPath }
+
+    It 'exists, parses, and accepts only a protected payload file' {
+        Test-Path -LiteralPath $script:SqlBootstrapPath | Should -BeTrue
+        $script:SqlContract.Errors | Should -HaveCount 0
+        $names = @($script:SqlContract.Ast.ParamBlock.Parameters.Name.VariablePath.UserPath)
+        $names | Should -Contain 'ProtectedPayloadPath'
+        $names | Should -Not -Contain 'Password'
+        $names | Should -Not -Contain 'McpReaderPassword'
+        $names | Should -Not -Contain 'DatabaseMasterKeyPassword'
+        $script:SqlContract.Text | Should -Match 'Set-StrictMode\s+-Version\s+Latest'
+    }
+
+    It 'fails closed on IMDS identity, private boundary, SQL 2022 Enterprise, and Trusted Launch checks' {
+        $text = $script:SqlContract.Text
+        $text | Should -Match '169\.254\.169\.254/metadata/instance'
+        $text | Should -Match 'compute\.name'
+        $text | Should -Match 'compute\.vmSize'
+        $text | Should -Match 'compute\.location'
+        $text | Should -Match 'publicIpAddress'
+        $text | Should -Match 'ProductMajorVersion'
+        $text | Should -Match 'Enterprise'
+        $text | Should -Match 'Win32_Tpm|Get-Tpm'
+        $text | Should -Match 'Confirm-SecureBootUEFI'
+    }
+
+    It 'maps exact LUN zero and one with expected sizes and verifies 64 KiB NTFS labels' {
+        $text = $script:SqlContract.Text
+        $text | Should -Match 'Mount-WorkshopDisk\s+-Lun\s+0'
+        $text | Should -Match 'Mount-WorkshopDisk\s+-Lun\s+1'
+        $text | Should -Match 'Initialize-Disk'
+        $text | Should -Match 'PartitionStyle\s+GPT'
+        $text | Should -Match 'Format-Volume'
+        $text | Should -Match 'AllocationUnitSize\s+65536'
+        $text | Should -Match 'SQLData'
+        $text | Should -Match 'SQLLog'
+        $text | Should -Match 'F'
+        $text | Should -Match 'G'
+        $text | Should -Match 'AllocationUnitSize'
+    }
+
+    It 'configures SQL 1433, a narrow firewall rule, disabled Browser, and exact service restart readback' {
+        $text = $script:SqlContract.Text
+        $text | Should -Match 'TcpPort'
+        $text | Should -Match '1433'
+        $text | Should -Match '10\.20\.1\.0/24'
+        $text | Should -Match 'New-NetFirewallRule'
+        $text | Should -Match 'SQLBrowser'
+        $text | Should -Match 'Disabled'
+        $text | Should -Match 'Restart-Service'
+        $text | Should -Match 'Running'
+        $text | Should -Not -Match '(?i)RemoteAddress\s+[''\"]?(Any|\*|0\.0\.0\.0/0)'
+    }
+
+    It 'creates non-exportable private-DNS TLS and exports only a public certificate' {
+        $text = $script:SqlContract.Text
+        $text | Should -Match 'sql01\.mcpworkshop\.internal'
+        $text | Should -Match 'New-SelfSignedCertificate'
+        $text | Should -Match '1\.3\.6\.1\.5\.5\.7\.3\.1'
+        $text | Should -Match 'Exportable\s*[:=]\s*\$false|-KeyExportPolicy\s+NonExportable'
+        $text | Should -Match 'Export-Certificate'
+        $text | Should -Match 'ForceEncryption'
+        $text | Should -Match 'Certificate'
+        $text | Should -Match 'Get-Acl|Set-Acl|CryptoKeySecurity'
+        $text | Should -Not -Match 'Export-PfxCertificate|\.pfx'
+    }
+
+    It 'downloads only the official backup and records an observed SHA256 before invoking scripts 00 through 07' {
+        $text = $script:SqlContract.Text
+        $text | Should -Match 'https://github\.com/Microsoft/sql-server-samples/releases/download/adventureworks/AdventureWorks2022\.bak'
+        $text | Should -Match 'Get-FileHash'
+        $text | Should -Match 'SHA256'
+        $text | Should -Match 'observed'
+        $text | Should -Match 'Invoke-WorkshopSqlScripts\.ps1'
+        $positions = 0..7 | ForEach-Object { $text.IndexOf(('0{0}-' -f $_)) }
+        $positions | ForEach-Object { $_ | Should -BeGreaterThan -1 }
+        $text | Should -Not -Match '08-OptionalQueryStoreHint|09-Cleanup'
+    }
+
+    It 'writes a secret-free ACL-restricted positive readiness report with required readbacks' {
+        $text = $script:SqlContract.Text
+        $text | Should -Match 'C:\\McpSqlWorkshop\\evidence\\sql-vm-readiness\.json'
+        foreach ($term in @('version', 'edition', 'disk', 'firewall', 'certificate', 'encryption', 'QueryStore', 'ResourceGovernor', 'procedure')) {
+            $text | Should -Match $term
+        }
+        $text | Should -Match 'Set-Acl'
+        $text | Should -Match 'Completed'
+    }
+}
+
+Describe 'Administration VM bootstrap static contract' {
+    BeforeAll { $script:AdminContract = Get-ScriptContract -Path $script:AdminBootstrapPath }
+
+    It 'exists, parses, and accepts only a protected payload file' {
+        Test-Path -LiteralPath $script:AdminBootstrapPath | Should -BeTrue
+        $script:AdminContract.Errors | Should -HaveCount 0
+        @($script:AdminContract.Ast.ParamBlock.Parameters.Name.VariablePath.UserPath) | Should -Contain 'ProtectedPayloadPath'
+        $script:AdminContract.Text | Should -Match 'Set-StrictMode\s+-Version\s+Latest'
+    }
+
+    It 'verifies Windows 11 24H2 Enterprise, activation availability, IMDS identity, and Trusted Launch' {
+        $text = $script:AdminContract.Text
+        $text | Should -Match '169\.254\.169\.254/metadata/instance'
+        $text | Should -Match 'Windows 11 Enterprise'
+        $text | Should -Match '24H2|26100'
+        $text | Should -Match 'SoftwareLicensingProduct'
+        $text | Should -Match 'Unknown|Unavailable'
+        $text | Should -Match 'Confirm-SecureBootUEFI'
+        $text | Should -Match 'Win32_Tpm|Get-Tpm'
+        $text | Should -Match 'publicIpAddress'
+    }
+
+    It 'installs exact official winget packages and VS Code extensions noninteractively and reads versions back' {
+        $text = $script:AdminContract.Text
+        foreach ($id in @('Microsoft.VisualStudioCode', 'Microsoft.SQLServerManagementStudio', 'Microsoft.DotNet.SDK.9', 'Git.Git', 'GitHub.cli')) {
+            $text | Should -Match ([regex]::Escape($id))
+        }
+        foreach ($id in @('ms-mssql.mssql', 'GitHub.copilot', 'GitHub.copilot-chat', 'ms-vscode.powershell')) {
+            $text | Should -Match ([regex]::Escape($id))
+        }
+        $text | Should -Match '--accept-package-agreements'
+        $text | Should -Match '--accept-source-agreements'
+        $text | Should -Match '--install-extension'
+        $text | Should -Match '--version|--list-extensions'
+    }
+
+    It 'uses the pinned local DAB tool and validates the repository configuration' {
+        $manifest = Get-Content -LiteralPath $script:ToolManifestPath -Raw | ConvertFrom-Json
+        $manifest.tools.'microsoft.dataapibuilder'.version | Should -Be '2.0.9'
+        $manifest.tools.'microsoft.dataapibuilder'.commands | Should -Contain 'dab'
+        $text = $script:AdminContract.Text
+        $text | Should -Match "'tool',\s*'restore'"
+        $text | Should -Match "'tool',\s*'run',\s*'dab',\s*'--version'"
+        $text | Should -Match "'tool',\s*'run',\s*'dab',\s*'--',\s*'validate'"
+        $text | Should -Not -Match '(?i)dotnet\s+tool\s+install'
+    }
+
+    It 'checks out the exact protected commit and imports only a fingerprint-matched public certificate' {
+        $text = $script:AdminContract.Text
+        $text | Should -Match "'clone',\s*'--no-checkout'"
+        $text | Should -Match "'checkout',\s*'--detach'"
+        $text | Should -Match "'rev-parse',\s*'HEAD'"
+        $text | Should -Match 'Import-Certificate'
+        $text | Should -Match 'Get-FileHash'
+        $text | Should -Match 'CertificateFingerprint'
+        $text | Should -Not -Match 'Import-PfxCertificate|\.pfx'
+    }
+
+    It 'creates only root env with restrictive ACL and verifies private DNS encrypted SQL and MCP allowlist' {
+        $text = $script:AdminContract.Text
+        $text | Should -Match 'Resolve-DnsName'
+        $text | Should -Match 'Test-NetConnection'
+        $text | Should -Match 'Encrypt=True'
+        $text | Should -Match 'TrustServerCertificate=False'
+        $text | Should -Match 'HostNameInCertificate'
+        $text | Should -Match 'encrypt_option'
+        $text | Should -Match 'initialize'
+        $text | Should -Match 'tools/list'
+        foreach ($tool in @('get_memory_snapshot', 'get_active_workshop_grants', 'get_query_store_top_queries', 'get_query_store_waits', 'get_procedure_plan_summary', 'compare_workshop_runs')) {
+            $text | Should -Match $tool
+        }
+        $text | Should -Match 'create-record|create_records|update-record|update_records|delete-record|delete_records'
+        $text | Should -Match 'AuthRequired'
+        $text | Should -Match 'Set-Acl'
+        $text | Should -Not -Match 'mcp[/\\]\.env'
+    }
+}
+
+Describe 'Bootstrap orchestration and evidence contracts' {
+    BeforeAll {
+        Import-Module $script:ModulePath -Force
+        $script:BootstrapConfig = Import-PowerShellDataFile (Join-Path $script:DeployRoot 'WorkshopConfig.psd1')
+        $script:SecureValue = [Security.SecureString]::new()
+        foreach ($character in 'unit-test-secret-value'.ToCharArray()) { $script:SecureValue.AppendChar($character) }
+        $script:SecureValue.MakeReadOnly()
+    }
+
+    It 'exports bootstrap, readiness, and evidence functions' {
+        $manifest = Test-ModuleManifest $script:ModulePath
+        foreach ($name in @('Initialize-WorkshopSqlVm', 'Initialize-WorkshopAdminVm', 'Test-WorkshopReadiness', 'Export-WorkshopDeploymentEvidence')) {
+            $manifest.ExportedFunctions.Keys | Should -Contain $name
+        }
+    }
+
+    It 'uses protected extension settings and never puts payloads or secrets in public settings' {
+        $moduleText = Get-Content -LiteralPath (Join-Path $script:DeployRoot 'Workshop.Azure.psm1') -Raw
+        $moduleText | Should -Match 'ProtectedSettings'
+        $moduleText | Should -Match 'Set-AzVMExtension|Set-AzVMCustomScriptExtension'
+        $moduleText | Should -Match 'Initialize-WorkshopSqlVm'
+        $moduleText | Should -Match 'Initialize-WorkshopAdminVm'
+        $moduleText | Should -Match 'Test-WorkshopReadiness'
+        $moduleText | Should -Match 'Protect-CmsMessage'
+        $moduleText | Should -Not -Match 'payloadBase64'
+        $script:SqlContract.Text | Should -Match 'Unprotect-CmsMessage'
+        $script:AdminContract.Text | Should -Match 'Unprotect-CmsMessage'
+        $moduleText | Should -Not -Match '(?i)Settings\s*=\s*@\{[^}]*password'
+    }
+
+    It 'configures MCP to invoke the pinned local tool and keeps role immediately after stdio mode' {
+        $config = Get-Content -LiteralPath $script:McpConfigPath -Raw | ConvertFrom-Json
+        $server = $config.servers.'mcp-sql-query-store-workshop'
+        $server.command | Should -Be 'dotnet'
+        $server.args[0..3] | Should -Be @('tool', 'run', 'dab', '--')
+        $stdioIndex = [array]::IndexOf([object[]] $server.args, '--mcp-stdio')
+        $server.args[$stdioIndex + 1] | Should -Be 'role:workshop-reader'
+    }
+
+    It 'provides sanitized screenshot evidence pages without performing capture' {
+        Test-Path -LiteralPath $script:EvidencePath | Should -BeTrue
+        $text = Get-Content -LiteralPath $script:EvidencePath -Raw
+        $text | Should -Match 'ConvertTo-Html'
+        $text | Should -Match 'redact|Redact'
+        $text | Should -Not -Match '(?i)(Start-Process.*(browser|msedge|chrome)|playwright|selenium)'
+    }
+
+    It 'contains no Python or Python package installation in either VM bootstrap' {
+        $combined = (Get-Content -LiteralPath $script:SqlBootstrapPath -Raw) + "`n" +
+            (Get-Content -LiteralPath $script:AdminBootstrapPath -Raw)
+        $combined | Should -Not -Match '(?im)(^|[;&|\s])(python(\.exe)?|py(\.exe)?|pip(3)?)(\s|$)'
+        $combined | Should -Not -Match '(?i)pypi'
+    }
+
+    It 'orchestrates SQL bootstrap through injected operations and returns only readiness evidence' {
+        $script:CapturedPayload = $null
+        $operations = @{
+            GetRecipientCertificate = { 'public-recipient-certificate' }
+            ProtectPayload = {
+                param($Recipient, $Payload)
+                $null = $Recipient
+                $script:CapturedPayload = $Payload | ConvertTo-Json -Depth 10 | ConvertFrom-Json
+                'encrypted-cms-envelope'
+            }
+            SetExtension = {
+                param($VmName, $ResourceGroupName, $Location, $ArchiveUri, $ProtectedEnvelope, $BootstrapScript, $RepositoryCommit)
+                $null = $VmName, $ResourceGroupName, $Location, $ArchiveUri, $BootstrapScript, $RepositoryCommit
+                $ProtectedEnvelope | Should -Be 'encrypted-cms-envelope'
+            }
+            GetExtension = { [pscustomobject]@{ Statuses = @([pscustomobject]@{ Code = 'ProvisioningState/succeeded' }) } }
+            ReadReadiness = { [pscustomobject]@{ Completed = $true; Certificate = [pscustomobject]@{ PublicCertificatePath = 'C:\public.cer'; PublicCertificateSha256 = ('A' * 64) } } }
+        }
+        $result = Initialize-WorkshopSqlVm -Config $script:BootstrapConfig `
+            -DatabaseMasterKeyPassword $script:SecureValue -McpReaderPassword $script:SecureValue `
+            -RepositoryUrl 'https://github.com/example/workshop.git' `
+            -RepositoryCommit '0123456789abcdef0123456789abcdef01234567' -Operations $operations
+
+        $result.Completed | Should -BeTrue
+        $script:CapturedPayload.ExpectedVmName | Should -Be $script:BootstrapConfig.SqlVm.Name
+        $script:CapturedPayload.DatabaseMasterKeySecret | Should -Be 'unit-test-secret-value'
+        ($result | ConvertTo-Json -Depth 10) | Should -Not -Match 'unit-test-secret-value'
+    }
+
+    It 'transfers only the SQL public certificate through injected admin operations' {
+        $script:CapturedAdminPayload = $null
+        $publicBytes = [byte[]](1, 2, 3, 4)
+        $operations = @{
+            GetRecipientCertificate = { 'public-recipient-certificate' }
+            ProtectPayload = {
+                param($Recipient, $Payload)
+                $null = $Recipient
+                $script:CapturedAdminPayload = $Payload | ConvertTo-Json -Depth 10 | ConvertFrom-Json
+                'encrypted-cms-envelope'
+            }
+            SetExtension = {
+                param($VmName, $ResourceGroupName, $Location, $ArchiveUri, $ProtectedEnvelope, $BootstrapScript, $RepositoryCommit)
+                $null = $VmName, $ResourceGroupName, $Location, $ArchiveUri, $BootstrapScript, $RepositoryCommit
+                $ProtectedEnvelope | Should -Be 'encrypted-cms-envelope'
+            }
+            GetExtension = { [pscustomobject]@{ Statuses = @([pscustomobject]@{ Code = 'ProvisioningState/succeeded' }) } }
+            ReadReadiness = { [pscustomobject]@{ Completed = $true } }
+            ReadPublicCertificate = { [Convert]::ToBase64String($publicBytes) }.GetNewClosure()
+        }
+        $sqlReadiness = [pscustomobject]@{
+            Completed = $true
+            Certificate = [pscustomobject]@{ PublicCertificatePath = 'C:\McpSqlWorkshop\public\sql01.cer'; PublicCertificateSha256 = ('B' * 64) }
+        }
+        $result = Initialize-WorkshopAdminVm -Config $script:BootstrapConfig -McpReaderPassword $script:SecureValue `
+            -RepositoryUrl 'https://github.com/example/workshop.git' `
+            -RepositoryCommit '0123456789abcdef0123456789abcdef01234567' `
+            -InteractiveUserName 'workshop-admin' `
+            -SqlReadiness $sqlReadiness -Operations $operations
+
+        $result.Completed | Should -BeTrue
+        $script:CapturedAdminPayload.PublicCertificateBase64 | Should -Be ([Convert]::ToBase64String($publicBytes))
+        $script:CapturedAdminPayload.PSObject.Properties.Name | Should -Not -Contain 'PrivateKey'
+        ($result | ConvertTo-Json -Depth 10) | Should -Not -Match 'unit-test-secret-value'
+    }
+
+    It 'fails readiness closed when any private, TLS, MCP, or auth claim is unverified' {
+        $sql = [pscustomobject]@{
+            Completed = $true; Vm = [pscustomobject]@{ PublicIp = $false }
+            Sql = [pscustomobject]@{ Encryption = 'Forced'; EncryptOption = 'TRUE' }; Backup = [pscustomobject]@{ VerifyOnly = $true }
+        }
+        $admin = [pscustomobject]@{
+            Completed = $true; AuthStatus = 'AuthRequired'
+            SqlTls = [pscustomobject]@{ EncryptOption = 'TRUE'; TrustServerCertificate = $false }
+            Mcp = [pscustomobject]@{
+                ConfigValid = $true
+                ForbiddenMutationTools = $false
+                ToolNames = @(
+                    'describe_entities', 'read_records', 'execute_entity', 'aggregate_records',
+                    'get_memory_snapshot', 'get_active_workshop_grants', 'get_query_store_top_queries',
+                    'get_query_store_waits', 'get_procedure_plan_summary', 'compare_workshop_runs'
+                )
+            }
+        }
+        (Test-WorkshopReadiness -SqlReadiness $sql -AdminReadiness $admin).Passed | Should -BeTrue
+        $admin.Mcp.ForbiddenMutationTools = $true
+        (Test-WorkshopReadiness -SqlReadiness $sql -AdminReadiness $admin).Passed | Should -BeFalse
+    }
+}

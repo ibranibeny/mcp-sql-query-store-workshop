@@ -16,6 +16,20 @@ param(
     [PSCredential] $Credential,
 
     [Parameter(Mandatory)]
+    [Security.SecureString] $DatabaseMasterKeyPassword,
+
+    [Parameter(Mandatory)]
+    [Security.SecureString] $McpReaderPassword,
+
+    [Parameter(Mandatory)]
+    [ValidatePattern('^https://github\.com/[^/]+/[^/]+(?:\.git)?$')]
+    [string] $RepositoryUrl,
+
+    [Parameter(Mandatory)]
+    [ValidatePattern('^[0-9a-f]{40}$')]
+    [string] $RepositoryCommit,
+
+    [Parameter(Mandatory)]
     [switch] $WindowsClientLicenseAttested,
 
     [Parameter(Mandatory)]
@@ -44,6 +58,9 @@ if ($null -eq $Credential -or [string]::IsNullOrWhiteSpace($Credential.UserName)
 }
 if ($Credential.Password -isnot [Security.SecureString] -or $Credential.Password.Length -eq 0) {
     throw 'A nonempty SecureString password is required before deployment can continue.'
+}
+if ($DatabaseMasterKeyPassword.Length -eq 0 -or $McpReaderPassword.Length -eq 0) {
+    throw 'Nonempty SecureString bootstrap secrets are required before deployment can continue.'
 }
 
 $modulePath = Join-Path $PSScriptRoot 'Workshop.Azure.psd1'
@@ -120,11 +137,24 @@ if ($null -eq $Operations) {
             param($Parameters)
             Test-WorkshopVmBoundary @Parameters
         }
+        InitializeSqlVm = {
+            param($Parameters)
+            Initialize-WorkshopSqlVm @Parameters
+        }
+        InitializeAdminVm = {
+            param($Parameters)
+            Initialize-WorkshopAdminVm @Parameters
+        }
+        TestReadiness = {
+            param($Parameters)
+            Test-WorkshopReadiness @Parameters
+        }
     }
 }
 foreach ($operationName in @(
     'SetContext', 'TestPrerequisites', 'NewNetwork', 'TestBoundary', 'NewAdminVm',
-    'NewSqlVm', 'RegisterSqlIaas', 'SetAutoShutdown', 'TestVmBoundary'
+    'NewSqlVm', 'RegisterSqlIaas', 'SetAutoShutdown', 'TestVmBoundary',
+    'InitializeSqlVm', 'InitializeAdminVm', 'TestReadiness'
 )) {
     if (-not $Operations.ContainsKey($operationName) -or $Operations[$operationName] -isnot [scriptblock]) {
         throw "Operations must provide scriptblock '$operationName'."
@@ -286,21 +316,64 @@ try {
         $failedChecks = @($vmBoundary.Checks | Where-Object Status -EQ 'Failed' | ForEach-Object Name)
         throw "VM boundary verification failed: $($failedChecks -join ', ')."
     }
+
+    $sqlBootstrapParameters = @{
+        Config = $config
+        DatabaseMasterKeyPassword = $DatabaseMasterKeyPassword
+        McpReaderPassword = $McpReaderPassword
+        RepositoryUrl = $RepositoryUrl
+        RepositoryCommit = $RepositoryCommit
+    }
+    if ($Operations.ContainsKey('BootstrapOperations')) {
+        $sqlBootstrapParameters.Operations = $Operations.BootstrapOperations
+    }
+    $sqlBootstrap = & $Operations.InitializeSqlVm $sqlBootstrapParameters
+    if ($null -eq $sqlBootstrap -or $sqlBootstrap.Completed -isnot [bool] -or -not $sqlBootstrap.Completed) {
+        throw 'SQL VM bootstrap stage did not complete.'
+    }
+
+    $adminBootstrapParameters = @{
+        Config = $config
+        McpReaderPassword = $McpReaderPassword
+        RepositoryUrl = $RepositoryUrl
+        RepositoryCommit = $RepositoryCommit
+        InteractiveUserName = $Credential.UserName
+        SqlReadiness = $sqlBootstrap.Readiness
+    }
+    if ($Operations.ContainsKey('BootstrapOperations')) {
+        $adminBootstrapParameters.Operations = $Operations.BootstrapOperations
+    }
+    $adminBootstrap = & $Operations.InitializeAdminVm $adminBootstrapParameters
+    if ($null -eq $adminBootstrap -or $adminBootstrap.Completed -isnot [bool] -or -not $adminBootstrap.Completed) {
+        throw 'Administration VM bootstrap stage did not complete.'
+    }
+    $readiness = & $Operations.TestReadiness @{
+        SqlReadiness = $sqlBootstrap.Readiness
+        AdminReadiness = $adminBootstrap.Readiness
+    }
+    if ($null -eq $readiness -or $readiness.Passed -isnot [bool] -or -not $readiness.Passed) {
+        $failedChecks = @($readiness.Checks | Where-Object Status -EQ 'Failed' | ForEach-Object Name)
+        throw "End-to-end readiness verification failed: $($failedChecks -join ', ')."
+    }
     $checkpoint = @(
         @($network.Checkpoint)
         @($adminVm.Checkpoint)
         @($sqlVm.Checkpoint)
         @($sqlIaas.Checkpoint)
         @($shutdown.Checkpoint)
+        @($sqlBootstrap.Checkpoint)
+        @($adminBootstrap.Checkpoint)
     )
     [pscustomobject][ordered]@{
         Completed = $true
         Checkpoint = $checkpoint
         Boundary = $boundary
         VmBoundary = $vmBoundary
+        Readiness = $readiness
     }
 }
 catch {
     $safeMessage = [regex]::Replace([string] $_.Exception.Message, '[\x00-\x1F\x7F]+', ' ')
-    throw "$safeMessage No automatic rollback was attempted. Review the network checkpoint and remediate the partial deployment before resuming."
+    $safeMessage = [regex]::Replace($safeMessage, '(?i)(password|pwd|secret|token|sas)\s*[=:]\s*[^;\s]+', '$1=[REDACTED]')
+    throw "$safeMessage No automatic rollback was attempted. Review the reported checkpoint and remediate the partial deployment before resuming."
 }

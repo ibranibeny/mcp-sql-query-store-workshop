@@ -1087,11 +1087,13 @@ Describe 'Static safety and module contract' {
         $manifest = Test-ModuleManifest $script:ModulePath
         $manifest.PowerShellVersion | Should -Be ([version]'7.4')
         @($manifest.ExportedFunctions.Keys | Sort-Object) | Should -Be @(
-            'Assert-WorkshopHostCidr', 'Format-WorkshopPlanCard', 'Get-WorkshopPlan',
+            'Assert-WorkshopHostCidr', 'Export-WorkshopDeploymentEvidence', 'Format-WorkshopPlanCard', 'Get-WorkshopPlan',
+            'Initialize-WorkshopAdminVm', 'Initialize-WorkshopSqlVm',
             'New-WorkshopAdminVm', 'New-WorkshopNetwork', 'New-WorkshopNetworkModel',
             'New-WorkshopSqlVm', 'Register-WorkshopSqlIaas', 'Remove-WorkshopEnvironment',
             'Resolve-WorkshopImageVersion', 'Set-WorkshopAutoShutdown', 'Stop-WorkshopEnvironment',
-            'Test-WorkshopNetworkBoundary', 'Test-WorkshopPrerequisites', 'Test-WorkshopVmBoundary'
+            'Test-WorkshopNetworkBoundary', 'Test-WorkshopPrerequisites', 'Test-WorkshopReadiness',
+            'Test-WorkshopVmBoundary'
         )
     }
 

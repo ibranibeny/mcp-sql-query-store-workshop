@@ -2,8 +2,12 @@
   "servers": {
     "mcp-sql-query-store-workshop": {
       "type": "stdio",
-      "command": "dab",
+      "command": "dotnet",
       "args": [
+        "tool",
+        "run",
+        "dab",
+        "--",
         "start",
         "--mcp-stdio",
         "role:workshop-reader",
