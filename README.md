@@ -26,6 +26,8 @@ Only the Windows 11 administration VM has a public IP. Public RDP is restricted 
 4. Follow [the deployment module](workshop/03-deploy-with-powershell.md). A passing preflight and reviewed plan card are mandatory before separate billable-deployment approval.
 5. Follow modules 04–06 in order, then perform verified teardown in [Module 07](workshop/07-teardown.md).
 
+The untimed [Scenario A: VS Code and Scenario B: SSMS runbook](workshop/scenario-a-vscode-scenario-b-ssms.md) provides the copy-ready dual-tool facilitation path between Workshop 06 and teardown.
+
 ## Target and evidence truthfulness
 
 [!TARGET] The experiment targets 75–85% baseline and 35–45% optimized utilization of the isolated Resource Governor regular query-workspace semaphore under unchanged conditions. These are approximately 80% and 40%; they are not current measurements and not a Task Manager memory target.

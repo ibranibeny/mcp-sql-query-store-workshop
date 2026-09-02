@@ -3,13 +3,49 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+from urllib.parse import urlsplit
 
+from bs4 import BeautifulSoup
 import pytest
 
 from web.build_site import build_site, load_manifest, render_markdown
 
 ROOT = Path(__file__).resolve().parents[2]
 MANIFEST_PATH = ROOT / "web" / "site-manifest.json"
+SCENARIO_TITLE = "Scenario A: VS Code and Scenario B: SSMS"
+SCENARIO_ROUTE = "scenario-a-vscode-scenario-b-ssms.html"
+SCENARIO_HEADINGS = [
+    (2, "Outcome"),
+    (2, "Safety rules"),
+    (2, "Readiness gate"),
+    (2, "Shared nonoptimized workload"),
+    (3, "Business request"),
+    (3, "Representative nonoptimized query shape"),
+    (3, "Bounded diagnostic invocation"),
+    (2, "Scenario A — RDP, VS Code, MSSQL, GitHub Copilot, and SQL MCP"),
+    (3, "A1. Enter the administration VM"),
+    (3, "A2. Verify VS Code tooling"),
+    (3, "A3. Connect MSSQL to the private database"),
+    (3, "A4. Validate and start SQL MCP"),
+    (3, "A5. Inspect the baseline"),
+    (3, "A6. Ask GitHub Copilot to explain"),
+    (3, "A7. Ground the review with SQL MCP"),
+    (3, "A8. Ask GitHub Copilot to optimize"),
+    (2, "Scenario B — RDP, SSMS, and GitHub Copilot"),
+    (3, "B1. Open SSMS and connect"),
+    (3, "B2. Recreate the same review context"),
+    (3, "B3. Use /explain"),
+    (3, "B4. Use /optimize"),
+    (3, "B5. Optional Agent mode demonstration"),
+    (2, "Reconcile, approve, and prove"),
+    (3, "Compare Candidate A and Candidate B"),
+    (3, "Apply exactly one approved candidate"),
+    (3, "Correctness gate"),
+    (3, "Shared performance gate"),
+    (3, "Decision"),
+    (3, "Screenshot checklist"),
+    (2, "Official references"),
+]
 
 
 def write_manifest(path: Path, pages: list[dict[str, object]], **site: str) -> Path:
@@ -246,6 +282,43 @@ def test_build_emits_title_static_diagram_target_and_navigation(tmp_path: Path) 
     assert 'aria-label="Workshop modules"' in html
     assert html.count("<main") == 1
     assert (tmp_path / "facilitator-guide.html").is_file()
+
+
+def test_dual_copilot_scenario_builds_with_ordered_navigation_and_valid_structure(
+    tmp_path: Path,
+) -> None:
+    build_site(ROOT, tmp_path)
+    path = tmp_path / SCENARIO_ROUTE
+
+    assert path.is_file()
+    soup = BeautifulSoup(path.read_text(encoding="utf-8"), "html.parser")
+    navigation_routes = [link.get("href") for link in soup.select('nav a[href]')]
+    assert navigation_routes.index("06-optimize-and-prove.html") < navigation_routes.index(
+        SCENARIO_ROUTE
+    ) < navigation_routes.index("07-teardown.html")
+
+    headings = soup.select("main h1, main h2, main h3")
+    heading_sequence = [
+        (
+            int(heading.name[1]),
+            heading.get_text(" ", strip=True).replace("¶", "").strip(),
+        )
+        for heading in headings
+    ]
+    assert heading_sequence == [
+        (1, SCENARIO_TITLE),
+        (2, "Move claims through evidence"),
+        *SCENARIO_HEADINGS,
+    ]
+
+    for link in soup.select("main a[href]"):
+        href = link.get("href", "")
+        parsed = urlsplit(href)
+        if parsed.scheme or parsed.netloc or href.startswith(("#", "mailto:")):
+            continue
+        assert (path.parent / parsed.path).resolve().exists(), (
+            f"Missing internal target from {SCENARIO_ROUTE}: {href}"
+        )
 
 
 def test_architecture_route_contains_two_build_time_svg_diagrams(tmp_path: Path) -> None:

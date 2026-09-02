@@ -69,6 +69,13 @@
       "breakAfterMinutes": 0
     },
     {
+      "source": "workshop/scenario-a-vscode-scenario-b-ssms.md",
+      "route": "scenario-a-vscode-scenario-b-ssms.html",
+      "title": "Scenario A: VS Code and Scenario B: SSMS",
+      "phase": "Workshop resource",
+      "durationMinutes": 0
+    },
+    {
       "source": "workshop/07-teardown.md",
       "route": "07-teardown.html",
       "title": "Teardown and review",

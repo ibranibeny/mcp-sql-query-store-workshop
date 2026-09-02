@@ -13,6 +13,9 @@ from web.build_site import build_site, render_markdown
 ROOT = Path(__file__).resolve().parents[2]
 MANIFEST_PATH = ROOT / "web" / "site-manifest.json"
 SCREENSHOT_MANIFEST_PATH = ROOT / "docs" / "images" / "screenshot-manifest.json"
+SCENARIO = "workshop/scenario-a-vscode-scenario-b-ssms.md"
+SCENARIO_ROUTE = "scenario-a-vscode-scenario-b-ssms.html"
+SCENARIO_ARTIFACT_REVISION = "1aebe319edd7760a6f37fa21149c0474df23b284"
 DAB_AUTHORIZATION_URL = (
     "https://learn.microsoft.com/en-us/azure/data-api-builder/"
     "concept/security/authorization-overview"
@@ -61,6 +64,38 @@ PROMPT_HEADINGS = [
     "Risks and rollback",
     "Validation criteria",
 ]
+SCENARIO_HEADINGS = [
+    ("##", "Outcome"),
+    ("##", "Safety rules"),
+    ("##", "Readiness gate"),
+    ("##", "Shared nonoptimized workload"),
+    ("###", "Business request"),
+    ("###", "Representative nonoptimized query shape"),
+    ("###", "Bounded diagnostic invocation"),
+    ("##", "Scenario A — RDP, VS Code, MSSQL, GitHub Copilot, and SQL MCP"),
+    ("###", "A1. Enter the administration VM"),
+    ("###", "A2. Verify VS Code tooling"),
+    ("###", "A3. Connect MSSQL to the private database"),
+    ("###", "A4. Validate and start SQL MCP"),
+    ("###", "A5. Inspect the baseline"),
+    ("###", "A6. Ask GitHub Copilot to explain"),
+    ("###", "A7. Ground the review with SQL MCP"),
+    ("###", "A8. Ask GitHub Copilot to optimize"),
+    ("##", "Scenario B — RDP, SSMS, and GitHub Copilot"),
+    ("###", "B1. Open SSMS and connect"),
+    ("###", "B2. Recreate the same review context"),
+    ("###", "B3. Use `/explain`"),
+    ("###", "B4. Use `/optimize`"),
+    ("###", "B5. Optional Agent mode demonstration"),
+    ("##", "Reconcile, approve, and prove"),
+    ("###", "Compare Candidate A and Candidate B"),
+    ("###", "Apply exactly one approved candidate"),
+    ("###", "Correctness gate"),
+    ("###", "Shared performance gate"),
+    ("###", "Decision"),
+    ("###", "Screenshot checklist"),
+    ("##", "Official references"),
+]
 
 
 def read(relative: str) -> str:
@@ -68,7 +103,7 @@ def read(relative: str) -> str:
 
 
 def all_content() -> str:
-    paths = ["README.md", *MODULES, *SUPPORTING_PAGES]
+    paths = ["README.md", *MODULES, SCENARIO, *SUPPORTING_PAGES]
     return "\n".join(read(path) for path in paths)
 
 
@@ -79,7 +114,13 @@ def test_all_required_content_exists_and_manifest_routes_every_page() -> None:
     manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
     sources = [page["source"] for page in manifest["pages"]]
     routes = [page["route"] for page in manifest["pages"]]
-    assert sources[:8] == MODULES
+    workshop_sources = [
+        page["source"]
+        for page in manifest["pages"]
+        if re.fullmatch(r"Workshop \d{2}", page["phase"])
+    ]
+    assert workshop_sources == MODULES
+    assert SCENARIO in sources
     assert set(SUPPORTING_PAGES).issubset(sources)
     assert routes[0] == "index.html"
     assert len(routes) == len(set(route.casefold() for route in routes))
@@ -92,6 +133,52 @@ def test_workshop_duration_is_exactly_360_with_two_breaks() -> None:
     assert sum(page["durationMinutes"] for page in workshop) == 360
     assert [page.get("breakAfterMinutes", 0) for page in workshop] == [0, 0, 0, 10, 0, 10, 0, 0]
     assert sum(page.get("instructionMinutes", page["durationMinutes"]) for page in workshop) == 340
+
+
+def test_dual_copilot_scenario_is_routed_and_preserves_shared_evidence_contract() -> None:
+    manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+    pages = manifest["pages"]
+    scenario = next(page for page in pages if page["source"] == SCENARIO)
+
+    assert scenario == {
+        "source": SCENARIO,
+        "route": SCENARIO_ROUTE,
+        "title": "Scenario A: VS Code and Scenario B: SSMS",
+        "phase": "Workshop resource",
+        "durationMinutes": 0,
+    }
+    scenario_index = pages.index(scenario)
+    assert pages[scenario_index - 1]["phase"] == "Workshop 06"
+    assert pages[scenario_index + 1]["phase"] == "Workshop 07"
+
+    content = read(SCENARIO)
+    headings = re.findall(r"(?m)^(#{1,6})\s+(.+)$", content)
+    assert headings == SCENARIO_HEADINGS
+    for token in (
+        "one baseline",
+        "two independent Copilot reviews",
+        "Candidate A",
+        "Candidate B",
+        "Approve-WorkshopCandidate.ps1",
+        "ABBA BAAB ABBA",
+    ):
+        assert token in content
+
+
+def test_dual_copilot_scenario_pins_executable_artifacts_to_immutable_revision() -> None:
+    content = read(SCENARIO)
+    repository = "https://github.com/ibranibeny/mcp-sql-query-store-workshop/blob"
+    artifact_paths = (
+        "sql/04-CreateBaselineProcedure.sql",
+        "sql/06-CreateOptimizedProcedure.sql",
+        "deploy/Approve-WorkshopCandidate.ps1",
+        "sql/07-ValidateEquivalence.sql",
+    )
+
+    assert f"{repository}/main/" not in content
+    for artifact_path in artifact_paths:
+        assert f"{repository}/{SCENARIO_ARTIFACT_REVISION}/{artifact_path}" in content
+    assert "[Workshop 04: Create bounded query-memory pressure](04-create-memory-pressure.html)" in content
 
 
 def test_modules_cover_architecture_evidence_safety_and_teardown() -> None:

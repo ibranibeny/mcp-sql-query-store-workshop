@@ -18,6 +18,8 @@ Bring L400 familiarity with SQL Server plans, joins, aggregates, statistics, Que
 8. Run the frozen twelve-trial comparison and make a measured decision.
 9. Stop, export, redact, delete, and prove absence.
 
+Follow the untimed [Scenario A: VS Code and Scenario B: SSMS runbook](scenario-a-vscode-scenario-b-ssms.html) for the complete independent-review, reconciliation, guarded-approval, and proof sequence.
+
 ## Investigation worksheet
 
 | Item | Entry |

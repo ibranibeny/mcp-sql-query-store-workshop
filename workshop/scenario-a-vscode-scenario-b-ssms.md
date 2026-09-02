@@ -1,8 +1,6 @@
-# Scenario A: VS Code + SQL MCP and Scenario B: SSMS + GitHub Copilot
-
-**Level:** L400  
-**Database:** `AdventureWorks2022`  
-**SQL endpoint:** private DNS `sql01.mcpworkshop.internal,1433`  
+**Level:** L400
+**Database:** `AdventureWorks2022`
+**SQL endpoint:** private DNS `sql01.mcpworkshop.internal,1433`
 **Principle:** one baseline, two independent Copilot reviews, one DBA-approved candidate, one correctness and A/B performance gate
 
 ## Outcome
@@ -45,15 +43,15 @@ If a readiness check fails, stop and repair that layer. Do not weaken TLS or exp
 
 ---
 
-# Shared nonoptimized workload
+## Shared nonoptimized workload
 
-## Business request
+### Business request
 
 Return the top month-end sales groups by territory, customer, and product. For each group calculate order count, total quantity, total sales, quantity-weighted average unit price, and global sales rank.
 
-The complete runnable baseline definition is [sql/04-CreateBaselineProcedure.sql](../sql/04-CreateBaselineProcedure.sql). It deliberately contains multiple realistic anti-patterns while remaining bounded.
+The complete runnable baseline definition is [sql/04-CreateBaselineProcedure.sql](https://github.com/ibranibeny/mcp-sql-query-store-workshop/blob/1aebe319edd7760a6f37fa21149c0474df23b284/sql/04-CreateBaselineProcedure.sql). It deliberately contains multiple realistic anti-patterns while remaining bounded.
 
-## Representative nonoptimized query shape
+### Representative nonoptimized query shape
 
 The core baseline behavior is equivalent to the following excerpt from `lab.usp_MonthEndSalesBaseline`:
 
@@ -116,7 +114,7 @@ Expected anti-patterns to investigate, not assume as measured causes:
 - Table variables can contribute to estimate uncertainty depending on plan and compatibility behavior.
 - `(@TerritoryID IS NULL OR ...)` can produce parameter-sensitive behavior.
 
-## Bounded diagnostic invocation
+### Bounded diagnostic invocation
 
 Use this invocation in either editor only for a representative actual plan. The workload controller remains the benchmark authority.
 
@@ -164,16 +162,16 @@ Capture:
 
 ---
 
-# Scenario A — RDP, VS Code, MSSQL, GitHub Copilot, and SQL MCP
+## Scenario A — RDP, VS Code, MSSQL, GitHub Copilot, and SQL MCP
 
-## A1. Enter the administration VM
+### A1. Enter the administration VM
 
 1. Connect by RDP only from the approved facilitator source `/32`.
 2. Sign in with the prepared workshop administrator account.
 3. Open the cloned repository in Visual Studio Code.
 4. Do not display or record the RDP endpoint, username, subscription, tenant, or credentials in screenshots.
 
-## A2. Verify VS Code tooling
+### A2. Verify VS Code tooling
 
 Confirm these extension IDs:
 
@@ -183,7 +181,7 @@ Confirm these extension IDs:
 
 Complete GitHub Copilot sign-in interactively if prompted. Authentication tokens must never pass through the model or workshop evidence.
 
-## A3. Connect MSSQL to the private database
+### A3. Connect MSSQL to the private database
 
 Create or select a connection profile with:
 
@@ -198,7 +196,7 @@ Create or select a connection profile with:
 
 If connection validation fails, repair DNS, TCP 1433, certificate trust, or hostname. Do not set `TrustServerCertificate=True` as a shortcut.
 
-## A4. Validate and start SQL MCP
+### A4. Validate and start SQL MCP
 
 From the repository root, validate the checked-in DAB configuration:
 
@@ -228,16 +226,16 @@ Expected custom tools:
 
 Do not approve create, update, delete, arbitrary query, DDL, workload-control, or session-termination operations.
 
-## A5. Inspect the baseline
+### A5. Inspect the baseline
 
-1. Open [sql/04-CreateBaselineProcedure.sql](../sql/04-CreateBaselineProcedure.sql).
+1. Open [sql/04-CreateBaselineProcedure.sql](https://github.com/ibranibeny/mcp-sql-query-store-workshop/blob/1aebe319edd7760a6f37fa21149c0474df23b284/sql/04-CreateBaselineProcedure.sql).
 2. Connect the editor to `AdventureWorks2022`.
 3. Open a second editor with the bounded invocation shown above.
 4. Enable **Actual Execution Plan** in MSSQL.
 5. Run the invocation once.
 6. Save the `.sqlplan` file and Messages output under the ignored run evidence directory.
 
-## A6. Ask GitHub Copilot to explain
+### A6. Ask GitHub Copilot to explain
 
 Select the baseline source and attach or reference the actual plan. In Copilot Chat use `@mssql /explain`, followed by:
 
@@ -260,7 +258,7 @@ Validation
 
 Reject a response that does not identify the source, parameter values, plan properties, units, or missing evidence.
 
-## A7. Ground the review with SQL MCP
+### A7. Ground the review with SQL MCP
 
 In Agent mode, request only the bounded diagnostics needed for the exact run and UTC window. Approve each tool invocation individually.
 
@@ -286,7 +284,7 @@ Validation
 
 A point-in-time snapshot is not sufficient to classify the baseline target. The workload controller requires three consecutive samples in the target band.
 
-## A8. Ask GitHub Copilot to optimize
+### A8. Ask GitHub Copilot to optimize
 
 Select the same baseline and include the reviewed plan and SQL MCP output. Use `@mssql /optimize`, followed by:
 
@@ -315,9 +313,9 @@ Save the reviewed response as `evidence/runs/<run-id>/candidate-a-vscode.md`. Ge
 
 ---
 
-# Scenario B — RDP, SSMS, and GitHub Copilot
+## Scenario B — RDP, SSMS, and GitHub Copilot
 
-## B1. Open SSMS and connect
+### B1. Open SSMS and connect
 
 1. Stay on the same Windows 11 administration VM.
 2. Open SSMS 22.7 or later.
@@ -327,7 +325,7 @@ Save the reviewed response as `evidence/runs/<run-id>/candidate-a-vscode.md`. Ge
 
 Copilot executes only with the SQL permissions of its configured login or execution context. It does not bypass SQL authorization.
 
-## B2. Recreate the same review context
+### B2. Recreate the same review context
 
 Before displaying Candidate A or the checked-in optimized procedure:
 
@@ -338,7 +336,7 @@ Before displaying Candidate A or the checked-in optimized procedure:
 5. Confirm the plan and results pane belong to the same source and parameters used in Scenario A.
 6. Keep Candidate A hidden to preserve an independent review.
 
-## B3. Use `/explain`
+### B3. Use `/explain`
 
 Select the baseline T-SQL in the active editor. Open GitHub Copilot Chat or inline chat and run `/explain`, followed by:
 
@@ -359,7 +357,7 @@ Risks and rollback
 Validation
 ```
 
-## B4. Use `/optimize`
+### B4. Use `/optimize`
 
 With the same T-SQL selected, run `/optimize`, followed by:
 
@@ -384,7 +382,7 @@ Validation
 
 Save the reviewed response as `evidence/runs/<run-id>/candidate-b-ssms.md`.
 
-## B5. Optional Agent mode demonstration
+### B5. Optional Agent mode demonstration
 
 SSMS 22.7 introduces Agent mode as a preview. Use it only if the workshop explicitly demonstrates multi-step orchestration:
 
@@ -399,9 +397,9 @@ Ask mode remains preferred for the controlled Candidate B review.
 
 ---
 
-# Reconcile, approve, and prove
+## Reconcile, approve, and prove
 
-## Compare Candidate A and Candidate B
+### Compare Candidate A and Candidate B
 
 Use this review matrix:
 
@@ -418,11 +416,11 @@ Use this review matrix:
 | Parameter sensitivity | Risks and tests | Risks and tests | Rationale |
 | Rollback | Exact objects | Exact objects | Approved owner |
 
-Agreement between Copilot responses is not proof. Compare both against the reference candidate in [sql/06-CreateOptimizedProcedure.sql](../sql/06-CreateOptimizedProcedure.sql).
+Agreement between Copilot responses is not proof. Compare both against the reference candidate in [sql/06-CreateOptimizedProcedure.sql](https://github.com/ibranibeny/mcp-sql-query-store-workshop/blob/1aebe319edd7760a6f37fa21149c0474df23b284/sql/06-CreateOptimizedProcedure.sql).
 
-## Apply exactly one approved candidate
+### Apply exactly one approved candidate
 
-Do not run scripts 06 or 07 directly. After DBA review, use the guarded entry point:
+Do not run scripts 06 or 07 directly. After DBA review, use the guarded [Approve-WorkshopCandidate.ps1](https://github.com/ibranibeny/mcp-sql-query-store-workshop/blob/1aebe319edd7760a6f37fa21149c0474df23b284/deploy/Approve-WorkshopCandidate.ps1) entry point:
 
 ```powershell
 $candidateDba = Get-Credential -Message 'DBA credential for approved candidate creation'
@@ -434,9 +432,9 @@ $candidateDba = Get-Credential -Message 'DBA credential for approved candidate c
   -ConfirmationPhrase 'APPROVE AdventureWorks2022 candidate'
 ```
 
-The entry point applies the exact candidate and invokes [sql/07-ValidateEquivalence.sql](../sql/07-ValidateEquivalence.sql).
+The entry point applies the exact candidate and invokes [sql/07-ValidateEquivalence.sql](https://github.com/ibranibeny/mcp-sql-query-store-workshop/blob/1aebe319edd7760a6f37fa21149c0474df23b284/sql/07-ValidateEquivalence.sql).
 
-## Correctness gate
+### Correctness gate
 
 Require all of the following:
 
@@ -451,9 +449,9 @@ Require all of the following:
 
 Any mismatch rejects the candidate regardless of speed.
 
-## Shared performance gate
+### Shared performance gate
 
-Run the bounded controller described in [workshop/04-create-memory-pressure.md](04-create-memory-pressure.md). Reuse the frozen:
+Run the bounded controller described in [Workshop 04: Create bounded query-memory pressure](04-create-memory-pressure.html). Reuse the frozen:
 
 - worker count;
 - parameter schedule and hash;
@@ -468,7 +466,7 @@ The controller performs exactly twelve interleaved `ABBA BAAB ABBA` trials. Comp
 
 Use `compare_workshop_runs` only after the run, validation batch, frozen-settings hash, and all twelve trials are complete.
 
-## Decision
+### Decision
 
 Retain the candidate only when:
 
@@ -480,7 +478,7 @@ Retain the candidate only when:
 
 Use the actual classification: `TargetMet`, `ImprovedOutsideTarget`, `NoMaterialImprovement`, `BaselineTargetNotReached`, `SafetyStop`, `ManualStop`, or `Failed`.
 
-## Screenshot checklist
+### Screenshot checklist
 
 Capture only after each milestone is verified:
 

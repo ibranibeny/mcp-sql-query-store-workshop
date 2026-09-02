@@ -2,6 +2,8 @@
 
 **Instruction: 65 minutes + 10-minute break · Workshop elapsed: 285 minutes**
 
+For the complete side-by-side procedure, use the untimed [Scenario A: VS Code and Scenario B: SSMS runbook](scenario-a-vscode-scenario-b-ssms.html). It preserves one baseline, two independent Copilot reviews, and one guarded candidate approval.
+
 ## 1. Verify the workstation boundary
 
 Install or confirm exactly `ms-mssql.mssql`, `GitHub.copilot`, and `GitHub.copilot-chat`. The PowerShell extension is useful but not part of the three required database/Copilot IDs. Connect MSSQL to `sql01.mcpworkshop.internal,1433`, database `AdventureWorks2022`, with encryption enabled, certificate validation enabled, and hostname `sql01.mcpworkshop.internal`. If TLS validation fails, repair DNS, certificate trust, or hostname; do not normalize `TrustServerCertificate=True`.

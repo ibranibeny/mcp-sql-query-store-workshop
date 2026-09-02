@@ -2,6 +2,8 @@
 
 **Instruction: 55 minutes · Workshop elapsed: 340 minutes**
 
+Use the untimed [Scenario A: VS Code and Scenario B: SSMS runbook](scenario-a-vscode-scenario-b-ssms.html) when facilitating the independent Candidate A and Candidate B reviews before this module's approval and proof gates.
+
 ## Use an evidence-first Copilot workflow
 
 Require every analysis to separate **Observations**, **Missing evidence**, **Hypotheses ranked by confidence**, **Proposed experiments**, **Candidate changes**, **Risks and rollback**, and **Validation criteria**. Copilot assists the workflow; the DBA owns approvals and the final decision.

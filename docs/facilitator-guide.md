@@ -24,6 +24,8 @@ This L400 workshop demonstrates how GitHub Copilot, grounded by Microsoft SQL MC
 
 Lunch is outside the six-hour agenda.
 
+The [Scenario A: VS Code and Scenario B: SSMS runbook](scenario-a-vscode-scenario-b-ssms.html) is an untimed resource. Use it after Workshop 06 to produce Candidate A and Candidate B independently, then apply exactly one DBA-approved candidate without changing the 360-minute core agenda.
+
 ## Minute schedule and checkpoints
 
 | Elapsed | Action | Pass evidence | Fail branch |

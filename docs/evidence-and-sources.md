@@ -22,8 +22,10 @@
 | DAB roles and permissions authorize entity actions | [DAB authorization](https://learn.microsoft.com/en-us/azure/data-api-builder/concept/security/authorization-overview) |
 | SQL Server permissions remain authoritative | [Database Engine permissions](https://learn.microsoft.com/en-us/sql/relational-databases/security/authentication-access/getting-started-with-database-engine-permissions) |
 | MSSQL Copilot provides connected database assistance | [GitHub Copilot for MSSQL](https://learn.microsoft.com/en-us/sql/tools/visual-studio-code-extensions/github-copilot/overview?view=sql-server-ver17) |
-| MSSQL supports query optimization assistance | [Query optimizer assistant](https://learn.microsoft.com/en-us/sql/tools/visual-studio-code-extensions/github-copilot/query-optimizer-assistant?view=sql-server-ver17) |
+| VS Code `@mssql` supports context-aware query optimization and execution-plan analysis | [Query optimizer assistant](https://learn.microsoft.com/en-us/sql/tools/visual-studio-code-extensions/github-copilot/query-optimizer-assistant?view=sql-server-ver17) |
 | MSSQL can explain database business logic | [Business logic explainer](https://learn.microsoft.com/en-us/sql/tools/visual-studio-code-extensions/github-copilot/business-logic-explainer?view=sql-server-ver17) |
+| SSMS `/explain` and `/optimize` provide selected-query code assistance | [SSMS chat context and slash commands](https://learn.microsoft.com/en-us/ssms/github-copilot/chat-context) |
+| SSMS Agent mode pauses for approval before executing a query or command, with approval scope selected by the user | [SSMS Agent mode and tool approvals](https://learn.microsoft.com/en-us/ssms/github-copilot/agent-mode) |
 | SSMS MCP use requires Agent mode and explicit tool control | [MCP servers with Copilot in SSMS](https://learn.microsoft.com/en-us/ssms/github-copilot/mcp-servers) |
 | Query Store persists plan/runtime/wait evidence | [Monitor with Query Store](https://learn.microsoft.com/en-us/sql/relational-databases/performance/monitoring-performance-by-using-the-query-store?view=sql-server-ver17) |
 | Query Store hints are inspectable and reversible | [Query Store hints](https://learn.microsoft.com/en-us/sql/relational-databases/performance/query-store-hints?view=sql-server-ver17) |
