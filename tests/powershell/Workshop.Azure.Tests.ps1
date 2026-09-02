@@ -2323,6 +2323,29 @@ Describe 'Default Task 6 Az command contracts' {
         }
     }
 
+    It 'normalizes the Az SqlVirtualMachine 3 license property on readback' {
+        InModuleScope Workshop.Azure {
+            Mock Get-AzSqlVM {
+                [pscustomobject]@{
+                    Name = $Name
+                    Id = "/subscriptions/sub/resourceGroups/$ResourceGroupName/providers/Microsoft.SqlVirtualMachine/sqlVirtualMachines/$Name"
+                    Location = 'indonesiacentral'
+                    SqlServerLicenseType = 'PAYG'
+                    VirtualMachineResourceId = "/subscriptions/sub/resourceGroups/$ResourceGroupName/providers/Microsoft.Compute/virtualMachines/$Name"
+                }
+            }
+            $operations = Get-DefaultWorkshopServiceOperationSet
+            $spec = [pscustomobject]@{ Name = 'vm-mcpsql-sql' }
+
+            { $script:sqlIaasReadback = & $operations.GetSqlIaas $spec 'rg-mcp-sql-workshop' } |
+                Should -Not -Throw
+            $script:sqlIaasReadback.LicenseType | Should -BeExactly 'PAYG'
+            Should -Invoke Get-AzSqlVM -Times 1 -Exactly -ParameterFilter {
+                $Name -eq 'vm-mcpsql-sql' -and $ErrorAction -eq 'Stop'
+            }
+        }
+    }
+
     It 'expands and exactly normalizes native shutdown schedule properties on readback' {
         InModuleScope Workshop.Azure {
             Mock Get-AzResource {

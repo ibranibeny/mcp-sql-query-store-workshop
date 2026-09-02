@@ -2767,9 +2767,18 @@ function Get-DefaultWorkshopServiceOperationSet {
             param($Spec, $ResourceGroupName)
             try {
                 $resource = Get-AzSqlVM -ResourceGroupName $ResourceGroupName -Name $Spec.Name -ErrorAction Stop
+                $licenseType = if ($resource.PSObject.Properties.Name -contains 'SqlServerLicenseType') {
+                    [string] $resource.SqlServerLicenseType
+                }
+                elseif ($resource.PSObject.Properties.Name -contains 'LicenseType') {
+                    [string] $resource.LicenseType
+                }
+                else {
+                    $null
+                }
                 [pscustomobject][ordered]@{
                     Name = [string] $resource.Name; Id = [string] $resource.Id; Location = [string] $resource.Location
-                    LicenseType = [string] $resource.LicenseType
+                    LicenseType = $licenseType
                     VirtualMachineId = [string] $resource.VirtualMachineResourceId
                 }
             }
