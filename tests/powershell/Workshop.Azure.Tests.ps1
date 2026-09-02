@@ -1503,6 +1503,32 @@ Describe 'Default workshop network operation shape' {
         }
     }
 
+    It 'normalizes absent NIC references to null instead of an empty string' {
+        InModuleScope Workshop.Azure {
+            $native = [pscustomobject]@{
+                Name = 'nic-test'
+                Id = '/subscriptions/test/resourceGroups/rg/providers/Microsoft.Network/networkInterfaces/nic-test'
+                Location = 'indonesiacentral'
+                Tags = @{ environment = 'workshop'; workload = 'mcp-sql' }
+                NetworkSecurityGroup = $null
+                IpConfigurations = @(
+                    [pscustomobject]@{
+                        Name = 'ipconfig1'
+                        PrivateIpAllocationMethod = 'Dynamic'
+                        PrivateIpAddress = '10.20.1.4'
+                        Subnet = [pscustomobject]@{ Id = '/subscriptions/test/resourceGroups/rg/providers/Microsoft.Network/virtualNetworks/vnet/subnets/admin' }
+                        PublicIpAddress = [pscustomobject]@{ Id = '/subscriptions/test/resourceGroups/rg/providers/Microsoft.Network/publicIPAddresses/pip-admin' }
+                        ApplicationSecurityGroups = @([pscustomobject]@{ Id = '/subscriptions/test/resourceGroups/rg/providers/Microsoft.Network/applicationSecurityGroups/asg-admin' })
+                    }
+                )
+            }
+
+            $normalized = ConvertFrom-WorkshopAzNetworkResource -Kind 'NetworkInterface' -Resource $native
+            $normalized.NetworkSecurityGroupId | Should -BeNullOrEmpty
+            $normalized.NetworkSecurityGroupId | Should -Be $null
+        }
+    }
+
     It 'derives private-subnet support from command parameter metadata' {
         InModuleScope Workshop.Azure {
             Mock Get-Command {

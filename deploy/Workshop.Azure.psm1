@@ -1493,12 +1493,12 @@ function Get-WorkshopReferenceId {
     [CmdletBinding()]
     param([AllowNull()][object] $Reference)
 
-    if ($null -eq $Reference) { return '' }
+    if ($null -eq $Reference) { return $null }
     if ($Reference -is [string]) { return [string] $Reference }
     if ($Reference.PSObject.Properties.Name -contains 'Id' -and $null -ne $Reference.Id) {
         return [string] $Reference.Id
     }
-    return ''
+    return $null
 }
 
 function Get-WorkshopOptionalCollectionProperty {
