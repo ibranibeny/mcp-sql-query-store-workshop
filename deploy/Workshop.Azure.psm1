@@ -3286,6 +3286,23 @@ if ($null -eq $certificate) {
         -CertStoreLocation Cert:\LocalMachine\My -KeyExportPolicy NonExportable `
         -NotAfter (Get-Date).AddDays(7)
 }
+$rsa = [Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPrivateKey($certificate)
+if ($rsa -isnot [Security.Cryptography.RSACng]) {
+    throw 'Bootstrap payload certificate must use an RSA CNG private key.'
+}
+$keyPath = Join-Path $env:ProgramData "Microsoft\Crypto\Keys\$($rsa.Key.UniqueName)"
+$keyAcl = Get-Acl -LiteralPath $keyPath
+$keyAcl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+    'BUILTIN\Administrators', 'Read', 'Allow'
+))
+Set-Acl -LiteralPath $keyPath -AclObject $keyAcl
+$keyAclReadback = Get-Acl -LiteralPath $keyPath
+if ($null -eq ($keyAclReadback.Access | Where-Object {
+        $_.IdentityReference.Value -eq 'BUILTIN\Administrators' -and
+        $_.FileSystemRights -band [Security.AccessControl.FileSystemRights]::Read
+    } | Select-Object -First 1)) {
+    throw 'Bootstrap payload certificate key ACL was not verified.'
+}
 $path = Join-Path $env:TEMP 'mcp-workshop-bootstrap-public.cer'
 $null = Export-Certificate -Cert $certificate -FilePath $path -Force
 try { [Convert]::ToBase64String([IO.File]::ReadAllBytes($path)) }
@@ -3499,6 +3516,7 @@ function Initialize-WorkshopSqlVm {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][hashtable] $Config,
+        [Parameter(Mandatory)][PSCredential] $AdministratorCredential,
         [Parameter(Mandatory)][Security.SecureString] $DatabaseMasterKeyPassword,
         [Parameter(Mandatory)][Security.SecureString] $McpReaderPassword,
         [Parameter(Mandatory)][ValidatePattern('^https://github\.com/[^/]+/[^/]+(?:\.git)?$')][string] $RepositoryUrl,
@@ -3507,7 +3525,10 @@ function Initialize-WorkshopSqlVm {
         [hashtable] $Operations
     )
 
-    if ($DatabaseMasterKeyPassword.Length -eq 0 -or $McpReaderPassword.Length -eq 0) {
+    if ($null -eq $AdministratorCredential -or
+        [string]::IsNullOrWhiteSpace($AdministratorCredential.UserName) -or
+        $AdministratorCredential.Password.Length -eq 0 -or
+        $DatabaseMasterKeyPassword.Length -eq 0 -or $McpReaderPassword.Length -eq 0) {
         throw 'SQL bootstrap secrets must be nonempty SecureString values.'
     }
     $archiveUri = Get-WorkshopBootstrapArchiveUri -RepositoryUrl $RepositoryUrl -RepositoryCommit $RepositoryCommit
@@ -3517,16 +3538,20 @@ function Initialize-WorkshopSqlVm {
     }
     if ($null -eq $Operations) { $Operations = Get-DefaultWorkshopBootstrapOperationSet }
     Assert-WorkshopBootstrapOperationSet -Operations $Operations
+    $administratorSecret = $null
     $masterKeySecret = $null
     $readerSecret = $null
     $payload = $null
     try {
+        $administratorSecret = ConvertFrom-WorkshopSecureString $AdministratorCredential.Password
         $masterKeySecret = ConvertFrom-WorkshopSecureString $DatabaseMasterKeyPassword
         $readerSecret = ConvertFrom-WorkshopSecureString $McpReaderPassword
         $payload = @{
             ExpectedVmName = [string] $Config.SqlVm.Name
             ExpectedVmSize = [string] $Config.SqlVm.Size
             ExpectedLocation = [string] $Config.Location
+            AdministratorUserName = [string] $AdministratorCredential.UserName
+            AdministratorSecret = $administratorSecret
             DataDiskGiB = [int] $Config.SqlVm.DataDiskGiB
             LogDiskGiB = [int] $Config.SqlVm.LogDiskGiB
             RepositoryRoot = 'C:\McpSqlWorkshop\repo'
@@ -3541,9 +3566,11 @@ function Initialize-WorkshopSqlVm {
             -ProtectedPayload $payload -Operations $Operations
     }
     finally {
+        $administratorSecret = $null
         $masterKeySecret = $null
         $readerSecret = $null
         if ($null -ne $payload) {
+            $payload.AdministratorSecret = $null
             $payload.DatabaseMasterKeySecret = $null
             $payload.McpReaderSecret = $null
         }

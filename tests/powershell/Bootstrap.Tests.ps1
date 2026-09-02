@@ -487,6 +487,7 @@ Describe 'Bootstrap orchestration and evidence contracts' {
         $script:SecureValue = [Security.SecureString]::new()
         foreach ($character in 'unit-test-secret-value'.ToCharArray()) { $script:SecureValue.AppendChar($character) }
         $script:SecureValue.MakeReadOnly()
+        $script:AdministratorCredential = [PSCredential]::new('workshop-admin', $script:SecureValue)
 
         function Get-CompleteReadinessPair {
             $deploymentId = '11111111-2222-3333-4444-555555555555'
@@ -632,6 +633,7 @@ Describe 'Bootstrap orchestration and evidence contracts' {
             ReadReadiness = { [pscustomobject]@{ Completed = $true; Certificate = [pscustomobject]@{ PublicCertificatePath = 'C:\public.cer'; PublicCertificateSha256 = ('A' * 64) } } }
         }
         $result = Initialize-WorkshopSqlVm -Config $script:BootstrapConfig `
+            -AdministratorCredential $script:AdministratorCredential `
             -DatabaseMasterKeyPassword $script:SecureValue -McpReaderPassword $script:SecureValue `
             -RepositoryUrl 'https://github.com/ibranibeny/mcp-sql-query-store-workshop.git' `
             -RepositoryCommit '0123456789abcdef0123456789abcdef01234567' `
@@ -639,8 +641,21 @@ Describe 'Bootstrap orchestration and evidence contracts' {
 
         $result.Completed | Should -BeTrue
         $script:CapturedPayload.ExpectedVmName | Should -Be $script:BootstrapConfig.SqlVm.Name
+        $script:CapturedPayload.AdministratorUserName | Should -Be 'workshop-admin'
+        $script:CapturedPayload.AdministratorSecret | Should -Be 'unit-test-secret-value'
         $script:CapturedPayload.DatabaseMasterKeySecret | Should -Be 'unit-test-secret-value'
         ($result | ConvertTo-Json -Depth 10) | Should -Not -Match 'unit-test-secret-value'
+    }
+
+    It 'relaunches SQL bootstrap as the protected VM administrator without putting a secret on the command line' {
+        $text = Get-Content -LiteralPath $script:SqlBootstrapPath -Raw
+        $text | Should -Match 'AdministratorUserName'
+        $text | Should -Match 'AdministratorSecret'
+        $text | Should -Match 'Start-Process\s+-FilePath\s+\$powerShellPath'
+        $text | Should -Match '-Credential\s+\$administratorCredential'
+        $text | Should -Match '-Wait\s+-PassThru'
+        $text | Should -Match 'WindowsIdentity.*GetCurrent'
+        $text | Should -Not -Match 'ArgumentList[^\r\n]*AdministratorSecret'
     }
 
     It 'transfers only the SQL public certificate through injected admin operations' {

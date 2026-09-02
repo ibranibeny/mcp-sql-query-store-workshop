@@ -325,6 +325,7 @@ try {
 
     $sqlBootstrapParameters = @{
         Config = $config
+        AdministratorCredential = $Credential
         DatabaseMasterKeyPassword = $DatabaseMasterKeyPassword
         McpReaderPassword = $McpReaderPassword
         RepositoryUrl = $RepositoryUrl

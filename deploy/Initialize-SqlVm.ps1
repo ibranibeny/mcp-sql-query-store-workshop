@@ -291,6 +291,32 @@ $protectedPayload = Get-Content -LiteralPath $ProtectedPayloadPath -Raw
 $payload = Unprotect-CmsMessage -Content $protectedPayload | ConvertFrom-Json
 $protectedPayload = $null
 
+$expectedAdministratorIdentity = "$env:COMPUTERNAME\$($payload.AdministratorUserName)"
+$currentIdentity = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+if ($currentIdentity -ine $expectedAdministratorIdentity) {
+    $administratorSecure = ConvertTo-SecureValue -Value ([string] $payload.AdministratorSecret)
+    $administratorCredential = [PSCredential]::new($expectedAdministratorIdentity, $administratorSecure)
+    $powerShellPath = Join-Path $PSHOME 'powershell.exe'
+    $childProcess = $null
+    try {
+        $childProcess = Start-Process -FilePath $powerShellPath -Credential $administratorCredential `
+            -ArgumentList @(
+                '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+                '-File', $PSCommandPath, '-ProtectedPayloadPath', $ProtectedPayloadPath
+            ) -LoadUserProfile -Wait -PassThru
+    }
+    finally {
+        $payload.AdministratorSecret = $null
+        $administratorCredential = $null
+        $administratorSecure = $null
+    }
+    if ($null -eq $childProcess -or $childProcess.ExitCode -ne 0) {
+        Remove-Item -LiteralPath $ProtectedPayloadPath -Force -ErrorAction SilentlyContinue
+        throw 'SQL bootstrap administrator process failed.'
+    }
+    return
+}
+
 try {
     $metadata = Invoke-RestMethod -Headers @{ Metadata = 'true' } -Method Get -Uri $metadataUri -TimeoutSec 10
     Assert-Condition ($metadata.compute.name -ceq $payload.ExpectedVmName) 'IMDS VM identity does not match.'
@@ -546,7 +572,11 @@ finally {
         $null = Stop-Transcript -ErrorAction SilentlyContinue
         if (Test-Path -LiteralPath $transcriptPath) {
             $transcript = Get-Content -LiteralPath $transcriptPath -Raw
-            foreach ($secretValue in @($payload.DatabaseMasterKeySecret, $payload.McpReaderSecret)) {
+            foreach ($secretValue in @(
+                $payload.AdministratorSecret,
+                $payload.DatabaseMasterKeySecret,
+                $payload.McpReaderSecret
+            )) {
                 if (-not [string]::IsNullOrEmpty([string]$secretValue)) {
                     $transcript = $transcript -replace [regex]::Escape([string]$secretValue), '[REDACTED]'
                 }
@@ -556,6 +586,7 @@ finally {
         }
     }
     if ($null -ne $payload) {
+        $payload.AdministratorSecret = $null
         $payload.DatabaseMasterKeySecret = $null
         $payload.McpReaderSecret = $null
     }

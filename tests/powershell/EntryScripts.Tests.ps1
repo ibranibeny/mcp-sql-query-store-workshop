@@ -100,6 +100,7 @@ Describe 'Workshop deployment entry script gates' {
             AdminBootstrap = 0
             Readiness = 0
             PreflightPassed = $true
+            SqlAdministratorCredential = $null
         }
         $script:Sequence = [System.Collections.Generic.List[string]]::new()
         $counters = $script:Counters
@@ -190,7 +191,7 @@ Describe 'Workshop deployment entry script gates' {
             }).GetNewClosure()
             InitializeSqlVm = ({
                 param($Parameters)
-                $null = $Parameters
+                $counters.SqlAdministratorCredential = $Parameters.AdministratorCredential
                 $counters.SqlBootstrap++
                 $sequence.Add('sql-bootstrap')
                 [pscustomobject]@{
@@ -253,6 +254,7 @@ Describe 'Workshop deployment entry script gates' {
         $script:Counters.Shutdown | Should -Be 1
         $script:Counters.VmBoundary | Should -Be 1
         $script:Counters.SqlBootstrap | Should -Be 1
+        $script:Counters.SqlAdministratorCredential | Should -Be $script:Credential
         $script:Counters.AdminBootstrap | Should -Be 1
         $script:Counters.Readiness | Should -Be 1
         $script:Sequence | Should -Be @(
