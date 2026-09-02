@@ -191,6 +191,102 @@ function Get-WorkshopAccessibleRsaPrivateKey {
     }
 }
 
+function Invoke-WorkshopAdministratorBootstrap {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string] $UserName,
+        [Parameter(Mandatory)][Security.SecureString] $Password,
+        [Parameter(Mandatory)][string] $ScriptPath,
+        [Parameter(Mandatory)][string] $PayloadPath,
+        [Parameter(Mandatory)][string] $CompletionPath,
+        [ValidateRange(1, 7200)][int] $MaximumAttempts = 7200,
+        [scriptblock] $WaitOperation = { [Threading.Thread]::Sleep(3000) }
+    )
+
+    $taskName = 'McpSqlWorkshop-SqlBootstrap-' + [guid]::NewGuid().ToString('N')
+    $taskService = $null
+    $taskFolder = $null
+    $taskDefinition = $null
+    $registeredTask = $null
+    $runningTask = $null
+    $action = $null
+    $passwordPointer = [IntPtr]::Zero
+    $plainPassword = $null
+    try {
+        $taskService = New-Object -ComObject 'Schedule.Service'
+        $taskService.Connect()
+        $taskFolder = $taskService.GetFolder('\')
+        $taskDefinition = $taskService.NewTask(0)
+        $taskDefinition.RegistrationInfo.Description = 'Temporary MCP SQL workshop bootstrap task.'
+        $taskDefinition.Principal.UserId = $UserName
+        $taskDefinition.Principal.LogonType = 1
+        $taskDefinition.Principal.RunLevel = 1
+        $taskDefinition.Settings.Enabled = $true
+        $taskDefinition.Settings.Hidden = $true
+        $taskDefinition.Settings.StartWhenAvailable = $true
+        $taskDefinition.Settings.AllowDemandStart = $true
+        $taskDefinition.Settings.DisallowStartIfOnBatteries = $false
+        $taskDefinition.Settings.StopIfGoingOnBatteries = $false
+        $taskDefinition.Settings.ExecutionTimeLimit = 'PT6H'
+        $action = $taskDefinition.Actions.Create(0)
+        $powerShellPath = Join-Path $PSHOME 'powershell.exe'
+        $action.Path = $powerShellPath
+        $action.Arguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' +
+            $ScriptPath + '" -ProtectedPayloadPath "' + $PayloadPath + '"'
+
+        $passwordPointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($Password)
+        $plainPassword = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($passwordPointer)
+        $registeredTask = $taskFolder.RegisterTaskDefinition(
+            $taskName, $taskDefinition, 6, $UserName, $plainPassword, 1, $null
+        )
+        $plainPassword = $null
+        [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($passwordPointer)
+        $passwordPointer = [IntPtr]::Zero
+        $runningTask = $registeredTask.Run($null)
+
+        $completionObserved = $false
+        for ($attempt = 1; $attempt -le $MaximumAttempts; $attempt++) {
+            if (Test-Path -LiteralPath $CompletionPath -PathType Leaf) {
+                $completionObserved = $true
+            }
+            $state = [int] $runningTask.State
+            if ($state -notin @(2, 4)) {
+                $lastResult = [int] $registeredTask.LastTaskResult
+                if ($lastResult -ne 0) {
+                    throw "SQL bootstrap administrator task failed with result $lastResult."
+                }
+                if (-not $completionObserved) {
+                    throw 'SQL bootstrap administrator task completed without readiness evidence.'
+                }
+                return
+            }
+            if ($attempt -lt $MaximumAttempts) { & $WaitOperation $attempt }
+        }
+        throw "SQL bootstrap administrator task did not finish within $MaximumAttempts checks."
+    }
+    finally {
+        $plainPassword = $null
+        if ($passwordPointer -ne [IntPtr]::Zero) {
+            [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($passwordPointer)
+        }
+        if ($null -ne $registeredTask) {
+            try {
+                if ([int] $registeredTask.State -eq 4) { $registeredTask.Stop(0) }
+            }
+            catch { Write-Verbose 'Temporary bootstrap task was already stopped.' }
+        }
+        if ($null -ne $taskFolder) {
+            try { $taskFolder.DeleteTask($taskName, 0) }
+            catch { Write-Warning 'Temporary bootstrap task cleanup could not be verified.' }
+        }
+        foreach ($comObject in @($action, $runningTask, $registeredTask, $taskDefinition, $taskFolder, $taskService)) {
+            if ($null -ne $comObject -and [Runtime.InteropServices.Marshal]::IsComObject($comObject)) {
+                $null = [Runtime.InteropServices.Marshal]::FinalReleaseComObject($comObject)
+            }
+        }
+    }
+}
+
 function Mount-WorkshopDisk {
     [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'Low')]
     param(
@@ -295,24 +391,15 @@ $expectedAdministratorIdentity = "$env:COMPUTERNAME\$($payload.AdministratorUser
 $currentIdentity = [Security.Principal.WindowsIdentity]::GetCurrent().Name
 if ($currentIdentity -ine $expectedAdministratorIdentity) {
     $administratorSecure = ConvertTo-SecureValue -Value ([string] $payload.AdministratorSecret)
-    $administratorCredential = [PSCredential]::new($expectedAdministratorIdentity, $administratorSecure)
-    $powerShellPath = Join-Path $PSHOME 'powershell.exe'
-    $childProcess = $null
     try {
-        $childProcess = Start-Process -FilePath $powerShellPath -Credential $administratorCredential `
-            -ArgumentList @(
-                '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
-                '-File', $PSCommandPath, '-ProtectedPayloadPath', $ProtectedPayloadPath
-            ) -LoadUserProfile -Wait -PassThru
+        Invoke-WorkshopAdministratorBootstrap -UserName $expectedAdministratorIdentity `
+            -Password $administratorSecure -ScriptPath $PSCommandPath `
+            -PayloadPath $ProtectedPayloadPath -CompletionPath $readinessPath
     }
     finally {
         $payload.AdministratorSecret = $null
-        $administratorCredential = $null
         $administratorSecure = $null
-    }
-    if ($null -eq $childProcess -or $childProcess.ExitCode -ne 0) {
         Remove-Item -LiteralPath $ProtectedPayloadPath -Force -ErrorAction SilentlyContinue
-        throw 'SQL bootstrap administrator process failed.'
     }
     return
 }

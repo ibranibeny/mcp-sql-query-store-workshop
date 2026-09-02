@@ -647,15 +647,19 @@ Describe 'Bootstrap orchestration and evidence contracts' {
         ($result | ConvertTo-Json -Depth 10) | Should -Not -Match 'unit-test-secret-value'
     }
 
-    It 'relaunches SQL bootstrap as the protected VM administrator without putting a secret on the command line' {
+    It 'relaunches SQL bootstrap through a bounded temporary administrator task without command-line secrets' {
         $text = Get-Content -LiteralPath $script:SqlBootstrapPath -Raw
         $text | Should -Match 'AdministratorUserName'
         $text | Should -Match 'AdministratorSecret'
-        $text | Should -Match 'Start-Process\s+-FilePath\s+\$powerShellPath'
-        $text | Should -Match '-Credential\s+\$administratorCredential'
-        $text | Should -Match '-Wait\s+-PassThru'
+        $text | Should -Match "New-Object\s+-ComObject\s+'Schedule\.Service'"
+        $text | Should -Match 'RegisterTaskDefinition'
+        $text | Should -Match 'DeleteTask'
+        $text | Should -Match 'LastTaskResult'
+        $text | Should -Match 'MaximumAttempts'
+        $text | Should -Match 'Threading\.Thread.*Sleep'
         $text | Should -Match 'WindowsIdentity.*GetCurrent'
-        $text | Should -Not -Match 'ArgumentList[^\r\n]*AdministratorSecret'
+        $text | Should -Not -Match 'Start-Process\s+-FilePath\s+\$powerShellPath\s+-Credential'
+        $text | Should -Not -Match 'Arguments[^\r\n]*AdministratorSecret'
     }
 
     It 'transfers only the SQL public certificate through injected admin operations' {
