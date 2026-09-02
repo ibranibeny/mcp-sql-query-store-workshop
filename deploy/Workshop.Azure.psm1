@@ -3168,7 +3168,15 @@ function Expand-WorkshopBootstrapArchive {
         [Parameter(Mandatory)][string] $ArchivePath,
         [Parameter(Mandatory)][string] $DestinationPath,
         [Parameter(Mandatory)][ValidatePattern('^[0-9a-f]{40}$')][string] $RepositoryCommit,
-        [Parameter(Mandatory)][ValidateSet('Initialize-SqlVm.ps1', 'Invoke-AdminBootstrap.ps1')][string] $ApprovedBootstrapEntryPoint
+        [Parameter(Mandatory)][ValidateSet('Initialize-SqlVm.ps1', 'Invoke-AdminBootstrap.ps1')][string] $ApprovedBootstrapEntryPoint,
+        [ValidateRange(1, 10)][int] $MaximumPromotionAttempts = 5,
+        [scriptblock] $PromoteOperation = {
+            param($Source, $Destination)
+            Move-Item -LiteralPath $Source -Destination $Destination -ErrorAction Stop
+        },
+        [scriptblock] $WaitOperation = {
+            [System.Threading.Thread]::Sleep(500)
+        }
     )
 
     $expectedRootName = "mcp-sql-query-store-workshop-$RepositoryCommit"
@@ -3225,7 +3233,32 @@ function Expand-WorkshopBootstrapArchive {
             throw 'Repository archive rejected: approved bootstrap entry point did not extract as a regular file.'
         }
         if (Test-Path -LiteralPath $DestinationPath) { Remove-Item -LiteralPath $DestinationPath -Recurse -Force }
-        Move-Item -LiteralPath $topLevelEntries[0].FullName -Destination $DestinationPath
+        $promotionError = $null
+        for ($attempt = 1; $attempt -le $MaximumPromotionAttempts; $attempt++) {
+            try {
+                & $PromoteOperation $topLevelEntries[0].FullName $DestinationPath
+                $promotionError = $null
+                break
+            }
+            catch {
+                $promotionError = $_
+                if (Test-Path -LiteralPath $DestinationPath) {
+                    throw 'Repository archive promotion created an ambiguous partial destination.'
+                }
+                if ($attempt -lt $MaximumPromotionAttempts) {
+                    & $WaitOperation $attempt
+                }
+            }
+        }
+        if ($null -ne $promotionError) { throw $promotionError }
+        if (-not (Test-Path -LiteralPath (Join-Path $DestinationPath "deploy\$ApprovedBootstrapEntryPoint") -PathType Leaf)) {
+            throw 'Repository archive promotion did not preserve the approved bootstrap entry point.'
+        }
+        if (@(Get-ChildItem -LiteralPath $DestinationPath -Force -Recurse | Where-Object {
+                ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0
+            }).Count -ne 0) {
+            throw 'Repository archive promotion produced a reparse entry.'
+        }
         $DestinationPath
     }
     finally {

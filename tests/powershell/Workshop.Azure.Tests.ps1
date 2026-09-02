@@ -2513,6 +2513,40 @@ Describe 'Bootstrap repository supply-chain boundary' {
             Should -BeTrue
     }
 
+    It 'retries validated archive promotion boundedly when the first move is temporarily denied' {
+        $archivePath = Join-Path $TestDrive 'promotion-retry.zip'
+        $destination = Join-Path $TestDrive 'promotion-retry-repository'
+        Write-BootstrapTestArchive -Path $archivePath -Entries @(
+            [pscustomobject]@{ Name = 'mcp-sql-query-store-workshop-0123456789abcdef0123456789abcdef01234567/deploy/Initialize-SqlVm.ps1'; Content = '# approved' }
+        )
+
+        InModuleScope Workshop.Azure -Parameters @{
+            ArchivePath = $archivePath
+            Destination = $destination
+            Commit = $script:RepositoryCommit
+        } {
+            param($ArchivePath, $Destination, $Commit)
+            $script:promotionAttempts = 0
+            $script:promotionWaits = 0
+            $promote = {
+                param($Source, $Target)
+                $script:promotionAttempts++
+                if ($script:promotionAttempts -eq 1) {
+                    throw [System.UnauthorizedAccessException]::new('temporarily locked')
+                }
+                Move-Item -LiteralPath $Source -Destination $Target -ErrorAction Stop
+            }
+            $wait = { $script:promotionWaits++ }
+
+            Expand-WorkshopBootstrapArchive -ArchivePath $ArchivePath -DestinationPath $Destination `
+                -RepositoryCommit $Commit -ApprovedBootstrapEntryPoint 'Initialize-SqlVm.ps1' `
+                -PromoteOperation $promote -WaitOperation $wait -MaximumPromotionAttempts 3 |
+                Should -Be $Destination
+            $script:promotionAttempts | Should -Be 2
+            $script:promotionWaits | Should -Be 1
+        }
+    }
+
     It 'validates and extracts the archive before invoking the approved bootstrap entry point' {
         $moduleText = Get-Content -LiteralPath (Join-Path $PSScriptRoot '../../deploy/Workshop.Azure.psm1') -Raw
         $stageAt = $moduleText.IndexOf('StageBootstrapFiles = {')
