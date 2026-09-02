@@ -1501,6 +1501,19 @@ function Get-WorkshopReferenceId {
     return ''
 }
 
+function Get-WorkshopOptionalCollectionProperty {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][psobject] $InputObject,
+        [Parameter(Mandatory)][ValidateNotNullOrEmpty()][string] $PropertyName
+    )
+
+    if ($InputObject.PSObject.Properties.Name -notcontains $PropertyName) {
+        return @()
+    }
+    return @($InputObject.$PropertyName | Where-Object { $null -ne $_ })
+}
+
 function ConvertFrom-WorkshopAzNetworkResource {
     [CmdletBinding()]
     param(
@@ -1547,19 +1560,29 @@ function ConvertFrom-WorkshopAzNetworkResource {
         }
         'NetworkSecurityGroup' {
             $rules = @($Resource.SecurityRules | ForEach-Object {
+                $sourceApplicationSecurityGroups = @(
+                    Get-WorkshopOptionalCollectionProperty -InputObject $_ `
+                        -PropertyName 'SourceApplicationSecurityGroups'
+                )
+                $destinationApplicationSecurityGroups = @(
+                    Get-WorkshopOptionalCollectionProperty -InputObject $_ `
+                        -PropertyName 'DestinationApplicationSecurityGroups'
+                )
                 [pscustomobject][ordered]@{
                     Name = [string] $_.Name; Priority = [int] $_.Priority; Direction = [string] $_.Direction
                     Access = [string] $_.Access; Protocol = [string] $_.Protocol
                     SourcePortRange = [string] $_.SourcePortRange; SourceAddressPrefix = [string] $_.SourceAddressPrefix
                     SourceApplicationSecurityGroupId = Get-WorkshopReferenceId -Reference `
-                        ($_.SourceApplicationSecurityGroups | Where-Object { $null -ne $_ } | Select-Object -First 1)
-                    SourcePortRanges = @($_.SourcePortRanges); SourceAddressPrefixes = @($_.SourceAddressPrefixes)
-                    SourceApplicationSecurityGroupIds = @($_.SourceApplicationSecurityGroups | ForEach-Object { Get-WorkshopReferenceId -Reference $_ })
+                        ($sourceApplicationSecurityGroups | Select-Object -First 1)
+                    SourcePortRanges = @(Get-WorkshopOptionalCollectionProperty -InputObject $_ -PropertyName 'SourcePortRanges')
+                    SourceAddressPrefixes = @(Get-WorkshopOptionalCollectionProperty -InputObject $_ -PropertyName 'SourceAddressPrefixes')
+                    SourceApplicationSecurityGroupIds = @($sourceApplicationSecurityGroups | ForEach-Object { Get-WorkshopReferenceId -Reference $_ })
                     DestinationPortRange = [string] $_.DestinationPortRange; DestinationAddressPrefix = [string] $_.DestinationAddressPrefix
                     DestinationApplicationSecurityGroupId = Get-WorkshopReferenceId -Reference `
-                        ($_.DestinationApplicationSecurityGroups | Where-Object { $null -ne $_ } | Select-Object -First 1)
-                    DestinationPortRanges = @($_.DestinationPortRanges); DestinationAddressPrefixes = @($_.DestinationAddressPrefixes)
-                    DestinationApplicationSecurityGroupIds = @($_.DestinationApplicationSecurityGroups | ForEach-Object { Get-WorkshopReferenceId -Reference $_ })
+                        ($destinationApplicationSecurityGroups | Select-Object -First 1)
+                    DestinationPortRanges = @(Get-WorkshopOptionalCollectionProperty -InputObject $_ -PropertyName 'DestinationPortRanges')
+                    DestinationAddressPrefixes = @(Get-WorkshopOptionalCollectionProperty -InputObject $_ -PropertyName 'DestinationAddressPrefixes')
+                    DestinationApplicationSecurityGroupIds = @($destinationApplicationSecurityGroups | ForEach-Object { Get-WorkshopReferenceId -Reference $_ })
                 }
             })
             return [pscustomobject][ordered]@{ Kind = $Kind; Name = $name; Location = $location; Id = [string] $Resource.Id; Tags = $tags; Rules = $rules }

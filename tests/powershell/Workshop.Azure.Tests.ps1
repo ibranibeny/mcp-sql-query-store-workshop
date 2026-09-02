@@ -1456,7 +1456,7 @@ Describe 'Default workshop network operation shape' {
         }
     }
 
-    It 'normalizes NSG rules with an empty source ASG collection without indexing past the array' {
+    It 'normalizes singular-only NSG rules with an empty source ASG collection' {
         InModuleScope Workshop.Azure {
             $destinationAsg = [pscustomobject]@{ Id = '/subscriptions/test/resourceGroups/rg/providers/Microsoft.Network/applicationSecurityGroups/asg-admin' }
             $native = [pscustomobject]@{
@@ -1468,10 +1468,8 @@ Describe 'Default workshop network operation shape' {
                     [pscustomobject]@{
                         Name = 'Allow-Rdp'; Priority = 100; Direction = 'Inbound'; Access = 'Allow'; Protocol = 'Tcp'
                         SourcePortRange = '*'; SourceAddressPrefix = '203.0.113.10/32'
-                        SourcePortRanges = @(); SourceAddressPrefixes = @()
                         SourceApplicationSecurityGroups = @()
                         DestinationPortRange = '3389'; DestinationAddressPrefix = $null
-                        DestinationPortRanges = @(); DestinationAddressPrefixes = @()
                         DestinationApplicationSecurityGroups = @($destinationAsg)
                     }
                 )
@@ -1482,6 +1480,8 @@ Describe 'Default workshop network operation shape' {
             $script:normalizedNsg.Rules | Should -HaveCount 1
             $script:normalizedNsg.Rules[0].SourceApplicationSecurityGroupId | Should -BeNullOrEmpty
             $script:normalizedNsg.Rules[0].DestinationApplicationSecurityGroupId | Should -BeExactly $destinationAsg.Id
+            $script:normalizedNsg.Rules[0].SourcePortRanges | Should -HaveCount 0
+            $script:normalizedNsg.Rules[0].DestinationAddressPrefixes | Should -HaveCount 0
         }
     }
 
