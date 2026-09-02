@@ -780,6 +780,27 @@ Describe 'Bootstrap orchestration and evidence contracts' {
         $function.Extent.Text | Should -Not -Match 'Arguments[^\r\n]*plainPassword'
     }
 
+    It 'keeps the guest wait budget inside the CustomScriptExtension timeout' {
+        $function = $script:SqlContract.Ast.Find({
+            param($node)
+            $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -eq 'Invoke-WorkshopAdministratorBootstrap'
+        }, $true)
+        $parameter = $function.Body.ParamBlock.Parameters | Where-Object {
+            $_.Name.VariablePath.UserPath -eq 'MaximumAttempts'
+        }
+        $parameter | Should -Not -BeNullOrEmpty
+
+        $range = $parameter.Attributes | Where-Object { $_.TypeName.FullName -eq 'ValidateRange' }
+        $maximumAllowed = [int] $range.PositionalArguments[1].Value
+        $defaultAttempts = [int] $parameter.DefaultValue.Value
+
+        # The loop sleeps 3s per attempt and CustomScriptExtension gives up near 90 minutes,
+        # so a larger budget yields a multi-hour stuck extension instead of a clear failure.
+        ($defaultAttempts * 3) | Should -BeLessOrEqual 3600
+        ($maximumAllowed * 3) | Should -BeLessThan 5400
+    }
+
     It 'stops queued and running temporary tasks before deletion through executable cleanup behavior' -ForEach @(
         @{ State = 2; ExpectedStops = 1 }
         @{ State = 4; ExpectedStops = 1 }

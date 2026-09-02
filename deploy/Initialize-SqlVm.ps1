@@ -317,7 +317,10 @@ function Invoke-WorkshopAdministratorBootstrap {
             $parsed = [guid]::Empty
             [guid]::TryParseExact($_, 'D', [ref] $parsed) -and $parsed.ToString('D') -ceq $_
         })][string] $ExpectedDeploymentId,
-        [ValidateRange(1, 7200)][int] $MaximumAttempts = 7200,
+        # 3s per attempt. The default is 60 minutes and the ceiling 75, because
+        # CustomScriptExtension times out near 90; a longer budget only produces a
+        # multi-hour stuck extension instead of an actionable failure.
+        [ValidateRange(1, 1500)][int] $MaximumAttempts = 1200,
         [scriptblock] $WaitOperation = { [Threading.Thread]::Sleep(3000) }
     )
 
