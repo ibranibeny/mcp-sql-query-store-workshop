@@ -179,6 +179,7 @@ Describe 'Workshop configuration defaults' {
         $Config.SqlVm.LogDiskGiB | Should -Be 128
         $Config.SqlVm.LicenseType | Should -Be 'PAYG'
         $Config.AutoShutdownTime | Should -Be '1900'
+        $Config.AutoShutdownLocation | Should -Be 'southeastasia'
         $Config.Tags.environment | Should -Be 'workshop'
         $Config.Tags.workload | Should -Be 'mcp-sql'
         $Config.Tags.managedBy | Should -Be 'PowerShell'
@@ -1442,7 +1443,7 @@ Describe 'Workshop network boundary verification' {
 Describe 'Default workshop network operation shape' {
     It 'normalizes native network resources that expose Tag instead of Tags' {
         InModuleScope Workshop.Azure {
-            $native = [Microsoft.Azure.Commands.Network.Models.PSApplicationSecurityGroup]@{
+            $native = [pscustomobject]@{
                 Name = 'asg-test'
                 Id = '/subscriptions/test/resourceGroups/rg/providers/Microsoft.Network/applicationSecurityGroups/asg-test'
                 Location = 'indonesiacentral'
@@ -1956,6 +1957,7 @@ Describe 'SQL IaaS and auto-shutdown exact resources' {
         $script:ScheduleCreates | Should -HaveCount 2
         @($script:ScheduleCreates.Name) | Should -Be @('shutdown-computevm-vm-mcpsql-admin', 'shutdown-computevm-vm-mcpsql-sql')
         foreach ($schedule in $script:ScheduleCreates) {
+            $schedule.Location | Should -Be 'southeastasia'
             $schedule.Status | Should -Be 'Enabled'
             $schedule.TaskType | Should -Be 'ComputeVmShutdownTask'
             $schedule.DailyRecurrenceTime | Should -Be '1900'
@@ -2304,7 +2306,7 @@ Describe 'Default Task 6 Az command contracts' {
             $iaas = [pscustomobject]@{ Name='vm-mcpsql-sql'; Location='indonesiacentral' }
             $schedule = [pscustomobject]@{
                 Id='/subscriptions/sub/resourceGroups/rg/providers/microsoft.devtestlab/schedules/shutdown-computevm-vm'
-                Location='indonesiacentral'
+                Location='southeastasia'
                 Status='Enabled'; TaskType='ComputeVmShutdownTask'; TimeZoneId='UTC'
                 DailyRecurrenceTime='1900'; TargetResourceId='/subscriptions/sub/resourceGroups/rg/providers/Microsoft.Compute/virtualMachines/vm'
                 NotificationStatus='Disabled'; NotificationTimeInMinutes=30
@@ -2318,7 +2320,7 @@ Describe 'Default Task 6 Az command contracts' {
             }
             Should -Invoke New-AzResource -Times 1 -Exactly -ParameterFilter {
                 $ResourceId -match '/microsoft\.devtestlab/schedules/' -and $ApiVersion -eq '2018-09-15' -and
-                $Location -eq 'indonesiacentral' -and
+                $Location -eq 'southeastasia' -and
                 $Properties.status -eq 'Enabled' -and $Properties.dailyRecurrence.time -eq '1900' -and
                 $Force -and $ErrorAction -eq 'Stop'
             }

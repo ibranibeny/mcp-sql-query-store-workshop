@@ -78,7 +78,7 @@ function Assert-WorkshopConfigShape {
     $requiredTopLevel = @(
         'Location', 'ResourceGroupName', 'VNet', 'AdminSubnet', 'SqlSubnet',
         'AdminAsg', 'SqlAsg', 'PrivateDnsZone', 'SqlPrivateIp', 'AdminVm',
-        'SqlVm', 'AutoShutdownTime', 'Tags'
+        'SqlVm', 'AutoShutdownTime', 'AutoShutdownLocation', 'Tags'
     )
     foreach ($key in $requiredTopLevel) {
         if (-not $Config.ContainsKey($key) -or $null -eq $Config[$key]) {
@@ -134,6 +134,7 @@ function Assert-WorkshopConfigShape {
         @{ Label = 'SqlVm.Offer'; Value = $Config.SqlVm.Offer }
         @{ Label = 'SqlVm.Sku'; Value = $Config.SqlVm.Sku }
         @{ Label = 'SqlVm.LicenseType'; Value = $Config.SqlVm.LicenseType }
+        @{ Label = 'AutoShutdownLocation'; Value = $Config.AutoShutdownLocation }
     )
     foreach ($item in $requiredStrings) {
         if ($item.Value -isnot [string] -or [string]::IsNullOrWhiteSpace($item.Value)) {
@@ -2873,7 +2874,7 @@ function Get-WorkshopShutdownSpecification {
         [pscustomobject][ordered]@{
             Name = $name
             Id = "/subscriptions/$SubscriptionId/resourceGroups/$($Config.ResourceGroupName)/providers/microsoft.devtestlab/schedules/$name"
-            Location = [string] $Config.Location
+            Location = [string] $Config.AutoShutdownLocation
             Status = 'Enabled'
             TaskType = 'ComputeVmShutdownTask'
             DailyRecurrenceTime = [string] $Config.AutoShutdownTime
