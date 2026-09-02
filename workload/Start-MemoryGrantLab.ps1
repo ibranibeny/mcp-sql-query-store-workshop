@@ -33,7 +33,7 @@ param(
 
     [Parameter()]
     [ValidateRange(1, 60)]
-    [int] $CommandTimeoutSeconds = 1,
+    [int] $CommandTimeoutSeconds = 30,
 
     [Parameter()]
     [ValidateRange(0.10, 0.80)]

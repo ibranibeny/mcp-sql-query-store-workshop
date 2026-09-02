@@ -23,6 +23,9 @@ $script:SecretAssignmentPattern = @'
 )
 |(?:-----BEGIN\s+.*PRIVATE\s+KEY-----)
 '@
+$script:WorkerOrphanLimit = 8
+$script:WorkerOrphans = [Collections.Generic.List[object]]::new()
+$script:WorkerReservationCount = 0
 
 function Resolve-CanonicalEnum {
     param(
@@ -112,6 +115,277 @@ function ConvertTo-SanitizedFailureMessage {
     }
     $text = [regex]::Replace($text, '\s+', ' ').Trim()
     return $text.Substring(0, [math]::Min(512, $text.Length))
+}
+
+function Wait-WorkshopPowerShellStop {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [object] $PowerShell,
+
+        [Parameter(Mandatory)]
+        [object] $AsyncResult,
+
+        [Parameter(Mandatory)]
+        [ref] $PendingStopResult,
+
+        [Parameter(Mandatory)]
+        [ref] $StopEnded,
+
+        [Parameter()]
+        [ValidateRange(0, 1000)]
+        [int] $TimeoutMilliseconds = 1000
+    )
+
+    if ($AsyncResult.IsCompleted) { return $true }
+    $stopResult = $PowerShell.BeginStop($null, $null)
+    $PendingStopResult.Value = $stopResult
+    $stopCompleted = $stopResult.AsyncWaitHandle.WaitOne(
+        [TimeSpan]::FromMilliseconds($TimeoutMilliseconds)
+    )
+    if (-not $stopCompleted -or -not $AsyncResult.IsCompleted) { return $false }
+    try { $PowerShell.EndStop($stopResult) }
+    finally { $StopEnded.Value = $true }
+    return $true
+}
+
+function Complete-WorkshopWorkerResource {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][object] $Handle)
+
+    $cleanupError = $null
+    try {
+        if ($null -ne $Handle.PowerShell -and $null -ne $Handle.PendingStopResult -and
+            -not $Handle.StopEnded) {
+            try { $Handle.PowerShell.EndStop($Handle.PendingStopResult) }
+            catch { $cleanupError = $_ }
+            finally { $Handle.StopEnded = $true }
+        }
+        if ($null -ne $Handle.PowerShell -and $null -ne $Handle.AsyncResult -and
+            -not $Handle.EndInvoked) {
+            try { [void] $Handle.PowerShell.EndInvoke($Handle.AsyncResult) }
+            catch { if ($null -eq $cleanupError) { $cleanupError = $_ } }
+            finally { $Handle.EndInvoked = $true }
+        }
+    }
+    finally {
+        try {
+            if ($null -ne $Handle.PowerShell -and -not $Handle.PowerShellDisposed) {
+                $Handle.PowerShell.Dispose()
+                $Handle.PowerShellDisposed = $true
+            }
+        }
+        catch { if ($null -eq $cleanupError) { $cleanupError = $_ } }
+        finally {
+            try {
+                if ($null -ne $Handle.Runspace -and -not $Handle.RunspaceDisposed) {
+                    $Handle.Runspace.Dispose()
+                    $Handle.RunspaceDisposed = $true
+                }
+            }
+            catch { if ($null -eq $cleanupError) { $cleanupError = $_ } }
+            finally {
+                try {
+                    if ($null -ne $Handle.ReadySignal -and -not $Handle.ReadySignalDisposed) {
+                        $Handle.ReadySignal.Dispose()
+                        $Handle.ReadySignalDisposed = $true
+                    }
+                }
+                catch { if ($null -eq $cleanupError) { $cleanupError = $_ } }
+                finally {
+                    $Handle.Disposed = ($null -eq $Handle.PowerShell -or $Handle.PowerShellDisposed) -and
+                        ($null -eq $Handle.Runspace -or $Handle.RunspaceDisposed) -and
+                        ($null -eq $Handle.ReadySignal -or $Handle.ReadySignalDisposed)
+                    if ($Handle.Disposed -and $Handle.CapacityReserved) {
+                        $script:WorkerReservationCount = [math]::Max(0, $script:WorkerReservationCount - 1)
+                        $Handle.CapacityReserved = $false
+                    }
+                }
+            }
+        }
+    }
+    if ($null -ne $cleanupError) {
+        if (-not $Handle.Disposed) {
+            try { Add-WorkshopWorkerOrphan -Handle $Handle }
+            catch { Write-Warning 'Worker cleanup ownership could not be recorded.' }
+        }
+        throw $cleanupError
+    }
+}
+
+function Add-WorkshopWorkerOrphan {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][object] $Handle)
+
+    if (-not $script:WorkerOrphans.Contains($Handle)) {
+        if ($script:WorkerOrphans.Count -ge $script:WorkerOrphanLimit) {
+            throw 'The bounded worker orphan registry is full; no additional worker may be retained.'
+        }
+        [void] $script:WorkerOrphans.Add($Handle)
+    }
+    Write-Warning 'Worker resources remain process-owned in the bounded orphan registry and will not be synchronously disposed until lifecycle completion permits safe cleanup.'
+}
+
+function Invoke-WorkshopCompletedWorkerReaping {
+    [CmdletBinding()]
+    param()
+
+    for ($index = $script:WorkerOrphans.Count - 1; $index -ge 0; $index--) {
+        $orphan = $script:WorkerOrphans[$index]
+        if ($null -ne $orphan.AsyncResult -and -not $orphan.AsyncResult.IsCompleted) { continue }
+        if ($null -ne $orphan.PendingStopResult -and -not $orphan.StopEnded -and
+            -not $orphan.PendingStopResult.AsyncWaitHandle.WaitOne([TimeSpan]::Zero)) {
+            continue
+        }
+        try { Complete-WorkshopWorkerResource -Handle $orphan }
+        catch { Write-Warning 'Completed orphan worker cleanup failed; ownership remains visible until process exit.' }
+        if ($orphan.Disposed) { $script:WorkerOrphans.RemoveAt($index) }
+    }
+}
+
+function Assert-WorkshopWorkerCapacity {
+    [CmdletBinding()]
+    param()
+
+    Invoke-WorkshopCompletedWorkerReaping
+    if ($script:WorkerOrphans.Count -ge $script:WorkerOrphanLimit -or
+        $script:WorkerReservationCount -ge $script:WorkerOrphanLimit) {
+        throw 'The bounded worker orphan registry is full; start a new process before creating more workers.'
+    }
+}
+
+function Enter-WorkshopWorkerCapacity {
+    [CmdletBinding()]
+    param()
+
+    Assert-WorkshopWorkerCapacity
+    $script:WorkerReservationCount++
+}
+
+function ConvertTo-WorkshopWorkerHandle {
+    [CmdletBinding()]
+    param(
+        [Parameter()][AllowNull()][object] $PowerShell,
+        [Parameter()][AllowNull()][object] $Runspace,
+        [Parameter()][AllowNull()][object] $AsyncResult,
+        [Parameter()][AllowNull()][object] $ReadySignal,
+        [Parameter()][bool] $CapacityReserved = $false
+    )
+
+    $handle = [pscustomobject]@{
+        PowerShell = $PowerShell
+        Runspace = $Runspace
+        AsyncResult = $AsyncResult
+        ReadySignal = $ReadySignal
+        Disposed = $false
+        EndInvoked = $false
+        PowerShellDisposed = $false
+        RunspaceDisposed = $false
+        ReadySignalDisposed = $false
+        CapacityReserved = $CapacityReserved
+        PendingStopResult = $null
+        StopEnded = $false
+        TerminalTimeout = $false
+        TerminalError = $null
+    }
+    $handle | Add-Member ScriptMethod TestHealth {
+        if ($this.Disposed) {
+            return [pscustomobject]@{ Healthy = $false; Reason = 'Worker handle is disposed.'; Terminal = $true }
+        }
+        if ($this.TerminalTimeout) {
+            return [pscustomobject]@{ Healthy = $false; Reason = $this.TerminalError; Terminal = $true }
+        }
+        if (-not $this.AsyncResult.IsCompleted) {
+            return [pscustomobject]@{ Healthy = $true; Reason = $null; Terminal = $false }
+        }
+        if (-not $this.EndInvoked) {
+            try { [void] $this.PowerShell.EndInvoke($this.AsyncResult) }
+            catch { $this.TerminalError = $_.Exception.Message }
+            finally { $this.EndInvoked = $true }
+        }
+        $reason = if ([string]::IsNullOrWhiteSpace([string]$this.TerminalError)) {
+            'Worker completed unexpectedly while its phase was active.'
+        }
+        else { 'Worker failed while its phase was active.' }
+        return [pscustomobject]@{ Healthy = $false; Reason = $reason; Terminal = $true }
+    }
+    $handle | Add-Member ScriptMethod StopWithinMilliseconds {
+        param([int] $TimeoutMilliseconds)
+        if ($this.Disposed) { return }
+        if ($this.TerminalTimeout) { throw [TimeoutException]::new($this.TerminalError) }
+
+        $stopCompleted = $false
+        $stopError = $null
+        $pendingStopResult = $this.PendingStopResult
+        $stopEnded = $this.StopEnded
+        try {
+            $stopCompleted = Wait-WorkshopPowerShellStop -PowerShell $this.PowerShell `
+            -AsyncResult $this.AsyncResult -PendingStopResult ([ref]$pendingStopResult) `
+            -StopEnded ([ref]$stopEnded) -TimeoutMilliseconds $TimeoutMilliseconds
+            if (-not $stopCompleted) {
+                $this.TerminalTimeout = $true
+                $this.TerminalError = 'Worker cancellation did not complete within its bounded one-second cleanup budget.'
+            }
+        }
+        catch {
+            $stopError = $_
+            $this.TerminalError = $_.Exception.Message
+        }
+        finally {
+            $this.PendingStopResult = $pendingStopResult
+            $this.StopEnded = $stopEnded
+            $stopCanEnd = $null -eq $this.PendingStopResult -or $this.StopEnded -or
+                $this.PendingStopResult.AsyncWaitHandle.WaitOne([TimeSpan]::Zero)
+            if ($this.AsyncResult.IsCompleted -and $stopCanEnd) {
+                try { Complete-WorkshopWorkerResource -Handle $this }
+                catch {
+                    if ($null -eq $stopError) { $stopError = $_ }
+                    else { Write-Warning 'Worker cleanup also failed after the cancellation error.' }
+                }
+            }
+            else {
+                try { Add-WorkshopWorkerOrphan -Handle $this }
+                catch {
+                    if ($null -eq $stopError -and -not $this.TerminalTimeout) { $stopError = $_ }
+                    else { Write-Warning 'Worker orphan ownership could not be recorded.' }
+                }
+            }
+        }
+        if ($null -ne $stopError) { throw $stopError }
+        if ($this.TerminalTimeout) { throw [TimeoutException]::new($this.TerminalError) }
+    }
+    $handle | Add-Member ScriptMethod StopWithin {
+        param([int] $TimeoutSeconds)
+        if ($TimeoutSeconds -lt 1) { throw 'Worker cleanup requires a positive timeout.' }
+        $this.StopWithinMilliseconds([math]::Min(1000, $TimeoutSeconds * 1000))
+    }
+    $handle | Add-Member ScriptMethod Dispose {
+        if ($this.Disposed) { return }
+        $this.StopWithinMilliseconds(1000)
+    }
+    return $handle
+}
+
+function Invoke-WorkshopWorkerSetupCleanup {
+    [CmdletBinding()]
+    param(
+        [Parameter()][AllowNull()][object] $PowerShell,
+        [Parameter()][AllowNull()][object] $Runspace,
+        [Parameter()][AllowNull()][object] $AsyncResult,
+        [Parameter()][AllowNull()][object] $ReadySignal,
+        [Parameter(Mandatory)][object] $SetupError,
+        [Parameter()][bool] $CapacityReserved = $false,
+        [Parameter()][ValidateRange(0, 1000)][int] $TimeoutMilliseconds = 1000
+    )
+
+    $handle = ConvertTo-WorkshopWorkerHandle -PowerShell $PowerShell -Runspace $Runspace `
+        -AsyncResult $AsyncResult -ReadySignal $ReadySignal -CapacityReserved $CapacityReserved
+    try {
+        if ($null -eq $AsyncResult) { Complete-WorkshopWorkerResource -Handle $handle }
+        else { $handle.StopWithinMilliseconds($TimeoutMilliseconds) }
+    }
+    catch { Write-Warning 'Worker setup cleanup was incomplete; the original setup failure is preserved.' }
+    throw $SetupError
 }
 
 function ConvertTo-WorkshopFailureEvidence {
@@ -3711,11 +3985,14 @@ OUTER APPLY
     $startWorker = {
         param([guid] $RunId, [string] $Phase, [int] $Worker, [string] $ApplicationName, [object[]] $Schedule, [datetimeoffset] $Deadline)
         Write-Verbose "Starting workshop worker $Worker for $Phase."
+        Enter-WorkshopWorkerCapacity
+        $capacityReserved = $true
         $runspace = $null
         $powerShell = $null
         $asyncResult = $null
-        $readySignal = [Threading.ManualResetEventSlim]::new($false)
+        $readySignal = $null
         try {
+            $readySignal = [Threading.ManualResetEventSlim]::new($false)
             $runspace = [runspacefactory]::CreateRunspace()
             $runspace.Open()
             $powerShell = [powershell]::Create()
@@ -3824,75 +4101,17 @@ OUTER APPLY
             }
         }
         catch {
-            try { if ($null -ne $powerShell -and $null -ne $asyncResult -and -not $asyncResult.IsCompleted) { $powerShell.Stop() } } catch { Write-Verbose 'Worker stop failed during setup cleanup.' }
-            try { if ($null -ne $powerShell -and $null -ne $asyncResult) { [void] $powerShell.EndInvoke($asyncResult) } } catch { Write-Verbose 'Worker invocation ended during setup cleanup.' }
-            if ($null -ne $powerShell) { $powerShell.Dispose() }
-            if ($null -ne $runspace) { $runspace.Dispose() }
-            $readySignal.Dispose()
-            throw
+            $setupError = $_
+            $remainingMilliseconds = [int] [math]::Max(
+                0,
+                [math]::Min(1000, [math]::Floor(($Deadline - [datetimeoffset]::UtcNow).TotalMilliseconds))
+            )
+            Invoke-WorkshopWorkerSetupCleanup -PowerShell $powerShell -Runspace $runspace `
+                -AsyncResult $asyncResult -ReadySignal $readySignal -SetupError $setupError `
+                -CapacityReserved $capacityReserved -TimeoutMilliseconds $remainingMilliseconds
         }
-        $handle = [pscustomobject]@{
-            PowerShell = $powerShell
-            Runspace = $runspace
-            AsyncResult = $asyncResult
-            ReadySignal = $readySignal
-            Disposed = $false
-            EndInvoked = $false
-            TerminalError = $null
-        }
-        $handle | Add-Member ScriptMethod TestHealth {
-            if ($this.Disposed) {
-                return [pscustomobject]@{ Healthy = $false; Reason = 'Worker handle is disposed.'; Terminal = $true }
-            }
-            if (-not $this.AsyncResult.IsCompleted) {
-                return [pscustomobject]@{ Healthy = $true; Reason = $null; Terminal = $false }
-            }
-            if (-not $this.EndInvoked) {
-                try { [void] $this.PowerShell.EndInvoke($this.AsyncResult) }
-                catch { $this.TerminalError = $_.Exception.Message }
-                finally { $this.EndInvoked = $true }
-            }
-            $reason = if ([string]::IsNullOrWhiteSpace([string]$this.TerminalError)) {
-                'Worker completed unexpectedly while its phase was active.'
-            }
-            else { 'Worker failed while its phase was active.' }
-            return [pscustomobject]@{ Healthy = $false; Reason = $reason; Terminal = $true }
-        }
-        $handle | Add-Member ScriptMethod StopWithin {
-            param([int] $TimeoutSeconds)
-            if ($this.Disposed) { return }
-            if ($TimeoutSeconds -lt 1) { throw 'Worker cleanup requires a positive timeout.' }
-            if (-not $this.AsyncResult.IsCompleted) {
-                $stopResult = $this.PowerShell.BeginStop($null, $null)
-                if (-not $stopResult.AsyncWaitHandle.WaitOne([TimeSpan]::FromSeconds($TimeoutSeconds))) {
-                    throw 'Worker cancellation did not complete within its bounded cleanup budget.'
-                }
-                $this.PowerShell.EndStop($stopResult)
-            }
-            if (-not $this.EndInvoked) {
-                try { [void] $this.PowerShell.EndInvoke($this.AsyncResult) }
-                catch { Write-Verbose 'Worker ended after bounded cancellation.' }
-                $this.EndInvoked = $true
-            }
-            $this.Dispose()
-        }
-        $handle | Add-Member ScriptMethod Dispose {
-            if ($this.Disposed) { return }
-            try {
-                if (-not $this.AsyncResult.IsCompleted) { $this.PowerShell.Stop() }
-                if (-not $this.EndInvoked) {
-                    try { [void] $this.PowerShell.EndInvoke($this.AsyncResult) } catch { Write-Verbose 'Worker ended after cancellation.' }
-                    $this.EndInvoked = $true
-                }
-            }
-            finally {
-                $this.PowerShell.Dispose()
-                $this.Runspace.Dispose()
-                $this.ReadySignal.Dispose()
-                $this.Disposed = $true
-            }
-        }
-        return $handle
+        return ConvertTo-WorkshopWorkerHandle -PowerShell $powerShell -Runspace $runspace `
+            -AsyncResult $asyncResult -ReadySignal $readySignal -CapacityReserved $capacityReserved
     }.GetNewClosure()
 
     $testWorkerHealth = {

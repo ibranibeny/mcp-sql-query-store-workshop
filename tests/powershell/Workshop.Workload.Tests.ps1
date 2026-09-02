@@ -2428,6 +2428,296 @@ Describe 'Task 12 workload orchestration' {
     }
 }
 
+Describe 'Task 3 worker cleanup lifecycle' {
+    Context 'private worker lifecycle helpers' {
+        BeforeAll {
+            function New-FakeDisposable {
+                param([Parameter(Mandatory)][object] $State, [Parameter(Mandatory)][string] $Counter)
+
+                $resource = [pscustomobject]@{ State = $State; Counter = $Counter }
+                $resource | Add-Member ScriptMethod Dispose {
+                    $this.State[$this.Counter]++
+                    if ($this.State["$($this.Counter)Throws"]) {
+                        throw "$($this.Counter) cleanup failed."
+                    }
+                }
+                return $resource
+            }
+
+            function New-FakeWorkerLifecycle {
+                param(
+                    [bool] $StopCompletes = $true,
+                    [bool] $InvocationCompletesWithStop = $true,
+                    [bool] $CompleteInvocationOnTimeout = $false,
+                    [bool] $BeginStopThrows = $false,
+                    [bool] $EndStopThrows = $false,
+                    [bool] $PowerShellDisposeThrows = $false
+                )
+
+                $state = [ordered]@{
+                    BeginStop = 0; WaitOne = 0; EndStop = 0; EndInvoke = 0
+                    PowerShellDispose = 0; RunspaceDispose = 0; ReadySignalDispose = 0
+                    StopCompletes = $StopCompletes; BeginStopThrows = $BeginStopThrows
+                    InvocationCompletesWithStop = $InvocationCompletesWithStop
+                    CompleteInvocationOnTimeout = $CompleteInvocationOnTimeout
+                    EndStopThrows = $EndStopThrows; PowerShellDisposeThrows = $PowerShellDisposeThrows
+                }
+                $asyncResult = [pscustomobject]@{ IsCompleted = $false }
+                $waitHandle = [pscustomobject]@{ State = $state; AsyncResult = $asyncResult }
+                $waitHandle | Add-Member ScriptMethod WaitOne {
+                    param([TimeSpan] $Timeout)
+                    $this.State.WaitOne++
+                    if ($this.State.StopCompletes -and $this.State.InvocationCompletesWithStop) {
+                        $this.AsyncResult.IsCompleted = $true
+                    }
+                    elseif ($this.State.CompleteInvocationOnTimeout) { $this.AsyncResult.IsCompleted = $true }
+                    return $this.State.StopCompletes
+                }
+                $stopResult = [pscustomobject]@{ AsyncWaitHandle = $waitHandle }
+                $powerShell = [pscustomobject]@{
+                    State = $state
+                    AsyncResult = $asyncResult
+                    StopResult = $stopResult
+                }
+                $powerShell | Add-Member ScriptMethod BeginStop {
+                    param($Callback, $State)
+                    $this.State.BeginStop++
+                    if ($this.State.BeginStopThrows) {
+                        $this.AsyncResult.IsCompleted = $true
+                        throw 'BeginStop failed.'
+                    }
+                    return $this.StopResult
+                }
+                $powerShell | Add-Member ScriptMethod EndStop {
+                    param($StopResult)
+                    $this.State.EndStop++
+                    if ($this.State.EndStopThrows) { throw 'EndStop failed.' }
+                }
+                $powerShell | Add-Member ScriptMethod EndInvoke {
+                    param($Result)
+                    $this.State.EndInvoke++
+                }
+                $powerShell | Add-Member ScriptMethod Dispose {
+                    $this.State.PowerShellDispose++
+                    if ($this.State.PowerShellDisposeThrows) { throw 'PowerShellDispose cleanup failed.' }
+                }
+                return [pscustomobject]@{
+                    State = $state
+                    PowerShell = $powerShell
+                    Runspace = New-FakeDisposable $state 'RunspaceDispose'
+                    AsyncResult = $asyncResult
+                    ReadySignal = New-FakeDisposable $state 'ReadySignalDispose'
+                }
+            }
+        }
+
+        AfterEach {
+            $module = Get-Module Workshop.Workload
+            & $module {
+                $script:WorkerOrphans.Clear()
+                $script:WorkerReservationCount = 0
+            }
+        }
+
+        It 'ends a completed cancellation and disposes every safe resource exactly once' {
+            $fake = New-FakeWorkerLifecycle
+            $module = Get-Module Workshop.Workload
+            $handle = & $module {
+                param($PowerShell, $Runspace, $AsyncResult, $ReadySignal)
+                ConvertTo-WorkshopWorkerHandle -PowerShell $PowerShell -Runspace $Runspace `
+                    -AsyncResult $AsyncResult -ReadySignal $ReadySignal
+            } $fake.PowerShell $fake.Runspace $fake.AsyncResult $fake.ReadySignal
+
+            $handle.StopWithin(1)
+            $handle.StopWithin(1)
+
+            $fake.State.BeginStop | Should -Be 1
+            $fake.State.EndStop | Should -Be 1
+            $fake.State.EndInvoke | Should -Be 1
+            $fake.State.PowerShellDispose | Should -Be 1
+            $fake.State.RunspaceDispose | Should -Be 1
+            $fake.State.ReadySignalDispose | Should -Be 1
+            $handle.Disposed | Should -BeTrue
+        }
+
+        It 'returns within two seconds and retains ownership without synchronous cleanup when cancellation times out' {
+            $fake = New-FakeWorkerLifecycle -StopCompletes $false -CompleteInvocationOnTimeout $true
+            $module = Get-Module Workshop.Workload
+            $handle = & $module {
+                param($PowerShell, $Runspace, $AsyncResult, $ReadySignal)
+                ConvertTo-WorkshopWorkerHandle -PowerShell $PowerShell -Runspace $Runspace `
+                    -AsyncResult $AsyncResult -ReadySignal $ReadySignal
+            } $fake.PowerShell $fake.Runspace $fake.AsyncResult $fake.ReadySignal
+            $stopwatch = [Diagnostics.Stopwatch]::StartNew()
+
+            { $handle.StopWithin(1) } | Should -Throw '*bounded one-second cleanup budget*'
+            $stopwatch.Stop()
+
+            $stopwatch.Elapsed.TotalSeconds | Should -BeLessOrEqual 2
+            $handle.TerminalTimeout | Should -BeTrue
+            $handle.Disposed | Should -BeFalse
+            $fake.State.BeginStop | Should -Be 1
+            $fake.State.EndStop | Should -Be 0
+            $fake.State.EndInvoke | Should -Be 0
+            $fake.State.PowerShellDispose | Should -Be 0
+            $fake.State.RunspaceDispose | Should -Be 0
+            $fake.State.ReadySignalDispose | Should -Be 0
+        }
+
+        It 'reaps a retained timeout worker only after its invocation later completes' {
+            $fake = New-FakeWorkerLifecycle -StopCompletes $false
+            $module = Get-Module Workshop.Workload
+            $handle = & $module {
+                param($PowerShell, $Runspace, $AsyncResult, $ReadySignal)
+                ConvertTo-WorkshopWorkerHandle -PowerShell $PowerShell -Runspace $Runspace `
+                    -AsyncResult $AsyncResult -ReadySignal $ReadySignal
+            } $fake.PowerShell $fake.Runspace $fake.AsyncResult $fake.ReadySignal
+            try { $handle.StopWithin(1) } catch { }
+
+            $fake.State.StopCompletes = $true
+            $fake.AsyncResult.IsCompleted = $true
+            & $module { Assert-WorkshopWorkerCapacity }
+
+            $fake.State.EndStop | Should -Be 1
+            $fake.State.EndInvoke | Should -Be 1
+            $fake.State.PowerShellDispose | Should -Be 1
+            $fake.State.RunspaceDispose | Should -Be 1
+            $fake.State.ReadySignalDispose | Should -Be 1
+            $handle.Disposed | Should -BeTrue
+        }
+
+        It 'defers EndStop when the stop signal precedes invocation completion' {
+            $fake = New-FakeWorkerLifecycle -StopCompletes $true -InvocationCompletesWithStop $false
+            $module = Get-Module Workshop.Workload
+            $handle = & $module {
+                param($PowerShell, $Runspace, $AsyncResult, $ReadySignal)
+                ConvertTo-WorkshopWorkerHandle -PowerShell $PowerShell -Runspace $Runspace `
+                    -AsyncResult $AsyncResult -ReadySignal $ReadySignal
+            } $fake.PowerShell $fake.Runspace $fake.AsyncResult $fake.ReadySignal
+
+            { $handle.StopWithin(1) } | Should -Throw '*bounded one-second cleanup budget*'
+
+            $handle.TerminalTimeout | Should -BeTrue
+            $fake.State.EndStop | Should -Be 0
+            $fake.State.EndInvoke | Should -Be 0
+            $fake.State.PowerShellDispose | Should -Be 0
+            $fake.State.RunspaceDispose | Should -Be 0
+            $fake.State.ReadySignalDispose | Should -Be 0
+        }
+
+        It 'preserves the stop exception and cleans completed resources after BeginStop or EndStop fails' -ForEach @(
+            @{ BeginStopThrows = $true; EndStopThrows = $false; Expected = 'BeginStop failed.' }
+            @{ BeginStopThrows = $false; EndStopThrows = $true; Expected = 'EndStop failed.' }
+        ) {
+            $fake = New-FakeWorkerLifecycle -BeginStopThrows $BeginStopThrows -EndStopThrows $EndStopThrows
+            $module = Get-Module Workshop.Workload
+            $handle = & $module {
+                param($PowerShell, $Runspace, $AsyncResult, $ReadySignal)
+                ConvertTo-WorkshopWorkerHandle -PowerShell $PowerShell -Runspace $Runspace `
+                    -AsyncResult $AsyncResult -ReadySignal $ReadySignal
+            } $fake.PowerShell $fake.Runspace $fake.AsyncResult $fake.ReadySignal
+
+            $caught = try { $handle.StopWithin(1); $null } catch { $_ }
+
+            $caught.Exception.GetBaseException().Message | Should -BeExactly $Expected
+            $fake.State.EndInvoke | Should -Be 1
+            $fake.State.PowerShellDispose | Should -Be 1
+            $fake.State.RunspaceDispose | Should -Be 1
+            $fake.State.ReadySignalDispose | Should -Be 1
+        }
+
+        It 'preserves the setup failure when bounded cleanup also fails' {
+            $fake = New-FakeWorkerLifecycle -PowerShellDisposeThrows $true
+            $setupError = try { throw [InvalidOperationException]::new('original setup failure') } catch { $_ }
+            $module = Get-Module Workshop.Workload
+
+            $caught = try {
+                & $module {
+                    param($PowerShell, $Runspace, $AsyncResult, $ReadySignal, $SetupError)
+                    Invoke-WorkshopWorkerSetupCleanup -PowerShell $PowerShell -Runspace $Runspace `
+                        -AsyncResult $AsyncResult -ReadySignal $ReadySignal `
+                        -SetupError $SetupError -TimeoutMilliseconds 100
+                } $fake.PowerShell $fake.Runspace $fake.AsyncResult $fake.ReadySignal $setupError
+                $null
+            }
+            catch { $_ }
+
+            [object]::ReferenceEquals($caught.Exception.GetBaseException(), $setupError.Exception) | Should -BeTrue
+            $fake.State.PowerShellDispose | Should -Be 1
+            $fake.State.RunspaceDispose | Should -Be 1
+            $fake.State.ReadySignalDispose | Should -Be 1
+        }
+
+        It 'retains a completed worker when one disposal fails and retries only that resource' {
+            $fake = New-FakeWorkerLifecycle -PowerShellDisposeThrows $true
+            $module = Get-Module Workshop.Workload
+            $handle = & $module {
+                param($PowerShell, $Runspace, $AsyncResult, $ReadySignal)
+                ConvertTo-WorkshopWorkerHandle -PowerShell $PowerShell -Runspace $Runspace `
+                    -AsyncResult $AsyncResult -ReadySignal $ReadySignal
+            } $fake.PowerShell $fake.Runspace $fake.AsyncResult $fake.ReadySignal
+
+            { $handle.StopWithin(1) } | Should -Throw '*PowerShellDispose cleanup failed*'
+            $handle.Disposed | Should -BeFalse
+            $fake.State.PowerShellDisposeThrows = $false
+
+            & $module { Assert-WorkshopWorkerCapacity }
+
+            $handle.Disposed | Should -BeTrue
+            $fake.State.PowerShellDispose | Should -Be 2
+            $fake.State.RunspaceDispose | Should -Be 1
+            $fake.State.ReadySignalDispose | Should -Be 1
+        }
+
+        It 'reserves bounded orphan capacity for every live production worker' {
+            $module = Get-Module Workshop.Workload
+            try {
+                & $module {
+                    $script:WorkerOrphans.Clear()
+                    $script:WorkerReservationCount = $script:WorkerOrphanLimit - 1
+                }
+
+                & $module { Enter-WorkshopWorkerCapacity }
+                { & $module { Enter-WorkshopWorkerCapacity } } | Should -Throw '*registry is full*'
+            }
+            finally {
+                & $module {
+                    $script:WorkerOrphans.Clear()
+                    $script:WorkerReservationCount = 0
+                }
+            }
+        }
+
+        It 'retains and reaps partial setup cleanup before BeginInvoke' {
+            $fake = New-FakeWorkerLifecycle -PowerShellDisposeThrows $true
+            $module = Get-Module Workshop.Workload
+            & $module {
+                $script:WorkerOrphans.Clear()
+                $script:WorkerReservationCount = 1
+            }
+            $setupError = try { throw [InvalidOperationException]::new('pre-invocation setup failure') } catch { $_ }
+
+            try {
+                & $module {
+                    param($PowerShell, $Runspace, $ReadySignal, $SetupError)
+                    Invoke-WorkshopWorkerSetupCleanup -PowerShell $PowerShell -Runspace $Runspace `
+                        -AsyncResult $null -ReadySignal $ReadySignal -SetupError $SetupError `
+                        -CapacityReserved $true -TimeoutMilliseconds 100
+                } $fake.PowerShell $fake.Runspace $fake.ReadySignal $setupError
+            }
+            catch { }
+            $fake.State.PowerShellDisposeThrows = $false
+
+            & $module { Assert-WorkshopWorkerCapacity }
+
+            $fake.State.PowerShellDispose | Should -Be 2
+            $fake.State.RunspaceDispose | Should -Be 1
+            $fake.State.ReadySignalDispose | Should -Be 1
+            & $module { $script:WorkerReservationCount } | Should -Be 0
+        }
+    }
+}
+
 Describe 'Task 12 stop and export safety' {
     It 'writes a stop request atomically through a normal evidence path' {
         $run = [guid]'13131313-1313-1313-1313-131313131313'
@@ -2623,6 +2913,7 @@ Describe 'Task 12 stop and export safety' {
         $start | Should -Match 'ValidateRange\(60,\s*600\)'
         $start | Should -Match 'ValidateRange\(5,\s*30\)'
         $start | Should -Match 'ValidateRange\(20,\s*60\)'
+        $start | Should -Match 'ValidateRange\(1,\s*60\)[\s\S]*\$CommandTimeoutSeconds\s*=\s*30'
         $stop | Should -Match 'SupportsShouldProcess'
         $export | Should -Match 'SupportsShouldProcess'
         $module | Should -Match 'System\.Data\.SqlClient fallback active'
@@ -2682,7 +2973,44 @@ Describe 'Task 12 stop and export safety' {
         foreach ($operation in @('CreateRunspace','\.Open\(\)','\[powershell\]::Create','AddScript','BeginInvoke','\.Wait\(')) {
             $workerRegion | Should -Match $operation
         }
-        $workerRegion | Should -Match 'catch\s*\{[\s\S]*PowerShell\.Stop\(\)[\s\S]*PowerShell\.Dispose\(\)[\s\S]*Runspace\.Dispose\(\)[\s\S]*ReadySignal\.Dispose\(\)'
+        $workerRegion.IndexOf('try {') | Should -BeLessThan $workerRegion.IndexOf('[Threading.ManualResetEventSlim]::new($false)')
+        $setupCatch = $workerRegion.Substring($workerRegion.IndexOf('catch {'))
+        $setupCatch | Should -Not -Match '\.Stop\('
+        $setupCatch | Should -Match 'Invoke-WorkshopWorkerSetupCleanup'
+        $setupCatch | Should -Match '\[math\]::Min\(1000,'
+        $setupCatch | Should -Match '-SetupError\s+\$setupError'
+
+        $setupHelperStart = $module.IndexOf('function Invoke-WorkshopWorkerSetupCleanup')
+        $setupHelperEnd = $module.IndexOf('function ', $setupHelperStart + 9)
+        $setupHelper = $module.Substring($setupHelperStart, $setupHelperEnd - $setupHelperStart)
+        $setupHelper | Should -Match 'catch\s*\{[\s\S]*Write-Warning'
+        $setupHelper | Should -Match 'throw\s+\$SetupError'
+    }
+
+    It 'uses one bounded asynchronous stop contract for setup cleanup and handle disposal' {
+        $module = Get-Content (Join-Path $PSScriptRoot '../../workload/Workshop.Workload.psm1') -Raw
+        $helperStart = $module.IndexOf('function Wait-WorkshopPowerShellStop')
+        $helperEnd = $module.IndexOf('function ', $helperStart + 9)
+        $helperStart | Should -BeGreaterOrEqual 0
+        $helperEnd | Should -BeGreaterThan $helperStart
+        $helper = $module.Substring($helperStart, $helperEnd - $helperStart)
+        $helper | Should -Match 'ValidateRange\(0,\s*1000\)'
+        $helper | Should -Match 'BeginStop\(\$null,\s*\$null\)'
+        $helper | Should -Match 'AsyncWaitHandle\.WaitOne\('
+        $helper | Should -Match 'if\s*\(-not\s+\$stopCompleted\s+-or\s+-not\s+\$AsyncResult\.IsCompleted\)[\s\S]*return\s+\$false'
+        $helper.IndexOf('return $false') | Should -BeLessThan $helper.IndexOf('EndStop(')
+        $helper | Should -Not -Match '\.Stop\('
+        $helper | Should -Not -Match 'EndInvoke'
+
+        $handleStart = $module.IndexOf('function ConvertTo-WorkshopWorkerHandle')
+        $handleEnd = $module.IndexOf('function ', $handleStart + 9)
+        $handle = $module.Substring($handleStart, $handleEnd - $handleStart)
+        $handle | Should -Not -Match '\.Stop\('
+        $handle | Should -Match 'try\s*\{[\s\S]*Wait-WorkshopPowerShellStop[\s\S]*finally'
+        $handle | Should -Match 'if\s*\(\$this\.AsyncResult\.IsCompleted\s+-and\s+\$stopCanEnd\)[\s\S]*Complete-WorkshopWorkerResource'
+        $handle | Should -Match 'else\s*\{[\s\S]*Add-WorkshopWorkerOrphan'
+        $handle | Should -Match 'TerminalTimeout'
+        $handle | Should -Match 'StopWithinMilliseconds\(1000\)'
     }
 
     It 'bounds optimized worker stop and join before comparison work' {
@@ -2691,6 +3019,32 @@ Describe 'Task 12 stop and export safety' {
         $module | Should -Match 'AsyncWaitHandle\.WaitOne\('
         $module | Should -Match 'EndStop\('
         $module | Should -Match 'StopWithin\(\$RemainingSeconds\)'
+    }
+
+    It 'retains the global and worker caps and divides the remaining comparison time into exactly twelve trials' {
+        $start = Get-Content (Join-Path $PSScriptRoot '../../workload/Start-MemoryGrantLab.ps1') -Raw
+        $start | Should -Match 'ValidateRange\(1,\s*4\)[\s\S]*\$MaximumWorkers\s*=\s*4'
+        $start | Should -Match 'ValidateRange\(60,\s*600\)[\s\S]*\$MaximumDurationSeconds\s*=\s*600'
+
+        $budget = Get-WorkshopComparisonBudget -MaximumDurationSeconds 300 `
+            -CommandTimeoutSeconds 30 -SampleIntervalSeconds 5 -MaximumWorkers 4
+        $remainingForTrials = 300 - $budget.PreComparisonMinimumSeconds - `
+            $budget.AncillaryReservedSeconds - $budget.CleanupMarginSeconds
+        $expectedPerTrial = [math]::Min(30, [math]::Floor($remainingForTrials / 12))
+        $budget.TrialBudgets.Count | Should -BeExactly 12
+        $budget.TrialBudgets | Should -BeExactly @(1..12 | ForEach-Object { $expectedPerTrial })
+        ($budget.TrialBudgets | Measure-Object -Sum).Sum | Should -BeExactly (12 * $expectedPerTrial)
+    }
+
+    It 'documents exclusive measured controller windows as a controlled-lab attribution limitation' {
+        $guide = Get-Content (Join-Path $PSScriptRoot '../../workshop/04-create-memory-pressure.md') -Raw
+        $guide | Should -Match '(?i)controlled-lab condition|controlled lab condition'
+        $guide | Should -Match '(?i)manual editor|external execution'
+        $guide | Should -Match '(?i)must not overlap[\s\S]*measured controller windows'
+        $guide | Should -Match '(?i)Query Store'
+        $guide | Should -Match '(?i)procedure deltas'
+        $guide | Should -Match '(?i)contaminat'
+        $guide | Should -Match '(?i)read-only DMV[\s\S]*does not[\s\S]*guarantee attribution'
     }
 }
 

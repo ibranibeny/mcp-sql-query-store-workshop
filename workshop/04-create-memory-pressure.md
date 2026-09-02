@@ -21,6 +21,10 @@ Use the bootstrap-managed setup sequence `sql/00-Preflight.sql` through `sql/05-
 
 The deterministic dataset and baseline procedure are bounded. Never use global cache-clearing commands, an unbounded cross join, or an unmarked database.
 
+### Controlled-lab attribution condition
+
+Treat each measured controller window as exclusive. Manual editor or external execution of either `lab.usp_MonthEndSalesBaseline` or `lab.usp_MonthEndSalesOptimized` must not overlap measured controller windows. An overlapping execution can contaminate Query Store and procedure deltas, making attribution to the controller run unreliable. Read-only DMV and Query Store access does not by itself guarantee attribution; this exclusivity requirement is a controlled-lab condition and a limitation of the resulting evidence.
+
 ## Capture baseline safely
 
 Create a unique run ID and obtain the SQL workload credential without placing it in source:
