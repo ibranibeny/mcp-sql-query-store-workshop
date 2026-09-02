@@ -110,7 +110,7 @@ BEGIN
         PoolGrantedMemoryKB bigint NOT NULL,
         PoolUsedMemoryKB bigint NOT NULL,
         PoolAvailableMemoryKB bigint NOT NULL,
-        GrantUtilizationPercent decimal(6,2) NOT NULL,
+        GrantUtilizationPercent decimal(9,6) NOT NULL,
         GranteeCount int NOT NULL,
         WaiterCount int NOT NULL,
         HostAvailableMemoryKB bigint NOT NULL,
@@ -132,6 +132,95 @@ BEGIN
         CONSTRAINT CK_WorkshopSample_ProcessMemory CHECK (ProcessPhysicalMemoryKB >= 0),
         CONSTRAINT CK_WorkshopSample_ServerMemory CHECK (TotalServerMemoryKB >= 0 AND TargetServerMemoryKB >= 0)
     );
+END;
+
+/* Preserve existing evidence while widening the original workshop precision contract. */
+IF EXISTS
+(
+    SELECT 1
+    FROM sys.columns AS c
+    WHERE c.object_id = OBJECT_ID(N'lab.WorkshopSample', N'U')
+      AND c.name = N'GrantUtilizationPercent'
+      AND TYPE_NAME(c.user_type_id) = N'decimal'
+      AND c.max_length = 5
+      AND c.precision = 6
+      AND c.scale = 2
+      AND c.is_nullable = 0
+)
+BEGIN
+    BEGIN TRY
+        BEGIN TRANSACTION;
+
+        DECLARE @LegacyWorkshopSampleRowCount bigint;
+        DECLARE @ExpectedLegacyUtilizationDefinition nvarchar(max);
+        DECLARE @LegacyUtilizationColumnID int = COLUMNPROPERTY(
+            OBJECT_ID(N'lab.WorkshopSample', N'U'), N'GrantUtilizationPercent', N'ColumnId');
+
+        SELECT @LegacyWorkshopSampleRowCount = COUNT_BIG(*)
+        FROM lab.WorkshopSample WITH (TABLOCKX, HOLDLOCK);
+
+        CREATE TABLE #ExpectedLegacyWorkshopSampleUtilization
+        (
+            GrantUtilizationPercent decimal(6,2) NOT NULL,
+            CHECK (GrantUtilizationPercent BETWEEN 0 AND 100)
+        );
+        SELECT @ExpectedLegacyUtilizationDefinition = cc.definition
+        FROM tempdb.sys.check_constraints AS cc
+        WHERE cc.parent_object_id = OBJECT_ID(N'tempdb..#ExpectedLegacyWorkshopSampleUtilization');
+
+        IF @ExpectedLegacyUtilizationDefinition IS NULL
+           OR 1 <>
+           (
+               SELECT COUNT(*)
+               FROM sys.sql_expression_dependencies AS sed
+               INNER JOIN sys.check_constraints AS cc ON cc.object_id = sed.referencing_id
+               WHERE sed.referenced_id = OBJECT_ID(N'lab.WorkshopSample', N'U')
+                 AND sed.referenced_minor_id = @LegacyUtilizationColumnID
+                 AND cc.parent_object_id = OBJECT_ID(N'lab.WorkshopSample', N'U')
+                 AND cc.name = N'CK_WorkshopSample_Utilization'
+                 AND cc.is_disabled = 0
+                 AND cc.is_not_trusted = 0
+                 AND cc.is_not_for_replication = 0
+                 AND cc.definition COLLATE Latin1_General_100_BIN2 =
+                     @ExpectedLegacyUtilizationDefinition COLLATE Latin1_General_100_BIN2
+           )
+           OR EXISTS
+           (
+               SELECT 1
+               FROM sys.sql_expression_dependencies AS sed
+               INNER JOIN sys.check_constraints AS cc ON cc.object_id = sed.referencing_id
+               WHERE sed.referenced_id = OBJECT_ID(N'lab.WorkshopSample', N'U')
+                 AND sed.referenced_minor_id = @LegacyUtilizationColumnID
+                 AND
+                 (
+                     cc.name <> N'CK_WorkshopSample_Utilization'
+                     OR cc.definition COLLATE Latin1_General_100_BIN2 <>
+                        @ExpectedLegacyUtilizationDefinition COLLATE Latin1_General_100_BIN2
+                 )
+           )
+            THROW 51604, 'Existing legacy WorkshopSample utilization check contract is incompatible.', 1;
+
+        ALTER TABLE lab.WorkshopSample
+            DROP CONSTRAINT CK_WorkshopSample_Utilization;
+        ALTER TABLE lab.WorkshopSample
+            ALTER COLUMN GrantUtilizationPercent decimal(9,6) NOT NULL;
+        ALTER TABLE lab.WorkshopSample WITH CHECK
+            ADD CONSTRAINT CK_WorkshopSample_Utilization
+                CHECK (GrantUtilizationPercent BETWEEN 0 AND 100);
+        ALTER TABLE lab.WorkshopSample WITH CHECK
+            CHECK CONSTRAINT CK_WorkshopSample_Utilization;
+
+        IF (SELECT COUNT_BIG(*) FROM lab.WorkshopSample) <> @LegacyWorkshopSampleRowCount
+            THROW 51604, 'Legacy WorkshopSample precision migration did not preserve every row.', 1;
+
+        DROP TABLE #ExpectedLegacyWorkshopSampleUtilization;
+        COMMIT TRANSACTION;
+    END TRY
+    BEGIN CATCH
+        IF XACT_STATE() <> 0 ROLLBACK TRANSACTION;
+        DROP TABLE IF EXISTS #ExpectedLegacyWorkshopSampleUtilization;
+        THROW;
+    END CATCH;
 END;
 
 IF OBJECT_ID(N'lab.WorkshopRequestSample', N'U') IS NULL
@@ -167,6 +256,21 @@ BEGIN
     );
 END;
 
+DECLARE @WorkshopTrialScheduleLockResult int;
+DECLARE @WorkshopTrialScheduleLockHeld bit = 0;
+
+EXEC @WorkshopTrialScheduleLockResult = sys.sp_getapplock
+    @Resource = N'MCP_SQL_WORKSHOP_LIFECYCLE',
+    @LockMode = N'Exclusive',
+    @LockOwner = N'Session',
+    @LockTimeout = 0;
+IF @WorkshopTrialScheduleLockResult < 0
+    THROW 51607, 'Another workshop lifecycle operation is active.', 1;
+SET @WorkshopTrialScheduleLockHeld = 1;
+
+BEGIN TRY
+    BEGIN TRANSACTION;
+
 IF OBJECT_ID(N'lab.WorkshopTrial', N'U') IS NULL
 BEGIN
     CREATE TABLE lab.WorkshopTrial
@@ -196,6 +300,21 @@ BEGIN
         CONSTRAINT CK_WorkshopTrial_Sequence CHECK (TrialSequence BETWEEN 1 AND 12),
         CONSTRAINT CK_WorkshopTrial_ParameterSlot CHECK (ParameterSlot BETWEEN 1 AND 6),
         CONSTRAINT CK_WorkshopTrial_Phase CHECK (Phase IN ('Baseline', 'Optimized')),
+        CONSTRAINT CK_WorkshopTrial_Schedule CHECK
+        (
+            (TrialSequence = 1 AND ParameterSlot = 1 AND Phase = 'Baseline')
+            OR (TrialSequence = 2 AND ParameterSlot = 1 AND Phase = 'Optimized')
+            OR (TrialSequence = 3 AND ParameterSlot = 2 AND Phase = 'Optimized')
+            OR (TrialSequence = 4 AND ParameterSlot = 2 AND Phase = 'Baseline')
+            OR (TrialSequence = 5 AND ParameterSlot = 3 AND Phase = 'Optimized')
+            OR (TrialSequence = 6 AND ParameterSlot = 3 AND Phase = 'Baseline')
+            OR (TrialSequence = 7 AND ParameterSlot = 4 AND Phase = 'Baseline')
+            OR (TrialSequence = 8 AND ParameterSlot = 4 AND Phase = 'Optimized')
+            OR (TrialSequence = 9 AND ParameterSlot = 5 AND Phase = 'Baseline')
+            OR (TrialSequence = 10 AND ParameterSlot = 5 AND Phase = 'Optimized')
+            OR (TrialSequence = 11 AND ParameterSlot = 6 AND Phase = 'Optimized')
+            OR (TrialSequence = 12 AND ParameterSlot = 6 AND Phase = 'Baseline')
+        ),
         CONSTRAINT CK_WorkshopTrial_Metrics CHECK
             (DurationMs >= 0 AND CpuMs >= 0 AND LogicalReads >= 0 AND GrantedKB >= 0
              AND UsedKB >= 0 AND SpillKB >= 0 AND WaitMs >= 0 AND ResultRowCount >= 0),
@@ -208,6 +327,106 @@ BEGIN
     CREATE INDEX IX_WorkshopTrial_ValidationBatchID
         ON lab.WorkshopTrial (ValidationBatchID, RunID);
 END;
+
+    DROP TABLE IF EXISTS #ExpectedWorkshopTrialScheduleInvariant;
+    CREATE TABLE #ExpectedWorkshopTrialScheduleInvariant
+    (
+        TrialSequence int NOT NULL,
+        ParameterSlot int NOT NULL,
+        Phase varchar(16) NOT NULL,
+        CONSTRAINT CK_WorkshopTrial_Schedule CHECK
+        (
+            (TrialSequence = 1 AND ParameterSlot = 1 AND Phase = 'Baseline')
+            OR (TrialSequence = 2 AND ParameterSlot = 1 AND Phase = 'Optimized')
+            OR (TrialSequence = 3 AND ParameterSlot = 2 AND Phase = 'Optimized')
+            OR (TrialSequence = 4 AND ParameterSlot = 2 AND Phase = 'Baseline')
+            OR (TrialSequence = 5 AND ParameterSlot = 3 AND Phase = 'Optimized')
+            OR (TrialSequence = 6 AND ParameterSlot = 3 AND Phase = 'Baseline')
+            OR (TrialSequence = 7 AND ParameterSlot = 4 AND Phase = 'Baseline')
+            OR (TrialSequence = 8 AND ParameterSlot = 4 AND Phase = 'Optimized')
+            OR (TrialSequence = 9 AND ParameterSlot = 5 AND Phase = 'Baseline')
+            OR (TrialSequence = 10 AND ParameterSlot = 5 AND Phase = 'Optimized')
+            OR (TrialSequence = 11 AND ParameterSlot = 6 AND Phase = 'Optimized')
+            OR (TrialSequence = 12 AND ParameterSlot = 6 AND Phase = 'Baseline')
+        )
+    );
+
+    DECLARE @ExpectedWorkshopTrialScheduleDefinition nvarchar(max);
+    SELECT @ExpectedWorkshopTrialScheduleDefinition = cc.definition
+    FROM tempdb.sys.check_constraints AS cc
+    WHERE cc.parent_object_id = OBJECT_ID(N'tempdb..#ExpectedWorkshopTrialScheduleInvariant')
+      AND cc.name LIKE N'CK_WorkshopTrial_Schedule%';
+
+    IF @ExpectedWorkshopTrialScheduleDefinition IS NULL
+        THROW 51604, 'Expected WorkshopTrial schedule check metadata is unavailable.', 1;
+
+    IF NOT EXISTS
+    (
+        SELECT 1
+        FROM sys.check_constraints AS cc
+        WHERE cc.parent_object_id = OBJECT_ID(N'lab.WorkshopTrial', N'U')
+          AND cc.name = N'CK_WorkshopTrial_Schedule'
+    )
+    BEGIN
+        ALTER TABLE lab.WorkshopTrial WITH CHECK
+            ADD CONSTRAINT CK_WorkshopTrial_Schedule CHECK
+            (
+                (TrialSequence = 1 AND ParameterSlot = 1 AND Phase = 'Baseline')
+                OR (TrialSequence = 2 AND ParameterSlot = 1 AND Phase = 'Optimized')
+                OR (TrialSequence = 3 AND ParameterSlot = 2 AND Phase = 'Optimized')
+                OR (TrialSequence = 4 AND ParameterSlot = 2 AND Phase = 'Baseline')
+                OR (TrialSequence = 5 AND ParameterSlot = 3 AND Phase = 'Optimized')
+                OR (TrialSequence = 6 AND ParameterSlot = 3 AND Phase = 'Baseline')
+                OR (TrialSequence = 7 AND ParameterSlot = 4 AND Phase = 'Baseline')
+                OR (TrialSequence = 8 AND ParameterSlot = 4 AND Phase = 'Optimized')
+                OR (TrialSequence = 9 AND ParameterSlot = 5 AND Phase = 'Baseline')
+                OR (TrialSequence = 10 AND ParameterSlot = 5 AND Phase = 'Optimized')
+                OR (TrialSequence = 11 AND ParameterSlot = 6 AND Phase = 'Optimized')
+                OR (TrialSequence = 12 AND ParameterSlot = 6 AND Phase = 'Baseline')
+            );
+    END;
+    ELSE IF NOT EXISTS
+    (
+        SELECT 1
+        FROM sys.check_constraints AS cc
+        WHERE cc.parent_object_id = OBJECT_ID(N'lab.WorkshopTrial', N'U')
+          AND cc.name = N'CK_WorkshopTrial_Schedule'
+          AND cc.is_disabled = 0
+          AND cc.is_not_trusted = 0
+          AND cc.is_not_for_replication = 0
+          AND cc.definition COLLATE Latin1_General_100_BIN2 =
+              @ExpectedWorkshopTrialScheduleDefinition COLLATE Latin1_General_100_BIN2
+    )
+        THROW 51604, 'Existing WorkshopTrial schedule check contract is incompatible.', 1;
+
+    ALTER TABLE lab.WorkshopTrial WITH CHECK
+        CHECK CONSTRAINT CK_WorkshopTrial_Schedule;
+
+    DROP TABLE #ExpectedWorkshopTrialScheduleInvariant;
+    COMMIT TRANSACTION;
+
+    EXEC sys.sp_releaseapplock
+        @Resource = N'MCP_SQL_WORKSHOP_LIFECYCLE',
+        @LockOwner = N'Session';
+    SET @WorkshopTrialScheduleLockHeld = 0;
+END TRY
+BEGIN CATCH
+    IF XACT_STATE() <> 0 ROLLBACK TRANSACTION;
+    DROP TABLE IF EXISTS #ExpectedWorkshopTrialScheduleInvariant;
+    BEGIN TRY
+        IF @WorkshopTrialScheduleLockHeld = 1
+        BEGIN
+            EXEC sys.sp_releaseapplock
+                @Resource = N'MCP_SQL_WORKSHOP_LIFECYCLE',
+                @LockOwner = N'Session';
+            SET @WorkshopTrialScheduleLockHeld = 0;
+        END;
+    END TRY
+    BEGIN CATCH
+        PRINT CONCAT(N'WorkshopTrial schedule application lock release warning; error ', ERROR_NUMBER(), N'.');
+    END CATCH;
+    THROW;
+END CATCH;
 
 /* Task 9 owns the same exact contract. Create it only when absent, then compare metadata exactly. */
 IF OBJECT_ID(N'lab.ValidationRun', N'U') IS NULL
@@ -282,7 +501,7 @@ VALUES
     (N'WorkshopSample', 6, N'PoolGrantedMemoryKB', N'bigint', 8, 19, 0, 0, 0),
     (N'WorkshopSample', 7, N'PoolUsedMemoryKB', N'bigint', 8, 19, 0, 0, 0),
     (N'WorkshopSample', 8, N'PoolAvailableMemoryKB', N'bigint', 8, 19, 0, 0, 0),
-    (N'WorkshopSample', 9, N'GrantUtilizationPercent', N'decimal', 5, 6, 2, 0, 0),
+    (N'WorkshopSample', 9, N'GrantUtilizationPercent', N'decimal', 5, 9, 6, 0, 0),
     (N'WorkshopSample', 10, N'GranteeCount', N'int', 4, 10, 0, 0, 0),
     (N'WorkshopSample', 11, N'WaiterCount', N'int', 4, 10, 0, 0, 0),
     (N'WorkshopSample', 12, N'HostAvailableMemoryKB', N'bigint', 8, 19, 0, 0, 0),
@@ -677,6 +896,7 @@ INSERT @ExpectedChecks VALUES
     (N'WorkshopTrial', N'CK_WorkshopTrial_Sequence', 0, 0, 0),
     (N'WorkshopTrial', N'CK_WorkshopTrial_ParameterSlot', 0, 0, 0),
     (N'WorkshopTrial', N'CK_WorkshopTrial_Phase', 0, 0, 0),
+    (N'WorkshopTrial', N'CK_WorkshopTrial_Schedule', 0, 0, 0),
     (N'WorkshopTrial', N'CK_WorkshopTrial_Metrics', 0, 0, 0),
     (N'WorkshopTrial', N'CK_WorkshopTrial_Validation', 0, 0, 0),
     (N'WorkshopTrial', N'CK_WorkshopTrial_Timestamps', 0, 0, 0),
@@ -716,6 +936,9 @@ INSERT @ExpectedCheckColumns VALUES
     (N'CK_WorkshopTrial_Sequence', N'TrialSequence'),
     (N'CK_WorkshopTrial_ParameterSlot', N'ParameterSlot'),
     (N'CK_WorkshopTrial_Phase', N'Phase'),
+    (N'CK_WorkshopTrial_Schedule', N'TrialSequence'),
+    (N'CK_WorkshopTrial_Schedule', N'ParameterSlot'),
+    (N'CK_WorkshopTrial_Schedule', N'Phase'),
     (N'CK_WorkshopTrial_Metrics', N'DurationMs'), (N'CK_WorkshopTrial_Metrics', N'CpuMs'),
     (N'CK_WorkshopTrial_Metrics', N'LogicalReads'), (N'CK_WorkshopTrial_Metrics', N'GrantedKB'),
     (N'CK_WorkshopTrial_Metrics', N'UsedKB'), (N'CK_WorkshopTrial_Metrics', N'SpillKB'),
@@ -792,7 +1015,7 @@ BEGIN TRY
         PoolGrantedMemoryKB bigint NOT NULL,
         PoolUsedMemoryKB bigint NOT NULL,
         PoolAvailableMemoryKB bigint NOT NULL,
-        GrantUtilizationPercent decimal(6,2) NOT NULL,
+        GrantUtilizationPercent decimal(9,6) NOT NULL,
         GranteeCount int NOT NULL,
         WaiterCount int NOT NULL,
         HostAvailableMemoryKB bigint NOT NULL,
@@ -860,6 +1083,21 @@ BEGIN TRY
         CONSTRAINT CK_WorkshopTrial_Sequence CHECK (TrialSequence BETWEEN 1 AND 12),
         CONSTRAINT CK_WorkshopTrial_ParameterSlot CHECK (ParameterSlot BETWEEN 1 AND 6),
         CONSTRAINT CK_WorkshopTrial_Phase CHECK (Phase IN ('Baseline', 'Optimized')),
+        CONSTRAINT CK_WorkshopTrial_Schedule CHECK
+        (
+            (TrialSequence = 1 AND ParameterSlot = 1 AND Phase = 'Baseline')
+            OR (TrialSequence = 2 AND ParameterSlot = 1 AND Phase = 'Optimized')
+            OR (TrialSequence = 3 AND ParameterSlot = 2 AND Phase = 'Optimized')
+            OR (TrialSequence = 4 AND ParameterSlot = 2 AND Phase = 'Baseline')
+            OR (TrialSequence = 5 AND ParameterSlot = 3 AND Phase = 'Optimized')
+            OR (TrialSequence = 6 AND ParameterSlot = 3 AND Phase = 'Baseline')
+            OR (TrialSequence = 7 AND ParameterSlot = 4 AND Phase = 'Baseline')
+            OR (TrialSequence = 8 AND ParameterSlot = 4 AND Phase = 'Optimized')
+            OR (TrialSequence = 9 AND ParameterSlot = 5 AND Phase = 'Baseline')
+            OR (TrialSequence = 10 AND ParameterSlot = 5 AND Phase = 'Optimized')
+            OR (TrialSequence = 11 AND ParameterSlot = 6 AND Phase = 'Optimized')
+            OR (TrialSequence = 12 AND ParameterSlot = 6 AND Phase = 'Baseline')
+        ),
         CONSTRAINT CK_WorkshopTrial_Metrics CHECK
             (DurationMs >= 0 AND CpuMs >= 0 AND LogicalReads >= 0 AND GrantedKB >= 0
              AND UsedKB >= 0 AND SpillKB >= 0 AND WaitMs >= 0 AND ResultRowCount >= 0),
@@ -1145,7 +1383,7 @@ BEGIN
         CONVERT(bigint, rs.used_memory_kb) AS PoolUsedMemoryKB,
         CONVERT(bigint, CASE WHEN rs.total_memory_kb >= rs.granted_memory_kb
             THEN rs.total_memory_kb - rs.granted_memory_kb ELSE 0 END) AS PoolAvailableMemoryKB,
-        CAST(100.0 * rs.granted_memory_kb / NULLIF(rs.total_memory_kb, 0) AS decimal(6,2)) AS GrantUtilizationPercent,
+        CAST(100.0 * rs.granted_memory_kb / NULLIF(rs.total_memory_kb, 0) AS decimal(9,6)) AS GrantUtilizationPercent,
         CONVERT(int, rs.grantee_count) AS GranteeCount,
         CONVERT(int, rs.waiter_count) AS WaiterCount,
         CONVERT(bigint, host.available_physical_memory_kb) AS HostAvailableMemoryKB,
@@ -1183,16 +1421,21 @@ GO
 
 CREATE OR ALTER PROCEDURE lab.usp_GetActiveWorkshopGrants
     @Top int = 20,
-    @RunID uniqueidentifier = NULL
+    @RunID uniqueidentifier = NULL,
+    @Phase varchar(16) = NULL
 WITH EXECUTE AS OWNER
 AS
 BEGIN
     SET NOCOUNT ON;
     IF @Top IS NULL OR @Top NOT BETWEEN 1 AND 100
         THROW 51620, 'Top must be between 1 and 100.', 1;
+    IF @RunID IS NULL
+        THROW 51622, 'RunID is required.', 1;
+    IF @Phase IS NULL OR @Phase NOT IN ('Baseline', 'Optimized')
+        THROW 51621, 'Phase must be Baseline or Optimized.', 1;
 
     SELECT TOP (@Top)
-        sessionRun.RunID,
+        sessionContext.RunID,
         CONVERT(smallint, mg.session_id) AS SessionID,
         CONVERT(int, COALESCE(r.request_id, mg.request_id)) AS RequestID,
         CONVERT(varchar(16), r.status) AS RequestStatus,
@@ -1211,13 +1454,26 @@ BEGIN
     FROM sys.dm_exec_query_memory_grants AS mg
     INNER JOIN sys.dm_exec_sessions AS s ON s.session_id = mg.session_id
     LEFT JOIN sys.dm_exec_requests AS r ON r.session_id = mg.session_id AND r.request_id = mg.request_id
-    OUTER APPLY
+    CROSS APPLY
         (
-            SELECT TRY_CONVERT(uniqueidentifier,
-                CONVERT(binary(16), SUBSTRING(s.context_info, 1, 16))) AS RunID
-        ) AS sessionRun
-    WHERE s.program_name LIKE N'MCP-SQL-Workshop%'
-      AND (@RunID IS NULL OR sessionRun.RunID = @RunID)
+            SELECT
+                TRY_CONVERT(uniqueidentifier,
+                    CONVERT(binary(16), SUBSTRING(s.context_info, 1, 16))) AS RunID,
+                CONVERT(varchar(16), CASE CONVERT(tinyint, SUBSTRING(s.context_info, 17, 1))
+                    WHEN 1 THEN 'Baseline'
+                    WHEN 2 THEN 'Optimized'
+                END) AS Phase
+        ) AS sessionContext
+        WHERE s.program_name COLLATE Latin1_General_100_BIN2 IN
+            (
+                N'MCP-SQL-Workshop-' + CONVERT(char(36), sessionContext.RunID) + N'-' + sessionContext.Phase + N'-1',
+                N'MCP-SQL-Workshop-' + CONVERT(char(36), sessionContext.RunID) + N'-' + sessionContext.Phase + N'-2',
+                N'MCP-SQL-Workshop-' + CONVERT(char(36), sessionContext.RunID) + N'-' + sessionContext.Phase + N'-3',
+                N'MCP-SQL-Workshop-' + CONVERT(char(36), sessionContext.RunID) + N'-' + sessionContext.Phase + N'-4'
+            )
+      AND DATALENGTH(s.context_info) = 17
+      AND sessionContext.RunID = @RunID
+      AND sessionContext.Phase = @Phase
     ORDER BY mg.wait_time_ms DESC, mg.requested_memory_kb DESC, mg.session_id, mg.request_id;
 END;
 GO
@@ -1378,6 +1634,22 @@ BEGIN
     IF NOT EXISTS (SELECT 1 FROM lab.WorkshopSample WHERE RunID = @RunID AND Phase = 'Baseline')
        OR NOT EXISTS (SELECT 1 FROM lab.WorkshopSample WHERE RunID = @RunID AND Phase = 'Optimized')
         THROW 51665, 'No memory samples are available for one or both phases.', 1;
+
+    DECLARE @ExpectedTrials table
+    (
+        TrialSequence int NOT NULL PRIMARY KEY,
+        ParameterSlot int NOT NULL,
+        Phase varchar(16) NOT NULL
+    );
+    INSERT @ExpectedTrials (TrialSequence, ParameterSlot, Phase)
+    VALUES
+        (1, 1, 'Baseline'), (2, 1, 'Optimized'),
+        (3, 2, 'Optimized'), (4, 2, 'Baseline'),
+        (5, 3, 'Optimized'), (6, 3, 'Baseline'),
+        (7, 4, 'Baseline'), (8, 4, 'Optimized'),
+        (9, 5, 'Baseline'), (10, 5, 'Optimized'),
+        (11, 6, 'Optimized'), (12, 6, 'Baseline');
+
     IF (SELECT COUNT_BIG(*) FROM lab.WorkshopTrial AS trial
         WHERE trial.RunID = @RunID AND trial.ValidationBatchID = @ValidationBatchID) <> 12
        OR EXISTS
@@ -1396,6 +1668,24 @@ BEGIN
               OR SUM(CASE WHEN trial.Phase = 'Baseline' THEN 1 ELSE 0 END) <> 1
               OR SUM(CASE WHEN trial.Phase = 'Optimized' THEN 1 ELSE 0 END) <> 1
        )
+             OR EXISTS
+             (
+                     SELECT TrialSequence, ParameterSlot, Phase FROM @ExpectedTrials
+                     EXCEPT
+                     SELECT trial.TrialSequence, trial.ParameterSlot, trial.Phase
+                     FROM lab.WorkshopTrial AS trial
+                     WHERE trial.RunID = @RunID
+                         AND trial.ValidationBatchID = @ValidationBatchID
+             )
+             OR EXISTS
+             (
+                     SELECT trial.TrialSequence, trial.ParameterSlot, trial.Phase
+                     FROM lab.WorkshopTrial AS trial
+                     WHERE trial.RunID = @RunID
+                         AND trial.ValidationBatchID = @ValidationBatchID
+                     EXCEPT
+                     SELECT TrialSequence, ParameterSlot, Phase FROM @ExpectedTrials
+             )
         THROW 51666, 'Exactly twelve correct paired trials must use the requested validation batch.', 1;
 
     ;WITH RankedSamples AS
@@ -1413,7 +1703,7 @@ BEGIN
             Phase,
             MAX(GrantUtilizationPercent) AS PeakGrantUtilizationPercent,
             CAST(AVG(CASE WHEN ValueRowNumber IN ((ValueCount + 1) / 2, (ValueCount + 2) / 2)
-                THEN GrantUtilizationPercent END) AS decimal(6,2)) AS MedianGrantUtilizationPercent
+                THEN GrantUtilizationPercent END) AS decimal(9,6)) AS MedianGrantUtilizationPercent
         FROM RankedSamples
         GROUP BY Phase
     ), TrialMetrics AS
@@ -1507,7 +1797,7 @@ BEGIN
         LogicalReadsImprovedMaterially,
         SpillsImprovedMaterially,
         WaitsImprovedMaterially,
-        CONVERT(decimal(6,2), BaselineMedianGrantUtilizationPercent - OptimizedMedianGrantUtilizationPercent)
+        CONVERT(decimal(9,6), BaselineMedianGrantUtilizationPercent - OptimizedMedianGrantUtilizationPercent)
             AS MedianUtilizationReductionPoints,
         CONVERT(varchar(24), CASE
             WHEN CorrectnessPassed = 0 THEN N'Failed'

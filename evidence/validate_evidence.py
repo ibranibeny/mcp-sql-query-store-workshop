@@ -23,11 +23,22 @@ _TRIAL_INTEGER_METRICS = (
     "waitMs", "resultRowCount", "expectedRowCount", "actualRowCount",
     "differenceCount",
 )
+_TRIAL_PHASES = (
+    "Baseline", "Optimized", "Optimized", "Baseline",
+    "Optimized", "Baseline", "Baseline", "Optimized",
+    "Baseline", "Optimized", "Optimized", "Baseline",
+)
 _SECRET_ASSIGNMENT_RE = re.compile(
     r"(?i)(?:password|passwd|pwd|token|access[_\s-]?token|refresh[_\s-]?token|"
     r"client[_\s-]?secret|secret|account[_\s-]?key|shared[_\s-]?access[_\s-]?key|"
     r"shared[_\s-]?access[_\s-]?signature|user\s+id|uid)\s*[:=]|"
     r"-----BEGIN\s+.*PRIVATE\s+KEY-----"
+)
+_SECRET_NAME_PARTS = (
+    "password", "passwd", "pwd", "token", "accesstoken", "refreshtoken",
+    "clientsecret", "secret", "accountkey", "sharedaccesskey",
+    "sharedaccesssignature", "userid", "uid", "credential",
+    "connectionstring", "privatekey",
 )
 _UTC_INSTANT_FORMAT = "%Y-%m-%dT%H:%M:%S"
 _UTC_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
@@ -45,6 +56,39 @@ def _path_text(path: Sequence[Any]) -> str:
     return "$" + "".join(
         f"[{part}]" if isinstance(part, int) else f".{part}" for part in path
     )
+
+
+def _secret_name(name: str) -> bool:
+    separated = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", name)
+    parts = tuple(part.lower() for part in re.split(r"[^A-Za-z0-9]+", separated) if part)
+    normalized = "".join(parts)
+    sensitive_parts = {"password", "passwd", "pwd", "token", "secret", "credential"}
+    if any(part in sensitive_parts for part in parts):
+        return True
+    return normalized in _SECRET_NAME_PARTS or any(
+        normalized.endswith(part)
+        for part in _SECRET_NAME_PARTS
+        if part not in {"pwd", "uid", "token", "secret"}
+    )
+
+
+def _secret_issues(value: Any, path: tuple[Any, ...] = ()) -> list[str]:
+    issues: list[str] = []
+    if isinstance(value, str):
+        if _SECRET_ASSIGNMENT_RE.search(value):
+            issues.append(f"{_path_text(path)} contains secret-shaped text.")
+        return issues
+    if isinstance(value, Mapping):
+        for name, child in value.items():
+            child_path = (*path, name)
+            if isinstance(name, str) and _secret_name(name):
+                issues.append(f"{_path_text(child_path)} is a secret-shaped field name.")
+            issues.extend(_secret_issues(child, child_path))
+        return issues
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        for index, child in enumerate(value):
+            issues.extend(_secret_issues(child, (*path, index)))
+    return issues
 
 
 def _decimal(value: Any, path: str) -> Decimal:
@@ -234,11 +278,12 @@ def _validate_semantics(document: Mapping[str, Any]) -> list[str]:
     if document["evidenceClassification"] != "LAB-MEASURED":
         return issues
 
+    start_ticks = _utc_ticks(document["startUtc"], "$.startUtc")
+    end_ticks = _utc_ticks(document["endUtc"], "$.endUtc")
+    if end_ticks < start_ticks:
+        issues.append("$.endUtc must not precede $.startUtc.")
+
     failure = document["terminationEvidence"].get("failure")
-    if failure is not None:
-        message = failure["message"]
-        if _SECRET_ASSIGNMENT_RE.search(message):
-            issues.append("$.terminationEvidence.failure.message contains secret-shaped text.")
 
     startup_failure = (
         document["status"] == "Failed"
@@ -250,7 +295,33 @@ def _validate_semantics(document: Mapping[str, Any]) -> list[str]:
         return issues
 
     phase_values: dict[str, list[Decimal]] = {"Baseline": [], "Optimized": []}
+    sample_by_identity: dict[tuple[str, int], tuple[int, str]] = {}
+    previous_sample: tuple[int, int] | None = None
+    seen_sequences: set[int] = set()
     for index, sample in enumerate(document["samples"]):
+        sequence = sample["sequence"]
+        if sequence in seen_sequences:
+            issues.append(f"$.samples[{index}].sequence must be unique.")
+        seen_sequences.add(sequence)
+        if sequence != index + 1:
+            issues.append(f"$.samples[{index}].sequence must be contiguous from one.")
+        timestamp_path = f"$.samples[{index}].timestampUtc"
+        sampled_ticks = _utc_ticks(sample["timestampUtc"], timestamp_path)
+        if sampled_ticks < start_ticks or sampled_ticks > end_ticks:
+            issues.append(f"{timestamp_path} must fall within the run interval.")
+        if previous_sample is not None:
+            previous_index, previous_ticks = previous_sample
+            if sampled_ticks <= previous_ticks:
+                issues.append(
+                    f"{timestamp_path} must be strictly later than "
+                    f"$.samples[{previous_index}].timestampUtc in document sequence."
+                )
+        previous_sample = (index, sampled_ticks)
+        identity = (sample["phase"], sequence)
+        if identity in sample_by_identity:
+            issues.append(f"$.samples[{index}] has a duplicate phase and sequence identity.")
+        else:
+            sample_by_identity[identity] = (sampled_ticks, sample["timestampUtc"])
         reported = _decimal(
             sample["grantUtilizationPercent"],
             f"$.samples[{index}].grantUtilizationPercent",
@@ -264,6 +335,36 @@ def _validate_semantics(document: Mapping[str, Any]) -> list[str]:
         phase_values[sample["phase"]].append(
             reported
         )
+
+    request_identities: set[tuple[str, int, int, int]] = set()
+    for index, request in enumerate(document["requestSamples"]):
+        prefix = f"$.requestSamples[{index}]"
+        request_ticks = _utc_ticks(request["timestampUtc"], f"{prefix}.timestampUtc")
+        if request_ticks < start_ticks or request_ticks > end_ticks:
+            issues.append(f"{prefix}.timestampUtc must fall within the run interval.")
+        base = sample_by_identity.get((request["phase"], request["sampleSequence"]))
+        if base is None:
+            sequence_matches = [
+                identity for identity in sample_by_identity
+                if identity[1] == request["sampleSequence"]
+            ]
+            if sequence_matches:
+                issues.append(f"{prefix}.phase must match its linked sample phase.")
+            else:
+                issues.append(
+                    f"{prefix}.sampleSequence must link to an existing sample with the same phase."
+                )
+        elif request["timestampUtc"] != base[1]:
+            issues.append(f"{prefix}.timestampUtc must match its linked sample timestamp.")
+        if "runId" in request and request["runId"] != document["runId"]:
+            issues.append(f"{prefix}.runId must match $.runId.")
+        request_identity = (
+            request["phase"], request["sampleSequence"], request["sessionId"],
+            request["requestId"],
+        )
+        if request_identity in request_identities:
+            issues.append(f"{prefix} has a duplicate request sample identity.")
+        request_identities.add(request_identity)
 
     for phase, peak_name in (("Baseline", "baseline"), ("Optimized", "optimized")):
         expected_peak = max(phase_values[phase]) if phase_values[phase] else None
@@ -285,6 +386,20 @@ def _validate_semantics(document: Mapping[str, Any]) -> list[str]:
     if completed_comparison and len(trials) != 12:
         issues.append("$.trials must contain exactly twelve completed comparison trials.")
     for index, trial in enumerate(trials):
+        sequence = trial["trialSequence"]
+        if isinstance(sequence, bool) or not isinstance(sequence, int) or not 1 <= sequence <= 12:
+            issues.append(f"$.trials[{index}].trialSequence must be from one through twelve.")
+        else:
+            expected_slot = (sequence + 1) // 2
+            expected_phase = _TRIAL_PHASES[sequence - 1]
+            if trial["parameterSlot"] != expected_slot:
+                issues.append(
+                    f"$.trials[{index}].parameterSlot must match its trialSequence schedule slot."
+                )
+            if trial["phase"] != expected_phase:
+                issues.append(
+                    f"$.trials[{index}].phase must match its trialSequence ABBA schedule phase."
+                )
         for metric in _TRIAL_INTEGER_METRICS:
             value = trial[metric]
             if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= _INT64_MAX:
@@ -297,6 +412,8 @@ def _validate_semantics(document: Mapping[str, Any]) -> list[str]:
         )
         if completed < started:
             issues.append(f"$.trials[{index}] has an invalid timestamp interval.")
+        if started < start_ticks or completed > end_ticks:
+            issues.append(f"$.trials[{index}] must fall within the run interval.")
     if document["correctness"]["validationHash"] != _validation_hash(trials):
         issues.append("$.correctness.validationHash must match canonical trial linkage.")
     if len(trials) != 12:
@@ -308,11 +425,6 @@ def _validate_semantics(document: Mapping[str, Any]) -> list[str]:
             issues.append("$.correctness.additionalMetricImproved must be false for an incomplete comparison.")
     if len(trials) == 12:
         trial_linkage_valid = True
-        expected_phases = (
-            "Baseline", "Optimized", "Optimized", "Baseline",
-            "Optimized", "Baseline", "Baseline", "Optimized",
-            "Baseline", "Optimized", "Optimized", "Baseline",
-        )
         batch_ids = {trial["validationBatchId"] for trial in trials}
         if len(batch_ids) != 1:
             issues.append("$.trials must use one validation batch identifier.")
@@ -320,14 +432,6 @@ def _validate_semantics(document: Mapping[str, Any]) -> list[str]:
         for index, trial in enumerate(trials):
             if trial["trialSequence"] != index + 1:
                 issues.append("$.trials trialSequence values must be contiguous from one through twelve.")
-                trial_linkage_valid = False
-                break
-            if trial["parameterSlot"] != index // 2 + 1:
-                issues.append("$.trials parameterSlot values must form six adjacent A/B pairs.")
-                trial_linkage_valid = False
-                break
-            if trial["phase"] != expected_phases[index]:
-                issues.append("$.trials phase order must be ABBA BAAB ABBA.")
                 trial_linkage_valid = False
                 break
         for slot in range(1, 7):
@@ -377,6 +481,9 @@ def validate_evidence(document: Mapping[str, Any], schema: Mapping[str, Any]) ->
         Draft202012Validator.check_schema(schema)
     except SchemaError:
         raise EvidenceValidationError(("The evidence schema is invalid.",)) from None
+    secret_issues = _secret_issues(document)
+    if secret_issues:
+        raise EvidenceValidationError(secret_issues)
     validator = Draft202012Validator(schema, format_checker=FormatChecker())
     try:
         structural_errors = sorted(

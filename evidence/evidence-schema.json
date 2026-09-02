@@ -514,12 +514,15 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "sampleSequence", "sessionId", "requestId", "requestedMemoryKB",
+        "sampleSequence", "timestampUtc", "phase", "sessionId", "requestId", "requestedMemoryKB",
         "grantedMemoryKB", "requiredMemoryKB", "idealMemoryKB", "usedMemoryKB",
         "maxUsedMemoryKB", "waitOrder", "waitTimeMs", "queryId", "planId"
       ],
       "properties": {
         "sampleSequence": { "type": "integer", "minimum": 1 },
+        "timestampUtc": { "$ref": "#/$defs/utcTimestamp" },
+        "phase": { "enum": ["Baseline", "Optimized"] },
+        "runId": { "type": "string", "format": "uuid" },
         "sessionId": { "type": "integer", "minimum": 1, "maximum": 32767 },
         "requestId": { "type": "integer", "minimum": 0 },
         "requestedMemoryKB": { "type": "number", "minimum": 0 },

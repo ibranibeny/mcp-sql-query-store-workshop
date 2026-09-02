@@ -150,6 +150,29 @@ def measured_evidence(target: dict, *, outcome: str = "TargetMet") -> dict:
     return measured
 
 
+def linked_request_sample(sample: dict, *, run_id: str | None = None) -> dict:
+    request = {
+        "sampleSequence": sample["sequence"],
+        "timestampUtc": sample["timestampUtc"],
+        "phase": sample["phase"],
+        "sessionId": 51,
+        "requestId": 0,
+        "requestedMemoryKB": 1,
+        "grantedMemoryKB": 1,
+        "requiredMemoryKB": 1,
+        "idealMemoryKB": 1,
+        "usedMemoryKB": 1,
+        "maxUsedMemoryKB": 1,
+        "waitOrder": None,
+        "waitTimeMs": 1,
+        "queryId": None,
+        "planId": None,
+    }
+    if run_id is not None:
+        request["runId"] = run_id
+    return request
+
+
 def measured_trial(sequence: int, slot: int, phase: str) -> dict:
     optimized = phase == "Optimized"
     return {
@@ -173,6 +196,32 @@ def measured_trial(sequence: int, slot: int, phase: str) -> dict:
         "startedAtUtc": "2026-09-01T10:00:00.0000000Z",
         "completedAtUtc": "2026-09-01T10:00:01.0000000Z",
     }
+
+
+@pytest.mark.parametrize(
+    "optimized_timestamp",
+    (
+        "2026-09-01T10:00:19.9999999Z",
+        "2026-09-01T10:00:20.0000000Z",
+    ),
+)
+def test_sample_timestamps_are_globally_strict_across_phase_transition(
+    schema: dict,
+    target: dict,
+    optimized_timestamp: str,
+) -> None:
+    measured = measured_evidence(target)
+    measured["samples"] = [
+        measured_sample(1, "Baseline", 80),
+        measured_sample(2, "Baseline", 80),
+        measured_sample(3, "Optimized", 40),
+        measured_sample(4, "Optimized", 40),
+    ]
+    measured["samples"][1]["timestampUtc"] = "2026-09-01T10:00:20.0000000Z"
+    measured["samples"][2]["timestampUtc"] = optimized_timestamp
+    measured["samples"][3]["timestampUtc"] = "2026-09-01T10:00:25.0000000Z"
+
+    assert_invalid(schema, measured)
 
 
 def set_validation_hash(document: dict) -> None:
@@ -779,6 +828,122 @@ def test_failure_metadata_rejects_secret_shaped_and_unbounded_messages(
     assert_invalid(schema, failed)
 
 
+@pytest.mark.parametrize(
+    ("path", "value"),
+    (
+        (("environment", "sqlVersion"), "Password=canary"),
+        (("disclaimer",), "access_token:canary"),
+        (("terminationEvidence", "safetyReasons"), ["client-secret=canary"]),
+    ),
+)
+def test_secret_shaped_assignments_are_rejected_in_every_document_string(
+    schema: dict, target: dict, path: tuple[str, ...], value: object
+) -> None:
+    document = copy.deepcopy(target)
+    cursor = document
+    for part in path[:-1]:
+        cursor = cursor[part]
+    cursor[path[-1]] = value
+
+    with pytest.raises(EvidenceValidationError) as caught:
+        validate_evidence(document, schema)
+    assert any("$" in issue and "secret-shaped" in issue for issue in caught.value.issues)
+
+
+def test_secret_shaped_field_names_are_rejected_recursively_with_precise_path(
+    schema: dict, target: dict
+) -> None:
+    document = copy.deepcopy(target)
+    document["environment"]["databasePassword"] = "canary"
+
+    with pytest.raises(EvidenceValidationError) as caught:
+        validate_evidence(document, schema)
+    assert "$.environment.databasePassword" in " ".join(caught.value.issues)
+
+
+def test_ordinary_credential_words_without_assignments_remain_allowed(
+    schema: dict, target: dict
+) -> None:
+    document = copy.deepcopy(target)
+    document["environment"]["sqlVersion"] = "Token rotation and password guidance"
+    validate_evidence(document, schema)
+
+
+def test_lab_measured_run_and_sample_intervals_are_enforced_with_precise_paths(
+    schema: dict, target: dict
+) -> None:
+    measured = measured_evidence(target)
+    measured["startUtc"], measured["endUtc"] = measured["endUtc"], measured["startUtc"]
+    with pytest.raises(EvidenceValidationError) as caught:
+        validate_evidence(measured, schema)
+    assert "$.endUtc" in " ".join(caught.value.issues)
+
+    measured = measured_evidence(target)
+    measured["samples"][0]["timestampUtc"] = "2026-09-01T09:59:59.0000000Z"
+    with pytest.raises(EvidenceValidationError) as caught:
+        validate_evidence(measured, schema)
+    assert "$.samples[0].timestampUtc" in " ".join(caught.value.issues)
+
+
+def test_sample_identity_is_unique_and_contiguous_and_requests_link_exactly(
+    schema: dict, target: dict
+) -> None:
+    measured = measured_evidence(target)
+    measured["requestSamples"] = [
+        linked_request_sample(measured["samples"][0], run_id=measured["runId"])
+    ]
+    validate_evidence(measured, schema)
+
+    mutations = []
+    skipped = copy.deepcopy(measured)
+    skipped["samples"][1]["sequence"] = 3
+    mutations.append((skipped, "$.samples[1].sequence"))
+    wrong_phase = copy.deepcopy(measured)
+    wrong_phase["requestSamples"][0]["phase"] = "Optimized"
+    mutations.append((wrong_phase, "$.requestSamples[0].phase"))
+    wrong_time = copy.deepcopy(measured)
+    wrong_time["requestSamples"][0]["timestampUtc"] = measured["samples"][1]["timestampUtc"]
+    mutations.append((wrong_time, "$.requestSamples[0].timestampUtc"))
+    wrong_run = copy.deepcopy(measured)
+    wrong_run["requestSamples"][0]["runId"] = "22222222-2222-2222-2222-222222222222"
+    mutations.append((wrong_run, "$.requestSamples[0].runId"))
+    missing = copy.deepcopy(measured)
+    missing["requestSamples"][0]["sampleSequence"] = 99
+    mutations.append((missing, "$.requestSamples[0].sampleSequence"))
+    for document, expected_path in mutations:
+        with pytest.raises(EvidenceValidationError) as caught:
+            validate_evidence(document, schema)
+        assert expected_path in " ".join(caught.value.issues)
+
+
+@pytest.mark.parametrize(
+    "later_timestamp",
+    (
+        "2026-09-01T10:00:05.0000000Z",
+        "2026-09-01T10:00:04.9999999Z",
+    ),
+)
+def test_sample_timestamps_strictly_increase_in_document_sequence_with_precise_paths(
+    schema: dict, target: dict, later_timestamp: str
+) -> None:
+    measured = measured_evidence(target)
+    measured["samples"] = [
+        measured_sample(1, "Baseline", 80),
+        measured_sample(2, "Baseline", 80),
+        measured_sample(3, "Optimized", 40),
+        measured_sample(4, "Optimized", 40),
+    ]
+    measured["samples"][1]["timestampUtc"] = later_timestamp
+
+    with pytest.raises(EvidenceValidationError) as caught:
+        validate_evidence(measured, schema)
+
+    assert (
+        "$.samples[1].timestampUtc must be strictly later than "
+        "$.samples[0].timestampUtc in document sequence."
+    ) in caught.value.issues
+
+
 def test_classification_phase_disclaimer_and_status_outcome_must_agree(
     schema: dict, target: dict
 ) -> None:
@@ -903,6 +1068,31 @@ def test_partial_failed_trial_rejects_reversed_fractional_timestamp_interval(
     measured["trials"][0]["startedAtUtc"] = "2026-09-01T10:00:00.1000001Z"
     measured["trials"][0]["completedAtUtc"] = "2026-09-01T10:00:00.1000000Z"
     measured["correctness"]["additionalMetricImproved"] = False
+    set_validation_hash(measured)
+
+    assert_invalid(schema, measured)
+
+
+@pytest.mark.parametrize(
+    ("sequence", "slot", "phase"),
+    (
+        (1, 2, "Baseline"),
+        (1, 1, "Optimized"),
+        (13, 1, "Baseline"),
+    ),
+)
+def test_partial_failed_trial_rejects_malformed_deterministic_schedule_mapping(
+    schema: dict,
+    target: dict,
+    sequence: int,
+    slot: int,
+    phase: str,
+) -> None:
+    measured = measured_evidence(target)
+    measured.update(status="Failed", outcome="Failed")
+    measured["correctness"]["passed"] = False
+    measured["correctness"]["additionalMetricImproved"] = False
+    measured["trials"] = [measured_trial(sequence, slot, phase)]
     set_validation_hash(measured)
 
     assert_invalid(schema, measured)

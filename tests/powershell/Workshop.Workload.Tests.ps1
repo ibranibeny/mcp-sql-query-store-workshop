@@ -82,12 +82,14 @@ BeforeAll {
     function Get-ValidRequestSample {
         @(
             [ordered]@{
-                sampleSequence=1; sessionId=51; requestId=0; requestedMemoryKB=1000; grantedMemoryKB=900
+                sampleSequence=1; timestampUtc='2026-09-01T10:00:05.0000000Z'; phase='Baseline'
+                sessionId=51; requestId=0; requestedMemoryKB=1000; grantedMemoryKB=900
                 requiredMemoryKB=100; idealMemoryKB=1200; usedMemoryKB=800; maxUsedMemoryKB=850
                 waitOrder=$null; waitTimeMs=100; queryId=$null; planId=$null
             }
             [ordered]@{
-                sampleSequence=2; sessionId=52; requestId=0; requestedMemoryKB=500; grantedMemoryKB=450
+                sampleSequence=2; timestampUtc='2026-09-01T10:00:10.0000000Z'; phase='Optimized'
+                sessionId=52; requestId=0; requestedMemoryKB=500; grantedMemoryKB=450
                 requiredMemoryKB=100; idealMemoryKB=600; usedMemoryKB=400; maxUsedMemoryKB=425
                 waitOrder=$null; waitTimeMs=20; queryId=$null; planId=$null
             }
@@ -120,6 +122,33 @@ BeforeAll {
             materialRegression = $assessment.MaterialRegression
             additionalMetricImproved = $assessment.AdditionalMetricImproved
             validationHash = $hash
+        }
+    }
+
+    function Get-PartialValidation {
+        param([Parameter(Mandatory)][object[]] $Trials)
+        $linkage = @($Trials | ForEach-Object {
+            [ordered]@{
+                sequence = [int]$_.TrialSequence
+                slot = [int]$_.ParameterSlot
+                phase = [string]$_.Phase
+                resultRowCount = [int64]$_.ResultRowCount
+                resultHash = ([string]$_.ResultHash).ToLowerInvariant()
+                expectedRowCount = [int64]$_.ExpectedRowCount
+                actualRowCount = [int64]$_.ActualRowCount
+                differenceCount = [int64]$_.DifferenceCount
+                correct = [bool]$_.Correct
+                validationBatchId = ([guid]$_.ValidationBatchID).ToString('D')
+            }
+        })
+        $json = ConvertTo-Json $linkage -Depth 8 -Compress
+        [ordered]@{
+            passed = $false
+            materialRegression = $false
+            additionalMetricImproved = $false
+            validationHash = [Convert]::ToHexString(
+                [Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($json))
+            ).ToLowerInvariant()
         }
     }
 }
@@ -305,6 +334,15 @@ Describe 'Get-GrantUtilization' {
     }
 }
 
+Describe 'Grant utilization persistence precision' {
+    It 'uses decimal nine-six for every SQL sample JSON projection' {
+        $module = Get-Content (Join-Path $PSScriptRoot '../../workload/Workshop.Workload.psm1') -Raw
+        $module | Should -Not -Match 'GrantUtilizationPercent\s+decimal\(6,2\)'
+        ([regex]::Matches($module, 'GrantUtilizationPercent\s+decimal\(9,6\)')).Count |
+            Should -BeExactly 3
+    }
+}
+
 Describe 'Test-TargetBand' {
     It 'uses inclusive approved boundaries' -ForEach @(
         @{ Value = 75; Phase = 'Baseline'; Expected = $true }
@@ -458,6 +496,18 @@ Describe 'Get-WorkshopOutcome' {
 }
 
 Describe 'New-WorkshopRunRecord' {
+    It 'requires frozen worker ramp settings to be an integer from twenty through sixty' -ForEach @(
+        19, [decimal]'20.5', 61
+    ) {
+        $settings = Get-TestSetting
+        $settings.workerRampSeconds = $_
+        {
+            New-WorkshopRunRecord -Phase Target -Status Planned `
+                -EvidenceClassification TARGET -FrozenSettings $settings `
+                -EnvironmentFingerprint (Get-TestEnvironment) -TargetBands (Get-TestTargetBand)
+        } | Should -Throw '*20 through 60*'
+    }
+
     It 'canonicalizes case-insensitive enum inputs to schema casing' {
         $record = New-WorkshopRunRecord -Phase baseline -Status planned `
             -EvidenceClassification target -FrozenSettings (Get-TestSetting) `
@@ -630,6 +680,57 @@ Describe 'New-WorkshopRunRecord' {
 }
 
 Describe 'ConvertTo-WorkshopEvidence' {
+    It 'rejects globally reversed or equal timestamps at the phase transition' -ForEach @(
+        @{ OptimizedTimestamp = '2026-09-01T10:00:19.9999999Z' }
+        @{ OptimizedTimestamp = '2026-09-01T10:00:20.0000000Z' }
+    ) {
+        $samples = @(
+            [ordered]@{ sequence = 1; timestampUtc = '2026-09-01T10:00:05.0000000Z'; phase = 'Baseline'; grantedKb = 800; totalKb = 1000; grantUtilizationPercent = 80; hostUsedPercent = 70; hostAvailableMB = 12000; processPhysicalLow = $false; processVirtualLow = $false }
+            [ordered]@{ sequence = 2; timestampUtc = '2026-09-01T10:00:20.0000000Z'; phase = 'Baseline'; grantedKb = 800; totalKb = 1000; grantUtilizationPercent = 80; hostUsedPercent = 70; hostAvailableMB = 12000; processPhysicalLow = $false; processVirtualLow = $false }
+            [ordered]@{ sequence = 3; timestampUtc = $OptimizedTimestamp; phase = 'Optimized'; grantedKb = 400; totalKb = 1000; grantUtilizationPercent = 40; hostUsedPercent = 71; hostAvailableMB = 11800; processPhysicalLow = $false; processVirtualLow = $false }
+            [ordered]@{ sequence = 4; timestampUtc = '2026-09-01T10:00:25.0000000Z'; phase = 'Optimized'; grantedKb = 400; totalKb = 1000; grantUtilizationPercent = 40; hostUsedPercent = 71; hostAvailableMB = 11800; processPhysicalLow = $false; processVirtualLow = $false }
+        )
+
+        { ConvertTo-WorkshopEvidence -RunRecord (Get-MeasuredRun) -Samples $samples `
+                -RequestSamples @() -Validation (Get-ValidValidation) -Outcome TargetMet } |
+            Should -Throw '*samples`[2`].timestampUtc*strictly later*samples`[1`].timestampUtc*'
+    }
+
+    It 'rejects request samples not linked to the same phase, sequence, timestamp, and run interval' {
+        $run = Get-MeasuredRun
+        $requests = Get-ValidRequestSample
+        $requests[0].phase = 'Optimized'
+        { ConvertTo-WorkshopEvidence -RunRecord $run -Samples (Get-ValidSample) `
+                -RequestSamples $requests -Validation (Get-ValidValidation) -Outcome TargetMet } |
+            Should -Throw '*requestSamples`[0`].phase*'
+
+        $requests = Get-ValidRequestSample
+        $requests[0].timestampUtc = '2026-09-01T09:59:59.0000000Z'
+        { ConvertTo-WorkshopEvidence -RunRecord $run -Samples (Get-ValidSample) `
+                -RequestSamples $requests -Validation (Get-ValidValidation) -Outcome TargetMet } |
+            Should -Throw '*requestSamples`[0`].timestampUtc*'
+
+        $requests = Get-ValidRequestSample
+        $requests[0].sampleSequence = 99
+        { ConvertTo-WorkshopEvidence -RunRecord $run -Samples (Get-ValidSample) `
+                -RequestSamples $requests -Validation (Get-ValidValidation) -Outcome TargetMet } |
+            Should -Throw '*requestSamples`[0`].sampleSequence*'
+
+        $requests = @(Get-ValidRequestSample)
+        $duplicate = [ordered]@{}
+        foreach ($entry in $requests[0].GetEnumerator()) { $duplicate[$entry.Key] = $entry.Value }
+        $requests += $duplicate
+        { ConvertTo-WorkshopEvidence -RunRecord $run -Samples (Get-ValidSample) `
+                -RequestSamples $requests -Validation (Get-ValidValidation) -Outcome TargetMet } |
+            Should -Throw '*requestSamples`[2`]*duplicate*identity*'
+
+        $requests = Get-ValidRequestSample
+        $requests[0].runId = '22222222-2222-2222-2222-222222222222'
+        { ConvertTo-WorkshopEvidence -RunRecord $run -Samples (Get-ValidSample) `
+                -RequestSamples $requests -Validation (Get-ValidValidation) -Outcome TargetMet } |
+            Should -Throw '*requestSamples`[0`].runId*'
+    }
+
     It 'emits a deterministic ordered schema-shaped measured object' {
         $run = Get-MeasuredRun
         $first = ConvertTo-WorkshopEvidence -RunRecord $run -Samples (Get-ValidSample) `
@@ -790,6 +891,39 @@ Describe 'ConvertTo-WorkshopEvidence' {
                 -Outcome TargetMet } | Should -Throw '*does not match values derived from trials*'
     }
 
+    It 'rejects malformed deterministic schedule mapping on every partial failed trial' -ForEach @(
+        @{ Sequence = 1; Slot = 2; Phase = 'Baseline' }
+        @{ Sequence = 1; Slot = 1; Phase = 'Optimized' }
+        @{ Sequence = 13; Slot = 1; Phase = 'Baseline' }
+    ) {
+        $trials = @(Get-ValidTrial)[0]
+        $trials.TrialSequence = $Sequence
+        $trials.ParameterSlot = $Slot
+        $trials.Phase = $Phase
+        $run = Get-MeasuredRun
+        $run.Status = 'Failed'
+        $run.Trials = @($trials)
+        $validation = Get-PartialValidation -Trials @($trials)
+
+        { ConvertTo-WorkshopEvidence -RunRecord $run -Samples (Get-ValidSample) `
+                -RequestSamples @() -Validation $validation -Outcome Failed } |
+            Should -Throw
+    }
+
+    It 'requires every trial interval to be contained by the run interval' -ForEach @(
+        @{ Started = '2026-09-01T09:59:59.0000000Z'; Completed = '2026-09-01T10:00:01.0000000Z' }
+        @{ Started = '2026-09-01T10:01:01.0000000Z'; Completed = '2026-09-01T10:01:02.0000000Z' }
+        @{ Started = '2026-09-01T10:00:59.0000000Z'; Completed = '2026-09-01T10:01:01.0000000Z' }
+    ) {
+        $run = Get-MeasuredRun
+        $run.Trials[0].StartedAtUtc = $Started
+        $run.Trials[0].CompletedAtUtc = $Completed
+
+        { ConvertTo-WorkshopEvidence -RunRecord $run -Samples (Get-ValidSample) `
+                -RequestSamples @() -Validation (Get-ValidValidation) -Outcome TargetMet } |
+            Should -Throw '*trial interval*run interval*'
+    }
+
     It 'emits target evidence with no measured claims' {
         $run = New-WorkshopRunRecord -Phase Target -Status Planned `
             -EvidenceClassification TARGET -FrozenSettings (Get-TestSetting) `
@@ -815,10 +949,22 @@ Describe 'ConvertTo-WorkshopEvidence' {
                 -Outcome TargetMet } | Should -Throw
 
         $samples = Get-ValidSample
+        $samples[1].phase = 'Baseline'
+        $samples[1].grantedKb = 800
+        $samples[1].grantUtilizationPercent = 80
         $samples[1].timestampUtc = $samples[0].timestampUtc
         { ConvertTo-WorkshopEvidence -RunRecord $run -Samples $samples `
-                -RequestSamples (Get-ValidRequestSample) -Validation (Get-ValidValidation) `
-                -Outcome TargetMet } | Should -Throw
+            -RequestSamples @() -Validation (Get-ValidValidation) `
+                -Outcome TargetMet } | Should -Throw '*samples`[1`].timestampUtc*strictly later*samples`[0`].timestampUtc*'
+
+        $samples = Get-ValidSample
+        $samples[1].phase = 'Baseline'
+        $samples[1].grantedKb = 800
+        $samples[1].grantUtilizationPercent = 80
+        $samples[1].timestampUtc = '2026-09-01T10:00:04.9999999Z'
+        { ConvertTo-WorkshopEvidence -RunRecord $run -Samples $samples `
+            -RequestSamples @() -Validation (Get-ValidValidation) `
+                -Outcome TargetMet } | Should -Throw '*samples`[1`].timestampUtc*strictly later*samples`[0`].timestampUtc*'
 
         $samples = Get-ValidSample
         $samples[0].grantUtilizationPercent = 101
@@ -1117,7 +1263,7 @@ Describe 'Task 12 workload orchestration' {
                     if ($Kind -eq 'Fingerprint') { return $state.Preflight }
                     if ($Kind -eq 'Trial') {
                         $optimizedTrial = $TrialPhase -eq 'Optimized'
-                        $trial = [pscustomobject]@{ Phase = $TrialPhase; DurationMs = if ($optimizedTrial) { 70 } else { 100 }; CpuMs = if ($optimizedTrial) { 35 } else { 50 }; LogicalReads = if ($optimizedTrial) { 700 } else { 1000 }; GrantedKB = if ($optimizedTrial) { 200 } else { 400 }; UsedKB = if ($optimizedTrial) { 150 } else { 300 }; SpillKB = 0; WaitMs = if ($optimizedTrial) { 2 } else { 5 }; ResultRowCount=2; ResultHash=('ab'*32); ExpectedRowCount=2; ActualRowCount=2; DifferenceCount=1; Correct=$false; ValidationBatchID=$state.Preflight.ValidationBatchID; StartedAtUtc=$state.Now; CompletedAtUtc=$state.Now.AddSeconds(1) }
+                        $trial = [pscustomobject]@{ Phase = $TrialPhase; DurationMs = if ($optimizedTrial) { 70 } else { 100 }; CpuMs = if ($optimizedTrial) { 35 } else { 50 }; LogicalReads = if ($optimizedTrial) { 700 } else { 1000 }; GrantedKB = if ($optimizedTrial) { 200 } else { 400 }; UsedKB = if ($optimizedTrial) { 150 } else { 300 }; SpillKB = 0; WaitMs = if ($optimizedTrial) { 2 } else { 5 }; ResultRowCount=2; ResultHash=('ab'*32); ExpectedRowCount=2; ActualRowCount=2; DifferenceCount=1; Correct=$false; ValidationBatchID=$state.Preflight.ValidationBatchID; StartedAtUtc=$state.Now; CompletedAtUtc=$state.Now }
                         $state.Trials.Add($trial)
                         return $trial
                     }
@@ -2489,7 +2635,10 @@ Describe 'Task 12 stop and export safety' {
 
     It 'implements exact tagged parameterized SQL workers in disposable async runspaces' {
         $module = Get-Content (Join-Path $PSScriptRoot '../../workload/Workshop.Workload.psm1') -Raw
-        $module | Should -Match 'SET\s+CONTEXT_INFO\s+@RunBytes'
+        $module | Should -Match 'SET\s+CONTEXT_INFO\s+@RunContextBytes'
+        $module | Should -Match '\[byte\[\]\]::new\(17\)'
+        $module | Should -Match '\$runContextBytes\[16\]\s*=\s*\$phaseTag'
+        $module | Should -Match 'if\s*\(\$WorkerPhase\s*-ceq\s*''Baseline''\)\s*\{\s*\[byte\]1\s*\}\s*else\s*\{\s*\[byte\]2\s*\}'
         $module | Should -Match "sp_set_session_context.+WorkshopRunId"
         $module | Should -Match "sp_set_session_context.+WorkshopPhase"
         $module | Should -Match 'lab\.usp_MonthEndSalesBaseline'

@@ -1181,7 +1181,7 @@ def test_evidence_tables_are_exact_idempotent_and_constrained() -> None:
         "POOLGRANTEDMEMORYKB BIGINT",
         "POOLUSEDMEMORYKB BIGINT",
         "POOLAVAILABLEMEMORYKB BIGINT",
-        "GRANTUTILIZATIONPERCENT DECIMAL(6,2)",
+        "GRANTUTILIZATIONPERCENT DECIMAL(9,6)",
         "REQUESTEDMEMORYKB BIGINT",
         "GRANTEDMEMORYKB BIGINT",
         "REQUIREDMEMORYKB BIGINT",
@@ -1197,6 +1197,44 @@ def test_evidence_tables_are_exact_idempotent_and_constrained() -> None:
     assert "EXISTING EVIDENCE TABLE" in text and "CONTRACT IS INCOMPATIBLE" in text
     assert text.count("FROM SYS.COLUMNS") >= 2
     assert "SQLTEXT" not in text and "QUERYSQLTEXT" not in text
+
+
+def test_workshop_sample_decimal_contract_migrates_legacy_rows_before_metadata_verification() -> None:
+    text = normalized("05-CreateDiagnostics.sql")
+    migration = text.index("ALTER TABLE LAB.WORKSHOPSAMPLE ALTER COLUMN GRANTUTILIZATIONPERCENT DECIMAL(9,6) NOT NULL")
+    metadata = text.index("DECLARE @EXPECTEDCOLUMNS TABLE")
+    assert migration < metadata
+    assert "C.PRECISION = 6" in text[:metadata]
+    assert "C.SCALE = 2" in text[:metadata]
+    assert "(N'WORKSHOPSAMPLE', 9, N'GRANTUTILIZATIONPERCENT', N'DECIMAL', 5, 9, 6, 0, 0)" in text
+
+
+def test_legacy_precision_migration_validates_and_rebuilds_the_exact_check_contract() -> None:
+    text = normalized("05-CreateDiagnostics.sql")
+    alter_marker = text.index(
+        "ALTER COLUMN GRANTUTILIZATIONPERCENT DECIMAL(9,6) NOT NULL"
+    )
+    migration = text[
+        text.rfind("IF EXISTS", 0, alter_marker):
+        text.index("IF OBJECT_ID(N'LAB.WORKSHOPREQUESTSAMPLE', N'U') IS NULL")
+    ]
+    validation = migration.index("EXISTING LEGACY WORKSHOPSAMPLE UTILIZATION CHECK CONTRACT IS INCOMPATIBLE")
+    drop_constraint = migration.index("DROP CONSTRAINT CK_WORKSHOPSAMPLE_UTILIZATION")
+    alter_column = migration.index(
+        "ALTER COLUMN GRANTUTILIZATIONPERCENT DECIMAL(9,6) NOT NULL"
+    )
+    recreate = migration.index(
+        "WITH CHECK ADD CONSTRAINT CK_WORKSHOPSAMPLE_UTILIZATION CHECK (GRANTUTILIZATIONPERCENT BETWEEN 0 AND 100)"
+    )
+    trust = migration.index("WITH CHECK CHECK CONSTRAINT CK_WORKSHOPSAMPLE_UTILIZATION")
+
+    assert "TEMPDB.SYS.CHECK_CONSTRAINTS" in migration
+    assert "CC.DEFINITION COLLATE LATIN1_GENERAL_100_BIN2" in migration
+    assert "SYS.SQL_EXPRESSION_DEPENDENCIES" in migration
+    assert validation < drop_constraint < alter_column < recreate < trust
+    assert "BEGIN TRY BEGIN TRANSACTION" in migration
+    assert "IF XACT_STATE() <> 0 ROLLBACK TRANSACTION" in migration
+    assert "THROW;" in migration
 
 
 def test_validation_run_contract_is_task9_compatible_and_verified() -> None:
@@ -1271,6 +1309,7 @@ def test_workshop_trial_has_exact_keys_checks_and_validation_index() -> None:
         "CONSTRAINT CK_WORKSHOPTRIAL_SEQUENCE CHECK (TRIALSEQUENCE BETWEEN 1 AND 12)",
         "CONSTRAINT CK_WORKSHOPTRIAL_PARAMETERSLOT CHECK (PARAMETERSLOT BETWEEN 1 AND 6)",
         "CONSTRAINT CK_WORKSHOPTRIAL_PHASE CHECK (PHASE IN ('BASELINE', 'OPTIMIZED'))",
+        "CONSTRAINT CK_WORKSHOPTRIAL_SCHEDULE CHECK",
         "CONSTRAINT CK_WORKSHOPTRIAL_METRICS CHECK",
         "CONSTRAINT CK_WORKSHOPTRIAL_VALIDATION CHECK",
         "CONSTRAINT CK_WORKSHOPTRIAL_TIMESTAMPS CHECK (COMPLETEDATUTC >= STARTEDATUTC)",
@@ -1288,7 +1327,8 @@ def test_workshop_trial_has_exact_keys_checks_and_validation_index() -> None:
     for metadata in (
         "PK_WORKSHOPTRIAL", "FK_WORKSHOPTRIAL_WORKSHOPRUN", "IX_WORKSHOPTRIAL_VALIDATIONBATCHID",
         "CK_WORKSHOPTRIAL_SEQUENCE", "CK_WORKSHOPTRIAL_PARAMETERSLOT", "CK_WORKSHOPTRIAL_PHASE",
-        "CK_WORKSHOPTRIAL_METRICS", "CK_WORKSHOPTRIAL_VALIDATION", "CK_WORKSHOPTRIAL_TIMESTAMPS",
+        "CK_WORKSHOPTRIAL_SCHEDULE", "CK_WORKSHOPTRIAL_METRICS", "CK_WORKSHOPTRIAL_VALIDATION",
+        "CK_WORKSHOPTRIAL_TIMESTAMPS",
         "#EXPECTEDWORKSHOPTRIALCHECKSHAPE",
     ):
         assert metadata in text
@@ -1304,6 +1344,87 @@ def test_workshop_trial_has_exact_keys_checks_and_validation_index() -> None:
     ]
     assert "CC.DEFINITION COLLATE LATIN1_GENERAL_100_BIN2" in exact_check_region
     assert "REPLACE(" not in exact_check_region
+
+
+def test_workshop_trial_schedule_constraint_enforces_exact_mapping_and_metadata() -> None:
+    text = normalized("05-CreateDiagnostics.sql")
+    expected_pairs = (
+        (1, 1, "BASELINE"),
+        (2, 1, "OPTIMIZED"),
+        (3, 2, "OPTIMIZED"),
+        (4, 2, "BASELINE"),
+        (5, 3, "OPTIMIZED"),
+        (6, 3, "BASELINE"),
+        (7, 4, "BASELINE"),
+        (8, 4, "OPTIMIZED"),
+        (9, 5, "BASELINE"),
+        (10, 5, "OPTIMIZED"),
+        (11, 6, "OPTIMIZED"),
+        (12, 6, "BASELINE"),
+    )
+    for sequence, slot, phase in expected_pairs:
+        mapping = (
+            f"TRIALSEQUENCE = {sequence} AND PARAMETERSLOT = {slot} AND PHASE = '{phase}'"
+        )
+        assert text.count(mapping) == 4
+
+    assert "ALTER TABLE LAB.WORKSHOPTRIAL WITH CHECK ADD CONSTRAINT CK_WORKSHOPTRIAL_SCHEDULE CHECK" in text
+    assert "ALTER TABLE LAB.WORKSHOPTRIAL WITH CHECK CHECK CONSTRAINT CK_WORKSHOPTRIAL_SCHEDULE" in text
+    assert "(N'WORKSHOPTRIAL', N'CK_WORKSHOPTRIAL_SCHEDULE', 0, 0, 0)" in text
+    for column in ("TRIALSEQUENCE", "PARAMETERSLOT", "PHASE"):
+        assert f"(N'CK_WORKSHOPTRIAL_SCHEDULE', N'{column}')" in text
+
+    invariant_marker = text.index("#EXPECTEDWORKSHOPTRIALSCHEDULEINVARIANT")
+    migration_start = text.rfind("BEGIN TRY", 0, invariant_marker)
+    migration_end = text.index("DECLARE @EXPECTEDCOLUMNS TABLE")
+    migration = text[migration_start:migration_end]
+    assert "TEMPDB.SYS.CHECK_CONSTRAINTS" in migration
+    assert "CC.DEFINITION COLLATE LATIN1_GENERAL_100_BIN2" in migration
+    assert "CC.IS_DISABLED = 0" in migration
+    assert "CC.IS_NOT_TRUSTED = 0" in migration
+    assert "CC.IS_NOT_FOR_REPLICATION = 0" in migration
+    assert "EXISTING WORKSHOPTRIAL SCHEDULE CHECK CONTRACT IS INCOMPATIBLE" in migration
+    assert "BEGIN TRY BEGIN TRANSACTION" in migration
+    assert "IF XACT_STATE() <> 0 ROLLBACK TRANSACTION" in migration
+
+
+def test_workshop_trial_schedule_migration_is_serialized_and_always_releases_lock() -> None:
+    text = normalized("05-CreateDiagnostics.sql")
+    migration_start = text.index("DECLARE @WORKSHOPTRIALSCHEDULELOCKRESULT")
+    migration_end = text.index("DECLARE @EXPECTEDCOLUMNS TABLE")
+    migration = text[migration_start:migration_end]
+
+    acquire = migration.index("SYS.SP_GETAPPLOCK")
+    metadata_check = migration.index("TEMPDB.SYS.CHECK_CONSTRAINTS")
+    alter = migration.index("ALTER TABLE LAB.WORKSHOPTRIAL WITH CHECK")
+    success_release = migration.index("SYS.SP_RELEASEAPPLOCK", alter)
+    catch = migration.index("BEGIN CATCH", success_release)
+    error_release = migration.index("SYS.SP_RELEASEAPPLOCK", catch)
+
+    assert "@RESOURCE = N'MCP_SQL_WORKSHOP_LIFECYCLE'" in migration
+    assert "@LOCKMODE = N'EXCLUSIVE'" in migration
+    assert "@LOCKOWNER = N'SESSION'" in migration
+    assert "@LOCKTIMEOUT = 0" in migration
+    assert acquire < metadata_check < alter < success_release < catch < error_release
+    assert "IF @WORKSHOPTRIALSCHEDULELOCKRESULT < 0" in migration
+    assert "SET @WORKSHOPTRIALSCHEDULELOCKHELD = 1" in migration
+    assert "SET @WORKSHOPTRIALSCHEDULELOCKHELD = 0" in migration
+    assert "THROW;" in migration[catch:]
+
+
+def test_cleanup_recognizes_and_removes_workshop_trial_schedule_constraint() -> None:
+    text = normalized("09-Cleanup.sql")
+    inventory = text[
+        text.index("DECLARE @EXPECTEDLABCONSTRAINTS TABLE"):
+        text.index("DECLARE @EXPECTEDLABTRIGGERS TABLE")
+    ]
+    drop = "ALTER TABLE LAB.WORKSHOPTRIAL DROP CONSTRAINT CK_WORKSHOPTRIAL_SCHEDULE"
+
+    assert "(N'WORKSHOPTRIAL', N'CK_WORKSHOPTRIAL_SCHEDULE', 'C')" in inventory
+    assert drop in text
+    assert text.index(drop) < text.index(
+        "ALTER TABLE LAB.WORKSHOPTRIAL DROP CONSTRAINT PK_WORKSHOPTRIAL"
+    )
 
 
 def test_workshop_trial_is_not_reader_exposed_and_has_exact_denies() -> None:
@@ -1457,7 +1578,7 @@ def test_live_memory_diagnostics_are_bounded_filtered_and_secret_free() -> None:
     assert "SYS.DM_EXEC_QUERY_RESOURCE_SEMAPHORES" in snapshot
     assert "RP.NAME = N'MCP_SQL_WORKSHOP_POOL'" in snapshot
     assert "RS.RESOURCE_SEMAPHORE_ID = 0" in snapshot
-    assert "CAST(100.0 * RS.GRANTED_MEMORY_KB / NULLIF(RS.TOTAL_MEMORY_KB, 0) AS DECIMAL(6,2))" in snapshot
+    assert "CAST(100.0 * RS.GRANTED_MEMORY_KB / NULLIF(RS.TOTAL_MEMORY_KB, 0) AS DECIMAL(9,6))" in snapshot
     assert "RS.TOTAL_MEMORY_KB - RS.GRANTED_MEMORY_KB" in snapshot
     assert "SYS.DM_OS_SYS_MEMORY" in snapshot and "SYS.DM_OS_PROCESS_MEMORY" in snapshot
     assert "SYS.DM_OS_PERFORMANCE_COUNTERS" in snapshot
@@ -1483,24 +1604,37 @@ def test_live_memory_diagnostics_are_bounded_filtered_and_secret_free() -> None:
     grants = re.sub(r"\s+", " ", diagnostic_batch("lab.usp_GetActiveWorkshopGrants")).upper()
     assert "@TOP INT = 20" in grants and "@TOP NOT BETWEEN 1 AND 100" in grants
     assert "SELECT TOP (@TOP)" in grants and "ORDER BY" in grants
-    assert "S.PROGRAM_NAME LIKE N'MCP-SQL-WORKSHOP%'" in grants
+    assert "S.PROGRAM_NAME LIKE N'MCP-SQL-WORKSHOP%'" not in grants
     assert "@RUNID UNIQUEIDENTIFIER = NULL" in grants
+    assert "@PHASE VARCHAR(16)" in grants
+    assert "@PHASE NOT IN ('BASELINE', 'OPTIMIZED')" in grants
     assert "S.CONTEXT_INFO" in grants
+    assert "DATALENGTH(S.CONTEXT_INFO) = 17" in grants
     assert "TRY_CONVERT(UNIQUEIDENTIFIER" in grants
+    assert "SUBSTRING(S.CONTEXT_INFO, 17, 1)" in grants
+    assert "WHEN 1 THEN 'BASELINE'" in grants
+    assert "WHEN 2 THEN 'OPTIMIZED'" in grants
+    assert "SESSIONCONTEXT.RUNID = @RUNID" in grants
+    assert "SESSIONCONTEXT.PHASE = @PHASE" in grants
+    assert "CONVERT(CHAR(36), SESSIONCONTEXT.RUNID)" in grants
+    assert "S.PROGRAM_NAME COLLATE LATIN1_GENERAL_100_BIN2" in grants
+    assert re.search(r"N'MCP-SQL-WORKSHOP-'.*?SESSIONCONTEXT\.PHASE.*?N'-1'", grants)
+    assert re.search(r"N'MCP-SQL-WORKSHOP-'.*?SESSIONCONTEXT\.PHASE.*?N'-4'", grants)
     assert "LAB.WORKSHOPREQUESTSAMPLE" not in grants
-    assert "OUTER APPLY" in grants
+    assert "CROSS APPLY" in grants
     assert "SYS.DM_EXEC_QUERY_MEMORY_GRANTS" in grants
     assert "SYS.DM_EXEC_REQUESTS" in grants and "SYS.DM_EXEC_SESSIONS" in grants
     assert "DM_EXEC_SQL_TEXT" not in grants and "SQL_HANDLE" not in grants
 
 
 def test_workload_procedures_publish_run_id_for_cross_session_dmv_correlation() -> None:
-    for name, procedure in (
-        ("04-CreateBaselineProcedure.sql", "lab.usp_MonthEndSalesBaseline"),
-        ("06-CreateOptimizedProcedure.sql", "lab.usp_MonthEndSalesOptimized"),
+    for name, procedure, phase_byte in (
+        ("04-CreateBaselineProcedure.sql", "lab.usp_MonthEndSalesBaseline", "01"),
+        ("06-CreateOptimizedProcedure.sql", "lab.usp_MonthEndSalesOptimized", "02"),
     ):
         body = procedure_body(name, procedure)
         assert "CONVERT(BINARY(16), @RUNID)" in body
+        assert f"CONVERT(BINARY(16), @RUNID) + 0X{phase_byte}" in body
         assert "SET CONTEXT_INFO @RUNCONTEXTINFO" in body
 
 
@@ -1586,6 +1720,21 @@ def test_run_comparison_requires_exact_validation_linkage_and_material_improveme
     assert "TRIAL.VALIDATIONBATCHID = @VALIDATIONBATCHID" in body
     assert "TRIAL.CORRECT = 1" in body
     assert "COUNT_BIG(*)" in body and "<> 12" in body
+    assert "EXPECTEDTRIALS" in body
+    for sequence, slot, phase in (
+        (1, 1, "BASELINE"), (2, 1, "OPTIMIZED"),
+        (3, 2, "OPTIMIZED"), (4, 2, "BASELINE"),
+        (5, 3, "OPTIMIZED"), (6, 3, "BASELINE"),
+        (7, 4, "BASELINE"), (8, 4, "OPTIMIZED"),
+        (9, 5, "BASELINE"), (10, 5, "OPTIMIZED"),
+        (11, 6, "OPTIMIZED"), (12, 6, "BASELINE"),
+    ):
+        assert re.search(rf"\(\s*{sequence}\s*,\s*{slot}\s*,\s*'{phase}'\s*\)", body)
+    integrity_guard = body[:body.index(";WITH RANKEDSAMPLES")]
+    assert integrity_guard.count("EXCEPT") >= 2
+    assert "THROW 51666" in integrity_guard
+    assert "CAST(AVG(" in body and "AS DECIMAL(9,6)) AS MEDIANGRANTUTILIZATIONPERCENT" in body
+    assert "CONVERT(DECIMAL(9,6), BASELINEMEDIANGRANTUTILIZATIONPERCENT - OPTIMIZEDMEDIANGRANTUTILIZATIONPERCENT)" in body
     assert "CORRECTNESSPASSED" in body
     assert "HASMATERIALREGRESSION" in body
     assert "HASADDITIONALMETRICIMPROVEMENT" in body

@@ -407,8 +407,8 @@ function Assert-FrozenSetting {
     if ($sample -ne [math]::Truncate($sample) -or $sample -lt 5 -or $sample -gt 30) {
         throw 'sampleIntervalSeconds must be an integer from 5 through 30.'
     }
-    if ($ramp -ne [math]::Truncate($ramp) -or $ramp -lt 10 -or $ramp -gt 60) {
-        throw 'workerRampSeconds must be an integer from 10 through 60.'
+    if ($ramp -ne [math]::Truncate($ramp) -or $ramp -lt 20 -or $ramp -gt 60) {
+        throw 'workerRampSeconds must be an integer from 20 through 60.'
     }
     if ($memory -ne [math]::Truncate($memory) -or $memory -le 0) {
         throw 'maxServerMemoryMB must be a positive integer.'
@@ -827,14 +827,24 @@ function Assert-SampleCollection {
         [object] $EndUtc,
 
         [Parameter()]
-        [switch] $Request
+        [switch] $Request,
+
+        [Parameter()]
+        [object[]] $BaseSamples = @(),
+
+        [Parameter()]
+        [AllowNull()]
+        [object] $RunId
     )
 
-    $previousTimestamp = [datetimeoffset]::MinValue
+    $previousSample = $null
+    $requestIdentities = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::Ordinal
+    )
     for ($index = 0; $index -lt $Samples.Count; $index++) {
         $sample = $Samples[$index]
         $expectedNames = if ($Request) {
-                        @('sampleSequence','sessionId','requestId','requestedMemoryKB','grantedMemoryKB',
+                        @('sampleSequence','timestampUtc','phase','sessionId','requestId','requestedMemoryKB','grantedMemoryKB',
                             'requiredMemoryKB','idealMemoryKB','usedMemoryKB','maxUsedMemoryKB','waitOrder',
                             'waitTimeMs','queryId','planId')
         }
@@ -845,6 +855,7 @@ function Assert-SampleCollection {
                 'processPhysicalLow', 'processVirtualLow'
             )
         }
+        if ($Request -and $null -ne (Get-ObjectValue $sample runId)) { $expectedNames += 'runId' }
         Assert-ExactProperty -InputObject $sample -RequiredNames $expectedNames -Context 'Sample'
         Assert-NoSecretField -InputObject $sample
         if ($Request) {
@@ -853,22 +864,63 @@ function Assert-SampleCollection {
                 $metric = ConvertTo-FiniteDecimal (Get-ObjectValue $sample $name -Required) $name
                 if ($metric -lt 0) { throw "$name cannot be negative." }
             }
+            $prefix = "requestSamples[$index]"
+            $timestampText = Get-ObjectValue $sample timestampUtc -Required
+            $timestamp = ConvertFrom-UtcText $timestampText "$prefix.timestampUtc"
+            if ($timestamp -lt $StartUtc -or ($null -ne $EndUtc -and $timestamp -gt ([datetimeoffset]$EndUtc))) {
+                throw "$prefix.timestampUtc must fall within the run interval."
+            }
+            $phase = Resolve-CanonicalEnum `
+                (Get-ObjectValue $sample phase -Required) @('Baseline','Optimized') "$prefix.phase"
+            $sequence = [int](Get-ObjectValue $sample sampleSequence -Required)
+            $linked = @($BaseSamples | Where-Object {
+                [int](Get-ObjectValue $_ sequence -Required) -eq $sequence -and
+                [string](Get-ObjectValue $_ phase -Required) -ceq $phase
+            })
+            if ($linked.Count -ne 1) {
+                $sequenceMatches = @($BaseSamples | Where-Object {
+                    [int](Get-ObjectValue $_ sequence -Required) -eq $sequence
+                })
+                if ($sequenceMatches.Count -gt 0) {
+                    throw "$prefix.phase must match its linked sample phase."
+                }
+                throw "$prefix.sampleSequence must link to one existing sample with the same phase."
+            }
+            if ([string](Get-ObjectValue $linked[0] timestampUtc -Required) -cne [string]$timestampText) {
+                throw "$prefix.timestampUtc must match its linked sample timestamp."
+            }
+            $representedRunId = Get-ObjectValue $sample runId
+            if ($null -ne $representedRunId -and [string]$representedRunId -cne [string]$RunId) {
+                throw "$prefix.runId must match the evidence run ID."
+            }
+            $requestIdentity = '{0}|{1}|{2}|{3}' -f $phase, $sequence,
+                [int](Get-ObjectValue $sample sessionId -Required),
+                [int](Get-ObjectValue $sample requestId -Required)
+            if (-not $requestIdentities.Add($requestIdentity)) {
+                throw "$prefix has a duplicate request sample identity."
+            }
             continue
         }
-        if ((Get-ObjectValue $sample sequence -Required) -ne ($index + 1)) {
+        $sequence = [int](Get-ObjectValue $sample sequence -Required)
+        if ($sequence -ne ($index + 1)) {
             throw 'Sample sequence must start at 1 and be contiguous.'
         }
-        $timestamp = ConvertFrom-UtcText (Get-ObjectValue $sample timestampUtc -Required) 'sample timestampUtc'
-        if ($timestamp -le $previousTimestamp) {
-            throw 'Sample timestamps must be strictly increasing.'
-        }
+        $timestampPath = "samples[$index].timestampUtc"
+        $timestamp = ConvertFrom-UtcText (Get-ObjectValue $sample timestampUtc -Required) $timestampPath
         if ($timestamp -lt $StartUtc -or ($null -ne $EndUtc -and $timestamp -gt ([datetimeoffset] $EndUtc))) {
-            throw 'Sample timestamp falls outside the run interval.'
+            throw "$timestampPath must fall within the run interval."
         }
-        $previousTimestamp = $timestamp
-
-        [void] (Resolve-CanonicalEnum `
-            (Get-ObjectValue $sample phase -Required) @('Baseline', 'Optimized') 'sample phase')
+        $phase = Resolve-CanonicalEnum `
+            (Get-ObjectValue $sample phase -Required) @('Baseline', 'Optimized') "samples[$index].phase"
+        if ($null -ne $previousSample) {
+            if ($timestamp -le $previousSample.Timestamp) {
+                throw "$timestampPath must be strictly later than samples[$($previousSample.Index)].timestampUtc in document sequence."
+            }
+        }
+        $previousSample = [pscustomobject]@{
+            Index = $index
+            Timestamp = $timestamp
+        }
 
         if (-not $Request) {
             $calculated = Get-GrantUtilization `
@@ -924,8 +976,10 @@ function ConvertTo-CanonicalSampleCollection {
 function ConvertTo-CanonicalRequestSampleCollection {
     param([Parameter(Mandatory)][AllowEmptyCollection()][object[]] $Samples)
     return @($Samples | ForEach-Object {
-        [ordered]@{
+        $request = [ordered]@{
             sampleSequence = [int](Get-ObjectValue $_ sampleSequence -Required)
+            timestampUtc = [string](Get-ObjectValue $_ timestampUtc -Required)
+            phase = Resolve-CanonicalEnum (Get-ObjectValue $_ phase -Required) @('Baseline','Optimized') 'request sample phase'
             sessionId = [int](Get-ObjectValue $_ sessionId -Required)
             requestId = [int](Get-ObjectValue $_ requestId -Required)
             requestedMemoryKB = Get-ObjectValue $_ requestedMemoryKB -Required
@@ -939,6 +993,16 @@ function ConvertTo-CanonicalRequestSampleCollection {
             queryId = Get-ObjectValue $_ queryId
             planId = Get-ObjectValue $_ planId
         }
+        $representedRunId = Get-ObjectValue $_ runId
+        if ($null -ne $representedRunId) {
+            $withRunId = [ordered]@{}
+            foreach ($entry in $request.GetEnumerator()) {
+                $withRunId[$entry.Key] = $entry.Value
+                if ($entry.Key -ceq 'phase') { $withRunId.runId = [string]$representedRunId }
+            }
+            $request = $withRunId
+        }
+        $request
     })
 }
 
@@ -1053,12 +1117,25 @@ function ConvertTo-WorkshopTrialEvidence {
             'StartedAtUtc','CompletedAtUtc'
         )
         Assert-ExactProperty $trial $required 'Trial'
-        if ([int](Get-ObjectValue $trial TrialSequence -Required) -ne $index + 1) {
+        $sequence = ConvertTo-NonnegativeInt64 `
+            (Get-ObjectValue $trial TrialSequence -Required) 'TrialSequence'
+        if ($sequence -lt 1 -or $sequence -gt 12) {
+            throw 'TrialSequence must be from one through twelve.'
+        }
+        if ($sequence -ne $index + 1) {
             throw 'TrialSequence must be contiguous from one.'
         }
         $slot = [int](Get-ObjectValue $trial ParameterSlot -Required)
         if ($slot -lt 1 -or $slot -gt 6) { throw 'ParameterSlot must be from one through six.' }
         $phase = Resolve-CanonicalEnum (Get-ObjectValue $trial Phase -Required) @('Baseline','Optimized') 'trial phase'
+        $expectedPhases = @(
+            'Baseline','Optimized','Optimized','Baseline','Optimized','Baseline',
+            'Baseline','Optimized','Baseline','Optimized','Optimized','Baseline'
+        )
+        if ($slot -ne ([math]::Floor(($sequence - 1) / 2) + 1) -or
+            $phase -cne $expectedPhases[$sequence - 1]) {
+            throw 'Every trial must match its deterministic sequence, parameter slot, and ABBA phase mapping.'
+        }
         foreach ($name in @('DurationMs','CpuMs','LogicalReads','GrantedKB','UsedKB','SpillKB','WaitMs',
             'ResultRowCount','ExpectedRowCount','ActualRowCount','DifferenceCount')) {
             [void](ConvertTo-NonnegativeInt64 (Get-ObjectValue $trial $name -Required) $name)
@@ -1082,7 +1159,7 @@ function ConvertTo-WorkshopTrialEvidence {
         $completed = if ($completedValue -is [string]) { ConvertFrom-UtcText $completedValue 'CompletedAtUtc' } else { [datetimeoffset]$completedValue }
         if ($completed -lt $started) { throw 'CompletedAtUtc cannot precede StartedAtUtc.' }
         $result.Add([ordered]@{
-            trialSequence = [int](Get-ObjectValue $trial TrialSequence -Required)
+            trialSequence = [int]$sequence
             parameterSlot = $slot
             phase = $phase
             durationMs = [int64](Get-ObjectValue $trial DurationMs -Required)
@@ -1182,12 +1259,20 @@ function ConvertTo-WorkshopEvidence {
     $Samples = @(ConvertTo-CanonicalSampleCollection $Samples)
     $RequestSamples = @(ConvertTo-CanonicalRequestSampleCollection $RequestSamples)
     Assert-SampleCollection -Samples $Samples -StartUtc $start -EndUtc $end
-    Assert-SampleCollection -Samples $RequestSamples -StartUtc $start -EndUtc $end -Request
+    Assert-SampleCollection -Samples $RequestSamples -StartUtc $start -EndUtc $end -Request `
+        -BaseSamples $Samples -RunId $runId
     $termination = ConvertTo-TerminationEvidence $TerminationEvidence
     if ($Trials.Count -eq 0 -and $RunRecord.psobject.Properties['Trials']) {
         $Trials = @($RunRecord.Trials)
     }
     $trialEvidence = @(ConvertTo-WorkshopTrialEvidence $Trials)
+    foreach ($trial in $trialEvidence) {
+        $trialStarted = ConvertFrom-UtcText $trial.startedAtUtc 'trial StartedAtUtc'
+        $trialCompleted = ConvertFrom-UtcText $trial.completedAtUtc 'trial CompletedAtUtc'
+        if ($null -eq $end -or $trialStarted -lt $start -or $trialCompleted -gt $end) {
+            throw 'Every trial interval must fall within the run interval.'
+        }
+    }
 
     $baselinePeak = $null
     $optimizedPeak = $null
@@ -2166,6 +2251,10 @@ function Invoke-WorkshopExperiment {
             foreach ($request in @($sample.RequestSamples)) {
                 $copy = $request.psobject.Copy()
                 $copy | Add-Member NoteProperty SampleSequence $sequence -Force
+                $copy | Add-Member NoteProperty TimestampUtc `
+                    ($timestamp.UtcDateTime.ToString('O', [System.Globalization.CultureInfo]::InvariantCulture)) -Force
+                $copy | Add-Member NoteProperty Phase ([string]$sample.Phase) -Force
+                $copy | Add-Member NoteProperty RunId $RunId.ToString('D') -Force
                 foreach ($name in @('QueryID','PlanID')) {
                     if (-not $copy.psobject.Properties[$name]) { $copy | Add-Member NoteProperty $name $null }
                 }
@@ -3671,12 +3760,16 @@ OUTER APPLY
                 $connection.OpenAsync($setupCancellation.Token).GetAwaiter().GetResult()
                 $tag = $connection.CreateCommand()
                 try {
-                    $tag.CommandText = "SET CONTEXT_INFO @RunBytes; EXEC sys.sp_set_session_context @key=N'WorkshopRunId', @value=@RunId; EXEC sys.sp_set_session_context @key=N'WorkshopPhase', @value=@Phase;"
+                    $phaseTag = if ($WorkerPhase -ceq 'Baseline') { [byte]1 } else { [byte]2 }
+                    $runContextBytes = [byte[]]::new(17)
+                    ([guid] $WorkerRunId).ToByteArray().CopyTo($runContextBytes, 0)
+                    $runContextBytes[16] = $phaseTag
+                    $tag.CommandText = "SET CONTEXT_INFO @RunContextBytes; EXEC sys.sp_set_session_context @key=N'WorkshopRunId', @value=@RunId; EXEC sys.sp_set_session_context @key=N'WorkshopPhase', @value=@Phase;"
                     $tagRemainingSeconds = ($WorkerDeadline - [datetimeoffset]::UtcNow).TotalSeconds
                     if ($tagRemainingSeconds -le 0) { throw 'The experiment deadline elapsed before worker tagging completed.' }
                     $tag.CommandTimeout = [math]::Max(1, [int][math]::Ceiling($tagRemainingSeconds))
-                    [void] $tag.Parameters.Add('@RunBytes', [Data.SqlDbType]::Binary, 16)
-                    $tag.Parameters['@RunBytes'].Value = ([guid] $WorkerRunId).ToByteArray()
+                    [void] $tag.Parameters.Add('@RunContextBytes', [Data.SqlDbType]::Binary, 17)
+                    $tag.Parameters['@RunContextBytes'].Value = $runContextBytes
                     [void] $tag.Parameters.Add('@RunId', [Data.SqlDbType]::UniqueIdentifier)
                     $tag.Parameters['@RunId'].Value = [guid] $WorkerRunId
                     [void] $tag.Parameters.Add('@Phase', [Data.SqlDbType]::NVarChar, 16)
@@ -3841,8 +3934,11 @@ OUTER APPLY
             $totalHost = [decimal] $row.HostAvailableMemoryKB + [decimal] $row.HostUsedMemoryKB
             $requestRows = if ($Kind -eq 'Memory') {
                 @(& $invokeTable 'MCP-SQL-Workshop-Controller-Sample' `
-                    'EXEC lab.usp_GetActiveWorkshopGrants @Top=100, @RunID=@RunID;' `
-                    @{ '@RunID' = @{ Type = [Data.SqlDbType]::UniqueIdentifier; Value = $RunId } } `
+                    'EXEC lab.usp_GetActiveWorkshopGrants @Top=100, @RunID=@RunID, @Phase=@Phase;' `
+                    @{
+                        '@RunID' = @{ Type = [Data.SqlDbType]::UniqueIdentifier; Value = $RunId }
+                        '@Phase' = @{ Type = [Data.SqlDbType]::VarChar; Size = 16; Value = $Phase }
+                    } `
                     $null $commandTimeout $operationDeadline)
             }
             else { @() }
@@ -4072,7 +4168,7 @@ BEGIN TRY
              FROM OPENJSON(@SamplesJson) WITH
              (SampleSequence int, SampledAtUtc datetime2(3), Phase varchar(16), PoolTotalMemoryKB bigint,
               PoolGrantedMemoryKB bigint, PoolUsedMemoryKB bigint, PoolAvailableMemoryKB bigint,
-              GrantUtilizationPercent decimal(6,2), GranteeCount int, WaiterCount int,
+              GrantUtilizationPercent decimal(9,6), GranteeCount int, WaiterCount int,
               HostAvailableMemoryKB bigint, HostUsedMemoryKB bigint, ProcessPhysicalMemoryKB bigint,
               TotalServerMemoryKB bigint, TargetServerMemoryKB bigint, SystemLowMemorySignal bit,
               ProcessLowMemorySignal bit) AS value
@@ -4100,7 +4196,7 @@ BEGIN TRY
              FROM OPENJSON(@SamplesJson) WITH
              (SampleSequence int, SampledAtUtc datetime2(3), Phase varchar(16), PoolTotalMemoryKB bigint,
               PoolGrantedMemoryKB bigint, PoolUsedMemoryKB bigint, PoolAvailableMemoryKB bigint,
-              GrantUtilizationPercent decimal(6,2), GranteeCount int, WaiterCount int,
+              GrantUtilizationPercent decimal(9,6), GranteeCount int, WaiterCount int,
               HostAvailableMemoryKB bigint, HostUsedMemoryKB bigint, ProcessPhysicalMemoryKB bigint,
               TotalServerMemoryKB bigint, TargetServerMemoryKB bigint, SystemLowMemorySignal bit,
               ProcessLowMemorySignal bit) AS value
@@ -4204,7 +4300,7 @@ BEGIN TRY
     FROM OPENJSON(@SamplesJson) WITH
     (SampleSequence int, SampledAtUtc datetime2(3), Phase varchar(16), PoolTotalMemoryKB bigint,
      PoolGrantedMemoryKB bigint, PoolUsedMemoryKB bigint, PoolAvailableMemoryKB bigint,
-     GrantUtilizationPercent decimal(6,2), GranteeCount int, WaiterCount int,
+    GrantUtilizationPercent decimal(9,6), GranteeCount int, WaiterCount int,
      HostAvailableMemoryKB bigint, HostUsedMemoryKB bigint, ProcessPhysicalMemoryKB bigint,
      TotalServerMemoryKB bigint, TargetServerMemoryKB bigint, SystemLowMemorySignal bit,
      ProcessLowMemorySignal bit) AS value;

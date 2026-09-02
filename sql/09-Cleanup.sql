@@ -930,6 +930,7 @@ END;';
             (N'WorkshopTrial', N'CK_WorkshopTrial_Sequence', 'C'),
             (N'WorkshopTrial', N'CK_WorkshopTrial_ParameterSlot', 'C'),
             (N'WorkshopTrial', N'CK_WorkshopTrial_Phase', 'C'),
+            (N'WorkshopTrial', N'CK_WorkshopTrial_Schedule', 'C'),
             (N'WorkshopTrial', N'CK_WorkshopTrial_Metrics', 'C'),
             (N'WorkshopTrial', N'CK_WorkshopTrial_Validation', 'C'),
             (N'WorkshopTrial', N'CK_WorkshopTrial_Timestamps', 'C'),
@@ -1564,6 +1565,7 @@ WHERE
         ALTER TABLE lab.WorkshopTrial DROP CONSTRAINT CK_WorkshopTrial_Sequence;
         ALTER TABLE lab.WorkshopTrial DROP CONSTRAINT CK_WorkshopTrial_ParameterSlot;
         ALTER TABLE lab.WorkshopTrial DROP CONSTRAINT CK_WorkshopTrial_Phase;
+        ALTER TABLE lab.WorkshopTrial DROP CONSTRAINT CK_WorkshopTrial_Schedule;
         ALTER TABLE lab.WorkshopTrial DROP CONSTRAINT CK_WorkshopTrial_Metrics;
         ALTER TABLE lab.WorkshopTrial DROP CONSTRAINT CK_WorkshopTrial_Validation;
         ALTER TABLE lab.WorkshopTrial DROP CONSTRAINT CK_WorkshopTrial_Timestamps;

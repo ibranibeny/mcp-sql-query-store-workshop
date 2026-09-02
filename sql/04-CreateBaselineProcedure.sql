@@ -60,7 +60,7 @@ BEGIN
         THROW 51401, 'WorkshopRunId session context is required.', 1;
     IF @IsWorkshopApplication = 0 AND @WorkshopManualExecution <> 1
         THROW 51402, 'The session must use a workshop application name or explicit manual execution context.', 1;
-    DECLARE @RunContextInfo varbinary(128) = CONVERT(binary(16), @RunID);
+    DECLARE @RunContextInfo varbinary(128) = CONVERT(binary(16), @RunID) + 0x01;
     SET CONTEXT_INFO @RunContextInfo;
     IF @StartDate IS NULL
         THROW 51403, 'StartDate is required.', 1;
