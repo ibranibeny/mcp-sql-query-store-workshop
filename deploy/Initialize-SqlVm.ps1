@@ -179,6 +179,18 @@ function ConvertTo-WorkshopCanonicalIpv4Network {
     "$($address.IPAddressToString)/$prefix"
 }
 
+function Get-WorkshopAccessibleRsaPrivateKey {
+    param([Parameter(Mandatory)][Security.Cryptography.X509Certificates.X509Certificate2] $Certificate)
+
+    if (-not $Certificate.HasPrivateKey) { return $null }
+    try {
+        return [Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPrivateKey($Certificate)
+    }
+    catch [Security.Cryptography.CryptographicException] {
+        return $null
+    }
+}
+
 function Mount-WorkshopDisk {
     [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'Low')]
     param(
@@ -396,7 +408,7 @@ ORDER BY file_id;
         $sanExtension = $candidate.Extensions | Where-Object { $_.Oid.Value -eq '2.5.29.17' } | Select-Object -First 1
         $san = if ($null -eq $sanExtension) { '' } else { [string]$sanExtension.Format($false) }
         $usage = $candidate.Extensions | Where-Object { $_ -is [Security.Cryptography.X509Certificates.X509EnhancedKeyUsageExtension] } | Select-Object -First 1
-        $key = if ($candidate.HasPrivateKey) { [Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPrivateKey($candidate) } else { $null }
+        $key = Get-WorkshopAccessibleRsaPrivateKey -Certificate $candidate
         $candidate.Subject -ceq "CN=$privateDnsName" -and $candidate.NotAfter -gt (Get-Date).AddDays(30) -and
             $san -match "DNS Name=$([regex]::Escape($privateDnsName))" -and
             $null -ne $usage -and $usage.EnhancedKeyUsages.Value -contains '1.3.6.1.5.5.7.3.1' -and
@@ -410,7 +422,7 @@ ORDER BY file_id;
     Assert-Condition $certificate.HasPrivateKey 'SQL TLS certificate has no private key.'
     $eku = $certificate.Extensions | Where-Object { $_ -is [Security.Cryptography.X509Certificates.X509EnhancedKeyUsageExtension] } | Select-Object -First 1
     Assert-Condition ($null -ne $eku -and $eku.EnhancedKeyUsages.Value -contains '1.3.6.1.5.5.7.3.1') 'SQL TLS certificate lacks Server Authentication EKU.'
-    $rsa = [Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPrivateKey($certificate)
+    $rsa = Get-WorkshopAccessibleRsaPrivateKey -Certificate $certificate
     Assert-Condition ($rsa -is [Security.Cryptography.RSACng]) 'SQL TLS private key must use the non-exportable CNG provider.'
     Assert-Condition ($rsa.Key.ExportPolicy -notmatch 'AllowExport') 'SQL TLS private key is exportable.'
     $certificateThumbprint = ([string]$certificate.Thumbprint -replace '\s', '').ToUpperInvariant()

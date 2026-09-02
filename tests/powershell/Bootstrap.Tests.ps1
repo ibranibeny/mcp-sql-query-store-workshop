@@ -165,6 +165,9 @@ Describe 'SQL VM bootstrap static contract' {
         $text | Should -Match 'Certificate'
         $text | Should -Match 'Get-Acl|Set-Acl|CryptoKeySecurity'
         $text | Should -Not -Match 'Export-PfxCertificate|\.pfx'
+        $text | Should -Match 'Get-WorkshopAccessibleRsaPrivateKey'
+        $text | Should -Match 'CryptographicException'
+        $text | Should -Match 'catch\s+\[Security\.Cryptography\.CryptographicException\]\s*\{\s*return\s+\$null'
     }
 
     It 'reads back the exact normalized TLS binding and rejects certificate load errors' {
