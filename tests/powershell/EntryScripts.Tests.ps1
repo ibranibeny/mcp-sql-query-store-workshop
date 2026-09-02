@@ -555,6 +555,7 @@ Describe 'Workshop lifecycle entry script contracts' {
     It 'provides strict ShouldProcess stop and remove entry scripts' -ForEach @(
         @{ ScriptName = 'Stop-WorkshopEnvironment.ps1'; Required = @('SubscriptionId') }
         @{ ScriptName = 'Remove-WorkshopEnvironment.ps1'; Required = @('SubscriptionId', 'ConfirmationPhrase') }
+        @{ ScriptName = 'Resume-WorkshopEnvironment.ps1'; Required = @('SubscriptionId', 'FacilitatorCidr', 'Credential', 'RepositoryCommit') }
     ) {
         $Path = Join-Path $PSScriptRoot "../../deploy/$ScriptName"
         Test-Path -LiteralPath $Path | Should -BeTrue
@@ -583,5 +584,50 @@ Describe 'Workshop lifecycle entry script contracts' {
 
     It 'requires the exact destructive phrase in the remove entry script' {
         (Get-Content -LiteralPath $script:RemovePath -Raw) | Should -Match 'DELETE rg-mcp-sql-workshop'
+    }
+
+    It 'refuses to resume when the resource group does not exist' {
+        $path = Join-Path $PSScriptRoot '../../deploy/Resume-WorkshopEnvironment.ps1'
+        $secure = [Security.SecureString]::new()
+        foreach ($character in 'unit-test-only'.ToCharArray()) { $secure.AppendChar($character) }
+        $secure.MakeReadOnly()
+        $credential = [PSCredential]::new('workshopadmin', $secure)
+        $operations = @{ GetResourceGroup = { param($Name) $null = $Name; $null } }
+
+        { & $path -SubscriptionId '11111111-1111-1111-1111-111111111111' `
+                -FacilitatorCidr '203.0.113.10/32' -Credential $credential `
+                -DatabaseMasterKeyPassword $secure -McpReaderPassword $secure `
+                -RepositoryUrl 'https://github.com/ibranibeny/mcp-sql-query-store-workshop' `
+                -RepositoryCommit '0123456789abcdef0123456789abcdef01234567' `
+                -WindowsClientLicenseAttested -ConfirmationPhrase 'RESUME rg-mcp-sql-workshop' `
+                -Operations $operations -Confirm:$false } |
+            Should -Throw '*Use Deploy-WorkshopEnvironment.ps1 instead*'
+    }
+
+    It 'reuses the deployed expiry tag and refuses a wrong resume phrase' -ForEach @(
+        @{ Case = 'wrong phrase'; Phrase = 'RESUME rg-mcp-sql'; Tags = @{ expiresOn = '2026-09-09' }; Expected = '*did not match exactly*' }
+        @{ Case = 'missing expiry'; Phrase = 'RESUME rg-mcp-sql-workshop'; Tags = @{}; Expected = '*no usable expiresOn tag*' }
+    ) {
+        $path = Join-Path $PSScriptRoot '../../deploy/Resume-WorkshopEnvironment.ps1'
+        $secure = [Security.SecureString]::new()
+        foreach ($character in 'unit-test-only'.ToCharArray()) { $secure.AppendChar($character) }
+        $secure.MakeReadOnly()
+        $credential = [PSCredential]::new('workshopadmin', $secure)
+        $groupTags = $Tags
+        $operations = @{
+            GetResourceGroup = {
+                param($Name)
+                [pscustomobject]@{ ResourceGroupName = $Name; Tags = $groupTags }
+            }.GetNewClosure()
+        }
+
+        { & $path -SubscriptionId '11111111-1111-1111-1111-111111111111' `
+                -FacilitatorCidr '203.0.113.10/32' -Credential $credential `
+                -DatabaseMasterKeyPassword $secure -McpReaderPassword $secure `
+                -RepositoryUrl 'https://github.com/ibranibeny/mcp-sql-query-store-workshop' `
+                -RepositoryCommit '0123456789abcdef0123456789abcdef01234567' `
+                -WindowsClientLicenseAttested -ConfirmationPhrase $Phrase `
+                -Operations $operations -Confirm:$false } |
+            Should -Throw $Expected
     }
 }

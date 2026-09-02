@@ -60,6 +60,31 @@ function Invoke-NativeChecked {
     @($output | ForEach-Object { [string] $_ })
 }
 
+function Install-WorkshopVsCodeExtension {
+    param(
+        [Parameter(Mandatory)][string] $CodePath,
+        [Parameter(Mandatory)][string] $ExtensionDirectory,
+        [Parameter(Mandatory)][string] $ExtensionId,
+        [scriptblock] $CommandInvoker = {
+            param($FilePath, $Arguments)
+            $output = @(& $FilePath @Arguments 2>&1 | ForEach-Object { [string] $_ })
+            [pscustomobject]@{ ExitCode = $LASTEXITCODE; Output = $output }
+        }
+    )
+
+    $result = & $CommandInvoker $CodePath @(
+        '--extensions-dir', $ExtensionDirectory, '--install-extension', $ExtensionId, '--force'
+    )
+    if ([int] $result.ExitCode -eq 0) { return 'Installed' }
+    # Newer VS Code ships Copilot Chat as a built-in that the marketplace copy cannot
+    # downgrade. That is a satisfied requirement, not an installation failure.
+    $text = @($result.Output) -join ' '
+    if ($text -match "(?i)'$([regex]::Escape($ExtensionId))'\s+is\s+a\s+built-in\s+extension") {
+        return 'BuiltIn'
+    }
+    throw "VS Code extension '$ExtensionId' could not be installed."
+}
+
 function Get-GitHubCliAuthStatus {
     param(
         [AllowNull()][string] $GitHubCliPath,
@@ -428,11 +453,14 @@ try {
     Assert-Condition $workspaceUserModify 'Interactive administration user does not have inherited Modify access to the workshop workspace.'
     $extensionDirectory = "C:\Users\$($interactiveUser.Name)\.vscode\extensions"
     $null = New-Item -ItemType Directory -Path $extensionDirectory -Force
+    $extensionOutcomes = [ordered]@{}
     foreach ($extensionId in $extensionIds) {
-        $null = Invoke-NativeChecked -FilePath $codePath -ArgumentList @('--extensions-dir', $extensionDirectory, '--install-extension', $extensionId, '--force')
+        $extensionOutcomes[$extensionId] = Install-WorkshopVsCodeExtension -CodePath $codePath `
+            -ExtensionDirectory $extensionDirectory -ExtensionId $extensionId
     }
     $extensionVersions = @(Invoke-NativeChecked -FilePath $codePath -ArgumentList @('--extensions-dir', $extensionDirectory, '--list-extensions', '--show-versions'))
     foreach ($extensionId in $extensionIds) {
+        if ($extensionOutcomes[$extensionId] -ceq 'BuiltIn') { continue }
         Assert-Condition ($extensionVersions -match "^$([regex]::Escape($extensionId))@") "VS Code extension '$extensionId' version could not be read back."
     }
 
