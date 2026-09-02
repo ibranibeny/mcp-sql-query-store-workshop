@@ -554,6 +554,7 @@ Describe 'DBA-approved candidate entry script contract' {
 Describe 'Workshop lifecycle entry script contracts' {
     It 'provides strict ShouldProcess stop and remove entry scripts' -ForEach @(
         @{ ScriptName = 'Stop-WorkshopEnvironment.ps1'; Required = @('SubscriptionId') }
+        @{ ScriptName = 'Start-WorkshopEnvironment.ps1'; Required = @('SubscriptionId') }
         @{ ScriptName = 'Remove-WorkshopEnvironment.ps1'; Required = @('SubscriptionId', 'ConfirmationPhrase') }
         @{ ScriptName = 'Resume-WorkshopEnvironment.ps1'; Required = @('SubscriptionId', 'FacilitatorCidr', 'Credential', 'RepositoryCommit') }
     ) {
@@ -574,7 +575,7 @@ Describe 'Workshop lifecycle entry script contracts' {
     }
 
     It 'keeps lifecycle entry scripts thin and forwards operation injection' -ForEach @(
-        'Stop-WorkshopEnvironment.ps1', 'Remove-WorkshopEnvironment.ps1'
+        'Stop-WorkshopEnvironment.ps1', 'Start-WorkshopEnvironment.ps1', 'Remove-WorkshopEnvironment.ps1'
     ) {
         $path = Join-Path $PSScriptRoot "../../deploy/$_"
         $text = Get-Content -LiteralPath $path -Raw

@@ -16,6 +16,7 @@
         'New-WorkshopSqlVm'
         'Register-WorkshopSqlIaas'
         'Set-WorkshopAutoShutdown'
+        'Start-WorkshopEnvironment'
         'Stop-WorkshopEnvironment'
         'Remove-WorkshopEnvironment'
         'Get-WorkshopPlan'

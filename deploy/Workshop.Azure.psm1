@@ -3262,7 +3262,7 @@ function Stop-WorkshopEnvironment {
                 if ($powerState -cne 'PowerState/deallocated') {
                     throw "VM '$vmName' power state '$powerState' was not PowerState/deallocated."
                 }
-                $checkpoint.Add("VirtualMachine/$vmName:deallocated-and-verified")
+                $checkpoint.Add("VirtualMachine/${vmName}:deallocated-and-verified")
             }
         }
         catch {
@@ -3270,6 +3270,82 @@ function Stop-WorkshopEnvironment {
         }
     }
     if ($errors.Count -gt 0) { throw "Workshop VM deallocation failed: $($errors -join '; ')" }
+    [pscustomobject][ordered]@{ Completed = $true; Checkpoint = $checkpoint.ToArray() }
+}
+
+function Get-DefaultWorkshopStartOperationSet {
+    [CmdletBinding()]
+    param()
+
+    @{
+        SetContext = {
+            param($SubscriptionId, $TenantId)
+            $parameters = @{ SubscriptionId = $SubscriptionId; ErrorAction = 'Stop' }
+            if (-not [string]::IsNullOrWhiteSpace($TenantId)) { $parameters.Tenant = $TenantId }
+            Set-AzContext @parameters
+        }
+        GetVm = {
+            param($Name, $ResourceGroupName)
+            Get-AzVM -ResourceGroupName $ResourceGroupName -Name $Name -ErrorAction Stop
+        }
+        StartVm = {
+            param($Name, $ResourceGroupName)
+            Start-AzVM -ResourceGroupName $ResourceGroupName -Name $Name -ErrorAction Stop
+        }
+        GetPowerState = {
+            param($Name, $ResourceGroupName)
+            $vm = Get-AzVM -ResourceGroupName $ResourceGroupName -Name $Name -Status -ErrorAction Stop
+            [string] @($vm.Statuses | Where-Object Code -Like 'PowerState/*' | Select-Object -First 1).Code
+        }
+    }
+}
+
+function Start-WorkshopEnvironment {
+    [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'Medium')]
+    param(
+        [Parameter(Mandatory)][hashtable] $Config,
+        [Parameter(Mandatory)][ValidateNotNullOrEmpty()][string] $SubscriptionId,
+        [ValidateNotNullOrEmpty()][string] $TenantId,
+        [hashtable] $Operations
+    )
+
+    if ($null -eq $Operations) { $Operations = Get-DefaultWorkshopStartOperationSet }
+    foreach ($name in @('SetContext', 'GetVm', 'StartVm', 'GetPowerState')) {
+        if (-not $Operations.ContainsKey($name) -or $Operations[$name] -isnot [scriptblock]) {
+            throw "Operations must provide scriptblock '$name'."
+        }
+    }
+    $null = & $Operations.SetContext $SubscriptionId $TenantId
+    $errors = [System.Collections.Generic.List[string]]::new()
+    $checkpoint = [System.Collections.Generic.List[string]]::new()
+    foreach ($vmName in @($Config.AdminVm.Name, $Config.SqlVm.Name)) {
+        try {
+            $vm = & $Operations.GetVm $vmName $Config.ResourceGroupName
+            $expectedId = Get-WorkshopComputeResourceId -SubscriptionId $SubscriptionId `
+                -ResourceGroupName $Config.ResourceGroupName -ResourceType 'virtualMachines' -Name $vmName
+            $actualId = if ($null -eq $vm) { '' } else { [string] $vm.Id }
+            if ((ConvertTo-WorkshopComparableValue $actualId) -cne (ConvertTo-WorkshopComparableValue $expectedId)) {
+                throw "VM '$vmName' did not have the approved full resource ID."
+            }
+            $powerState = [string] (& $Operations.GetPowerState $vmName $Config.ResourceGroupName)
+            if ($powerState -ceq 'PowerState/running') {
+                $checkpoint.Add("VirtualMachine/${vmName}:already-running")
+                continue
+            }
+            if ($PSCmdlet.ShouldProcess($actualId, 'Start workshop VM')) {
+                $null = & $Operations.StartVm $vmName $Config.ResourceGroupName
+                $powerState = [string] (& $Operations.GetPowerState $vmName $Config.ResourceGroupName)
+                if ($powerState -cne 'PowerState/running') {
+                    throw "VM '$vmName' power state '$powerState' was not PowerState/running."
+                }
+                $checkpoint.Add("VirtualMachine/${vmName}:started-and-verified")
+            }
+        }
+        catch {
+            $errors.Add((ConvertTo-WorkshopSafeDetail -Value $_.Exception.Message))
+        }
+    }
+    if ($errors.Count -gt 0) { throw "Workshop VM start failed: $($errors -join '; ')" }
     [pscustomobject][ordered]@{ Completed = $true; Checkpoint = $checkpoint.ToArray() }
 }
 
@@ -4322,6 +4398,7 @@ Export-ModuleMember -Function @(
     'New-WorkshopSqlVm'
     'Register-WorkshopSqlIaas'
     'Set-WorkshopAutoShutdown'
+    'Start-WorkshopEnvironment'
     'Stop-WorkshopEnvironment'
     'Remove-WorkshopEnvironment'
     'Get-WorkshopPlan'

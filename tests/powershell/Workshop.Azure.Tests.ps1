@@ -1183,7 +1183,8 @@ Describe 'Static safety and module contract' {
             'Initialize-WorkshopAdminVm', 'Initialize-WorkshopSqlVm',
             'New-WorkshopAdminVm', 'New-WorkshopNetwork', 'New-WorkshopNetworkModel',
             'New-WorkshopSqlVm', 'Register-WorkshopSqlIaas', 'Remove-WorkshopEnvironment',
-            'Resolve-WorkshopImageVersion', 'Set-WorkshopAutoShutdown', 'Stop-WorkshopEnvironment',
+            'Resolve-WorkshopImageVersion', 'Set-WorkshopAutoShutdown', 'Start-WorkshopEnvironment',
+            'Stop-WorkshopEnvironment',
             'Test-WorkshopNetworkBoundary', 'Test-WorkshopPrerequisites', 'Test-WorkshopReadiness',
             'Test-WorkshopVmBoundary'
         )
@@ -2274,6 +2275,7 @@ Describe 'Workshop stop and guarded removal' {
     BeforeEach {
         $script:ContextCalls = 0
         $script:Stopped = [System.Collections.Generic.List[string]]::new()
+        $script:Started = [System.Collections.Generic.List[string]]::new()
         $script:Power = @{
             'vm-mcpsql-admin' = 'PowerState/running'
             'vm-mcpsql-sql' = 'PowerState/running'
@@ -2288,6 +2290,7 @@ Describe 'Workshop stop and guarded removal' {
                 }
             }
             StopVm = { param($Name) $script:Stopped.Add($Name); $script:Power[$Name] = 'PowerState/deallocated' }
+            StartVm = { param($Name) $script:Started.Add($Name); $script:Power[$Name] = 'PowerState/running' }
             GetPowerState = { param($Name) $script:Power[$Name] }
         }
         $script:RemoveCalls = 0
@@ -2318,6 +2321,10 @@ Describe 'Workshop stop and guarded removal' {
         $result.Completed | Should -BeTrue
         $script:Stopped | Should -Be @('vm-mcpsql-admin', 'vm-mcpsql-sql')
         $script:Power.Values | Should -Be @('PowerState/deallocated', 'PowerState/deallocated')
+        $result.Checkpoint | Should -Be @(
+            'VirtualMachine/vm-mcpsql-admin:deallocated-and-verified',
+            'VirtualMachine/vm-mcpsql-sql:deallocated-and-verified'
+        )
     }
 
     It 'aggregates stop failures while still attempting exactly both approved VMs' {
@@ -2331,6 +2338,46 @@ Describe 'Workshop stop and guarded removal' {
                 -SubscriptionId '11111111-1111-1111-1111-111111111111' `
                 -Operations $script:LifecycleOperations -Confirm:$false } | Should -Throw '*admin failed*'
         $script:Stopped | Should -Be @('vm-mcpsql-admin', 'vm-mcpsql-sql')
+    }
+
+    It 'starts and verifies every approved VM that is not running' {
+        $script:Power['vm-mcpsql-admin'] = 'PowerState/deallocated'
+        $script:Power['vm-mcpsql-sql'] = 'PowerState/stopped'
+
+        $result = Start-WorkshopEnvironment -Config $script:Config `
+            -SubscriptionId '11111111-1111-1111-1111-111111111111' `
+            -TenantId '22222222-2222-2222-2222-222222222222' -Operations $script:LifecycleOperations -Confirm:$false
+
+        $result.Completed | Should -BeTrue
+        $script:Started | Should -Be @('vm-mcpsql-admin', 'vm-mcpsql-sql')
+        $result.Checkpoint | Should -Be @(
+            'VirtualMachine/vm-mcpsql-admin:started-and-verified',
+            'VirtualMachine/vm-mcpsql-sql:started-and-verified'
+        )
+    }
+
+    It 'leaves an already running VM untouched and starts only the stopped one' {
+        $script:Power['vm-mcpsql-sql'] = 'PowerState/deallocated'
+
+        $result = Start-WorkshopEnvironment -Config $script:Config `
+            -SubscriptionId '11111111-1111-1111-1111-111111111111' `
+            -Operations $script:LifecycleOperations -Confirm:$false
+
+        $script:Started | Should -Be @('vm-mcpsql-sql')
+        $result.Checkpoint | Should -Be @(
+            'VirtualMachine/vm-mcpsql-admin:already-running',
+            'VirtualMachine/vm-mcpsql-sql:started-and-verified'
+        )
+    }
+
+    It 'fails when a started VM does not reach the running power state' {
+        $script:Power['vm-mcpsql-admin'] = 'PowerState/deallocated'
+        $script:LifecycleOperations.StartVm = { param($Name) $script:Started.Add($Name) }
+
+        { Start-WorkshopEnvironment -Config $script:Config `
+                -SubscriptionId '11111111-1111-1111-1111-111111111111' `
+                -Operations $script:LifecycleOperations -Confirm:$false } |
+            Should -Throw '*was not PowerState/running*'
     }
 
     It 'requires exact removal confirmation, tags, ID, and subscription context before deletion' -ForEach @(
