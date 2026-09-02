@@ -34,5 +34,5 @@
     }
     AutoShutdownTime = '1900'
     AutoShutdownLocation = 'southeastasia'
-    Tags = @{ environment = 'workshop'; workload = 'mcp-sql'; managedBy = 'PowerShell' }
+    Tags = @{ environment = 'workshop'; workload = 'mcp-sql'; managedBy = 'PowerShell'; costconstraint = 'ignore' }
 }

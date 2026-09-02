@@ -444,6 +444,9 @@ function Get-WorkshopPlan {
             environment = [string] $Config.Tags.environment
             workload = [string] $Config.Tags.workload
             managedBy = [string] $Config.Tags.managedBy
+            # Exempts the workshop VMs from the subscription cost-control shutdown policy
+            # so a timed lab run is not interrupted mid-measurement.
+            costconstraint = [string] $Config.Tags.costconstraint
             expiresOn = $ExpiresOn.Date.ToString('yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture)
         }
     }
@@ -480,7 +483,7 @@ function Format-WorkshopPlanCard {
             $lines.Add("  - $category")
         }
         $lines.Add("Auto-shutdown: $($Plan.AutoShutdownTime)")
-        $lines.Add("Tags: environment=$($Plan.Tags.environment); workload=$($Plan.Tags.workload); managedBy=$($Plan.Tags.managedBy); expiresOn=$($Plan.Tags.expiresOn)")
+        $lines.Add("Tags: environment=$($Plan.Tags.environment); workload=$($Plan.Tags.workload); managedBy=$($Plan.Tags.managedBy); costconstraint=$($Plan.Tags.costconstraint); expiresOn=$($Plan.Tags.expiresOn)")
         return @($lines | ForEach-Object {
             ConvertTo-WorkshopSafeDetail -Value $_
         }) -join [Environment]::NewLine
@@ -2932,6 +2935,17 @@ function Get-WorkshopAutoShutdownCapability {
     }
 }
 
+function Test-WorkshopScheduledTaskAbsent {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][System.Management.Automation.ErrorRecord] $ErrorRecord)
+
+    # Get-ScheduledTask reports absence through several shapes across Windows builds, so
+    # match the CIM not-found category and message as well as the error id.
+    if ([string] $ErrorRecord.FullyQualifiedErrorId -match 'NoMatching|ObjectNotFound') { return $true }
+    if ($ErrorRecord.CategoryInfo.Category -eq [System.Management.Automation.ErrorCategory]::ObjectNotFound) { return $true }
+    [string] $ErrorRecord.Exception.Message -match 'No MSFT_ScheduledTask objects found'
+}
+
 function Get-DefaultWorkshopEmergencyStopTaskOperationSet {
     [CmdletBinding()]
     param()
@@ -2965,9 +2979,7 @@ function Get-DefaultWorkshopEmergencyStopTaskOperationSet {
                 }
             }
             catch {
-                if ($_.FullyQualifiedErrorId -match 'NoMatchingMSFT_ScheduledTask|ObjectNotFound') {
-                    return $null
-                }
+                if (Test-WorkshopScheduledTaskAbsent -ErrorRecord $_) { return $null }
                 throw
             }
         }

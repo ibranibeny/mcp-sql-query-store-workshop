@@ -183,6 +183,7 @@ Describe 'Workshop configuration defaults' {
         $Config.Tags.environment | Should -Be 'workshop'
         $Config.Tags.workload | Should -Be 'mcp-sql'
         $Config.Tags.managedBy | Should -Be 'PowerShell'
+        $Config.Tags.costconstraint | Should -Be 'ignore'
     }
 }
 
@@ -394,7 +395,7 @@ Describe 'Workshop plan and card' {
         $first | Should -Match 'NAT gateway: nat-mcpsql-workshop; outbound public IP: pip-mcpsql-nat; inbound: False'
         $first | Should -Match 'Administration disks: OS 128 GiB'
         $first | Should -Match 'SQL disks: OS 128 GiB; data 256 GiB; log 128 GiB'
-        $first | Should -Match 'Tags: environment=workshop; workload=mcp-sql; managedBy=PowerShell; expiresOn=2026-09-02'
+        $first | Should -Match 'Tags: environment=workshop; workload=mcp-sql; managedBy=PowerShell; costconstraint=ignore; expiresOn=2026-09-02'
         foreach ($category in $plan.Pricing.BillableCategories) {
             $first | Should -Match ([regex]::Escape($category))
         }
@@ -2193,6 +2194,27 @@ Describe 'SQL IaaS and auto-shutdown exact resources' {
         { Set-WorkshopAutoShutdown -Config $config -TimeZoneId 'UTC' `
                 -Operations $script:ServiceOperations } | Should -Throw '*conflicts with the approved shape*'
         $script:ScheduleCreates | Should -HaveCount 0
+    }
+}
+
+Describe 'Scheduled task absence detection' {
+    It 'treats every documented not-found shape as absence, and nothing else' -ForEach @(
+        @{ Case = 'error id'; Id = 'NoMatchingMSFT_ScheduledTaskObjectsFound'; Category = 'ObjectNotFound'; Message = 'anything'; Expected = $true }
+        @{ Case = 'category only'; Id = 'SomeOtherId'; Category = 'ObjectNotFound'; Message = 'anything'; Expected = $true }
+        @{ Case = 'message only'; Id = 'SomeOtherId'; Category = 'InvalidOperation'; Message = "No MSFT_ScheduledTask objects found with property 'TaskName' equal to 'x'."; Expected = $true }
+        @{ Case = 'access denied'; Id = 'AccessDenied'; Category = 'PermissionDenied'; Message = 'Access is denied.'; Expected = $false }
+    ) {
+        # A prior deployment always left the task behind, so this branch was never exercised
+        # until teardown began removing it, and a real deployment then aborted here.
+        InModuleScope Workshop.Azure -Parameters @{ Id = $Id; Category = $Category; Message = $Message; Expected = $Expected } {
+            param($Id, $Category, $Message, $Expected)
+            $record = [System.Management.Automation.ErrorRecord]::new(
+                [InvalidOperationException]::new($Message),
+                $Id,
+                [System.Management.Automation.ErrorCategory]::$Category,
+                $null)
+            Test-WorkshopScheduledTaskAbsent -ErrorRecord $record | Should -Be $Expected
+        }
     }
 }
 
