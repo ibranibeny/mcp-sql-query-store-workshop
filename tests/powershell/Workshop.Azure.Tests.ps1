@@ -2196,6 +2196,33 @@ Describe 'SQL IaaS and auto-shutdown exact resources' {
     }
 }
 
+Describe 'Exact custom rule set comparison' {
+    BeforeAll {
+        $script:ExpectedRule = [pscustomobject]@{
+            Name = 'Temporary-Facilitator-Rdp'; Priority = 100; Direction = 'Inbound'; Access = 'Allow'
+            Protocol = 'Tcp'; SourceAddressPrefix = '111.95.209.140/32'; DestinationPortRange = @('3389')
+        }
+    }
+
+    It 'reports a mismatch instead of failing when the group holds no custom rules' {
+        # A governance policy can strip every rule from an existing group; resume must be
+        # able to detect that rather than crash on parameter binding.
+        InModuleScope Workshop.Azure -Parameters @{ Expected = $script:ExpectedRule } {
+            param($Expected)
+            $expectedRules = @($Expected)
+            { $null = Test-WorkshopExactCustomRuleSet -ExpectedRules $expectedRules -ActualRules @() } |
+                Should -Not -Throw
+            Test-WorkshopExactCustomRuleSet -ExpectedRules $expectedRules -ActualRules @() | Should -BeFalse
+        }
+    }
+
+    It 'treats an empty expectation against an empty group as a match' {
+        InModuleScope Workshop.Azure {
+            Test-WorkshopExactCustomRuleSet -ExpectedRules @() -ActualRules @() | Should -BeTrue
+        }
+    }
+}
+
 Describe 'Workshop stop and guarded removal' {
     BeforeEach {
         $script:ContextCalls = 0
@@ -3033,6 +3060,48 @@ Describe 'Bootstrap repository supply-chain boundary' {
                 Should -Throw '*repository archive rejected*'
         }
         Test-Path -LiteralPath $destination | Should -BeFalse
+    }
+
+    It 'rejects an entry whose staged path would exceed the Windows path limit' {
+        # The guest stages under a deployment-scoped path, so a long entry silently blew
+        # past MAX_PATH and surfaced as "Could not find a part of the path".
+        $archivePath = Join-Path $TestDrive 'too-long.zip'
+        $root = 'mcp-sql-query-store-workshop-0123456789abcdef0123456789abcdef01234567'
+        $deepName = "$root/docs/" + ('d' * 200) + '.md'
+        Write-BootstrapTestArchive -Path $archivePath -Entries @(
+            [pscustomobject]@{ Name = "$root/deploy/Initialize-SqlVm.ps1"; Content = '# approved' }
+            [pscustomobject]@{ Name = $deepName; Content = 'too long' }
+        )
+        $destination = Join-Path $TestDrive 'too-long-destination'
+
+        InModuleScope Workshop.Azure -Parameters @{
+            ArchivePath = $archivePath
+            Destination = $destination
+            Commit = $script:RepositoryCommit
+        } {
+            param($ArchivePath, $Destination, $Commit)
+            $null = $ArchivePath, $Destination, $Commit
+            { Expand-WorkshopBootstrapArchive -ArchivePath $ArchivePath -DestinationPath $Destination `
+                    -RepositoryCommit $Commit -ApprovedBootstrapEntryPoint 'Initialize-SqlVm.ps1' } |
+                Should -Throw '*character Windows path limit*'
+        }
+        Test-Path -LiteralPath $destination | Should -BeFalse
+    }
+
+    It 'keeps every real repository path inside the limit for a deployment-scoped guest root' {
+        # Reproduces the guest layout: deployment GUID folder, staging folder, and the
+        # 69-character root folder GitHub puts inside the archive.
+        $repositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
+        $guestParent = 'C:\McpSqlWorkshop\deployments\' + [guid]::NewGuid().ToString('D')
+        $stagingLength = $guestParent.Length + 1 + 14
+        $archiveRootLength = ('mcp-sql-query-store-workshop-' + ('0' * 40)).Length
+
+        Push-Location $repositoryRoot
+        try { $tracked = @(git ls-files) } finally { Pop-Location }
+        $tracked.Count | Should -BeGreaterThan 0
+
+        $worst = $tracked | Sort-Object Length -Descending | Select-Object -First 1
+        ($stagingLength + 1 + $archiveRootLength + 1 + $worst.Length) | Should -BeLessOrEqual 259
     }
 
     It 'extracts one exact repository root containing the approved bootstrap entry point' {

@@ -2062,8 +2062,10 @@ function ConvertTo-WorkshopNormalizedRule {
 function Test-WorkshopExactCustomRuleSet {
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory)][object[]] $ExpectedRules,
-        [Parameter(Mandatory)][object[]] $ActualRules
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]] $ExpectedRules,
+        # An existing group can legitimately hold zero custom rules, for example after a
+        # governance policy removed one. That must compare as a mismatch, not fail binding.
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]] $ActualRules
     )
 
     $customRules = @($ActualRules | Where-Object {
@@ -3463,7 +3465,9 @@ function Expand-WorkshopBootstrapArchive {
     $expectedRootName = "mcp-sql-query-store-workshop-$RepositoryCommit"
     $expectedEntryPoint = "$expectedRootName/deploy/$ApprovedBootstrapEntryPoint"
     $destinationParent = Split-Path -Parent $DestinationPath
-    $stagingPath = Join-Path $destinationParent ('.bootstrap-staging-' + [guid]::NewGuid().ToString('N'))
+    # Kept short on purpose: the guest extracts under a deployment-scoped path and the
+    # archive adds a 69-character root folder, so a long staging name overruns MAX_PATH.
+    $stagingPath = Join-Path $destinationParent ('.s' + [guid]::NewGuid().ToString('N').Substring(0, 12))
     $archive = $null
     $stream = $null
     try {
@@ -3487,6 +3491,10 @@ function Expand-WorkshopBootstrapArchive {
                 throw "Repository archive rejected: reparse entry '$entryName' is not permitted."
             }
             if ($entryName.TrimEnd('/') -ceq $expectedEntryPoint) { $entryPointPresent = $true }
+            $stagedLength = $stagingPath.Length + 1 + $entryName.TrimEnd('/').Length
+            if ($stagedLength -gt 259) {
+                throw "Repository archive rejected: entry '$entryName' would extract to $stagedLength characters, beyond the $([int]259)-character Windows path limit."
+            }
         }
         if (-not $entryPointPresent) {
             throw "Repository archive rejected: approved bootstrap entry point '$ApprovedBootstrapEntryPoint' is missing."
