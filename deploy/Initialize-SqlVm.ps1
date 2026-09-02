@@ -146,6 +146,39 @@ function Test-FirewallPortCoverage {
     $false
 }
 
+function ConvertTo-WorkshopCanonicalIpv4Network {
+    param([Parameter(Mandatory)][string] $Value)
+
+    if ($Value -notmatch '^([^/]+)/([^/]+)$') {
+        throw "Firewall network '$Value' is not an IPv4 network."
+    }
+    $address = [Net.IPAddress]::Parse($Matches[1])
+    if ($address.AddressFamily -ne [Net.Sockets.AddressFamily]::InterNetwork) {
+        throw "Firewall network '$Value' is not IPv4."
+    }
+    $suffix = $Matches[2]
+    if ($suffix -match '^\d{1,2}$') {
+        $prefix = [int] $suffix
+        if ($prefix -lt 0 -or $prefix -gt 32) {
+            throw "Firewall network '$Value' has an invalid prefix."
+        }
+    }
+    else {
+        $mask = [Net.IPAddress]::Parse($suffix)
+        if ($mask.AddressFamily -ne [Net.Sockets.AddressFamily]::InterNetwork) {
+            throw "Firewall network '$Value' has a non-IPv4 mask."
+        }
+        $maskBits = @($mask.GetAddressBytes() | ForEach-Object {
+            [Convert]::ToString($_, 2).PadLeft(8, '0')
+        }) -join ''
+        if ($maskBits -notmatch '^1*0*$') {
+            throw "Firewall network '$Value' has a non-contiguous mask."
+        }
+        $prefix = ($maskBits -replace '0', '').Length
+    }
+    "$($address.IPAddressToString)/$prefix"
+}
+
 function Mount-WorkshopDisk {
     [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'Low')]
     param(
@@ -334,7 +367,11 @@ ORDER BY file_id;
     $firewallAddressReadback = $firewallRuleReadback | Get-NetFirewallAddressFilter
     Assert-Condition ($firewallRuleReadback.Enabled -eq 'True' -and $firewallRuleReadback.Direction -eq 'Inbound' -and $firewallRuleReadback.Action -eq 'Allow') 'Workshop SQL firewall rule state readback failed.'
     Assert-Condition ($firewallPortReadback.Protocol -eq 'TCP' -and @($firewallPortReadback.LocalPort) -contains '1433') 'Workshop SQL firewall port readback failed.'
-    Assert-Condition (@($firewallAddressReadback.RemoteAddress).Count -eq 1 -and @($firewallAddressReadback.RemoteAddress)[0] -ceq $adminSubnet) 'Workshop SQL firewall source readback is not the exact administration subnet.'
+    $firewallRemoteNetworks = @($firewallAddressReadback.RemoteAddress | ForEach-Object {
+        ConvertTo-WorkshopCanonicalIpv4Network -Value ([string] $_)
+    })
+    $expectedAdminNetwork = ConvertTo-WorkshopCanonicalIpv4Network -Value $adminSubnet
+    Assert-Condition ($firewallRemoteNetworks.Count -eq 1 -and $firewallRemoteNetworks[0] -ceq $expectedAdminNetwork) 'Workshop SQL firewall source readback is not the exact administration subnet.'
     $broadSqlRules = @(Get-NetFirewallRule -Direction Inbound -Action Allow -Enabled True | ForEach-Object {
         $rule = $_
         $port = $rule | Get-NetFirewallPortFilter
@@ -475,7 +512,7 @@ ORDER BY file_id;
         Sql = [ordered]@{ Version = 16; Edition = $edition; Service = $service.Name; State = [string]$restarted.Status; Port = 1433; BrowserStartupType = [string]$browserService.StartMode; Encryption = 'Forced'; EncryptOption = $tdsEncryption }
         Disks = @($dataDisk, $logDisk)
         TempDb = [ordered]@{ ApprovedRoot = $tempDbPath; Storage = $tempDbStorage; PersistentDataOnTemporaryDisk = $false; Deviation = $tempDbDeviation; EnoughSpace = $true; FileCount = $tempDbFilesAfter.Count; AllFilesUnderApprovedRoot = $true; OldPathCount = $oldTempDbPaths.Count; Files = $tempDbFilesAfter }
-        Firewall = [ordered]@{ Rule = [string]$firewallRuleReadback.DisplayName; RemoteAddress = [string]@($firewallAddressReadback.RemoteAddress)[0]; BroadRule = ($broadSqlRules.Count -ne 0) }
+        Firewall = [ordered]@{ Rule = [string]$firewallRuleReadback.DisplayName; RemoteAddress = $firewallRemoteNetworks[0]; BroadRule = ($broadSqlRules.Count -ne 0) }
         Certificate = [ordered]@{ DnsName = $privateDnsName; Thumbprint = $certificateThumbprint; RegistryCertificate = $registryCertificate; StoreThumbprint = (([string]$storeCertificate.Thumbprint -replace '\s', '').ToUpperInvariant()); ForceEncryption = $forceEncryption; HasPrivateKey = [bool]$storeCertificate.HasPrivateKey; ServerAuthenticationEku = $true; SanVerified = $true; ServiceKeyAclVerified = $true; PublicCertificateThumbprint = $publicCertificateThumbprint; PublicCertificateSha256 = (Get-FileHash -LiteralPath $publicCertificatePath -Algorithm SHA256).Hash; PublicCertificatePath = $publicCertificatePath; PrivateKeyExported = $false; TlsLoadFailures = $tlsLoadFailures; StartupBindingEvidence = $startupBindingEvidence }
         Backup = [ordered]@{ Uri = $backupUri; Sha256 = $backupHash; ExpectedSha256 = [string]$payload.AdventureWorksBackupSha256; ChecksumClassification = 'expected-verified'; VerifyOnly = $true }
         Database = [ordered]@{ Marker = $databaseMarker; QueryStore = $queryStoreState; ResourceGovernor = $resourceGovernorState; ProcedureCount = $procedureCount; PriorMaxServerMemoryMB = $priorMaxServerMemory }

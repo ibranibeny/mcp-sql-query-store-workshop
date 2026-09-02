@@ -143,6 +143,11 @@ Describe 'SQL VM bootstrap static contract' {
         $text | Should -Match 'browserService\.StartMode'
         $text | Should -Match 'firewallAddressReadback'
         $text | Should -Match 'RemoteAddress.*adminSubnet'
+        $text | Should -Match 'ConvertTo-WorkshopCanonicalIpv4Network'
+        $text | Should -Match 'firewallRemoteNetworks\s*=.*firewallAddressReadback\.RemoteAddress'
+        $text | Should -Match 'expectedAdminNetwork\s*=\s*ConvertTo-WorkshopCanonicalIpv4Network'
+        $text | Should -Match 'firewallRemoteNetworks\[0\]\s+-ceq\s+\$expectedAdminNetwork'
+        $text | Should -Not -Match 'RemoteAddress\)\[0\]\s+-ceq\s+\$adminSubnet'
     }
 
     It 'creates non-exportable private-DNS TLS and exports only a public certificate' {
