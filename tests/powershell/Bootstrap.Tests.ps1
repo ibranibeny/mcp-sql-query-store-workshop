@@ -82,6 +82,8 @@ Describe 'SQL VM bootstrap static contract' {
         $text | Should -Match 'F'
         $text | Should -Match 'G'
         $text | Should -Match 'AllocationUnitSize'
+        $text | Should -Match '-not\s+\$_.IsBoot'
+        $text | Should -Match '-not\s+\$_.IsSystem'
     }
 
     It 'preflights exact F and G assignments and never selects an alternate drive letter' {

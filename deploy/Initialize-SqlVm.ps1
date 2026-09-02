@@ -157,8 +157,11 @@ function Mount-WorkshopDisk {
     )
     $candidates = @(Get-Disk | Where-Object {
         $location = [string] $_.Location
-        ($_.PSObject.Properties.Name -contains 'Lun' -and [int] $_.Lun -eq $Lun) -or
-        $location -match "LUN\s*$Lun(?:\D|$)"
+        -not $_.IsBoot -and -not $_.IsSystem -and
+        (
+            ($_.PSObject.Properties.Name -contains 'Lun' -and [int] $_.Lun -eq $Lun) -or
+            $location -match "LUN\s*$Lun(?:\D|$)"
+        )
     })
     Assert-Condition ($candidates.Count -eq 1) "Expected exactly one attached disk at LUN $Lun."
     $disk = $candidates[0]
