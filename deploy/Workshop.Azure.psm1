@@ -2800,6 +2800,7 @@ function Get-DefaultWorkshopServiceOperationSet {
                     -ExpandProperties -ErrorAction Stop
                 [pscustomobject][ordered]@{
                     Name = $Name; Id = [string] $resource.ResourceId
+                    Location = [string] $resource.Location
                     Status = [string] $resource.Properties.status; TaskType = [string] $resource.Properties.taskType
                     DailyRecurrenceTime = [string] $resource.Properties.dailyRecurrence.time
                     TimeZoneId = [string] $resource.Properties.timeZoneId
@@ -2825,7 +2826,8 @@ function Get-DefaultWorkshopServiceOperationSet {
                     timeInMinutes = $Spec.NotificationTimeInMinutes
                 }
             }
-            New-AzResource -ResourceId $Spec.Id -ApiVersion '2018-09-15' -Properties $properties `
+            New-AzResource -ResourceId $Spec.Id -ApiVersion '2018-09-15' -Location $Spec.Location `
+                -Properties $properties `
                 -Force -ErrorAction Stop
         }
     }
@@ -2871,6 +2873,7 @@ function Get-WorkshopShutdownSpecification {
         [pscustomobject][ordered]@{
             Name = $name
             Id = "/subscriptions/$SubscriptionId/resourceGroups/$($Config.ResourceGroupName)/providers/microsoft.devtestlab/schedules/$name"
+            Location = [string] $Config.Location
             Status = 'Enabled'
             TaskType = 'ComputeVmShutdownTask'
             DailyRecurrenceTime = [string] $Config.AutoShutdownTime
