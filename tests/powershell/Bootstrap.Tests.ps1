@@ -148,6 +148,10 @@ Describe 'SQL VM bootstrap static contract' {
         $text | Should -Match 'expectedAdminNetwork\s*=\s*ConvertTo-WorkshopCanonicalIpv4Network'
         $text | Should -Match 'firewallRemoteNetworks\[0\]\s+-ceq\s+\$expectedAdminNetwork'
         $text | Should -Not -Match 'RemoteAddress\)\[0\]\s+-ceq\s+\$adminSubnet'
+        $text | Should -Match 'Get-NetFirewallApplicationFilter'
+        $text | Should -Match 'Get-NetFirewallServiceFilter'
+        $text | Should -Match 'sqlservr\\\.exe'
+        $text | Should -Match '\$service\.Name'
     }
 
     It 'creates non-exportable private-DNS TLS and exports only a public certificate' {

@@ -376,10 +376,18 @@ ORDER BY file_id;
         $rule = $_
         $port = $rule | Get-NetFirewallPortFilter
         $address = $rule | Get-NetFirewallAddressFilter
+        $application = $rule | Get-NetFirewallApplicationFilter
+        $serviceFilter = $rule | Get-NetFirewallServiceFilter
         $coversSql = ($port.Protocol -in @('TCP', 'Any') -and (Test-FirewallPortCoverage -Ranges @($port.LocalPort) -Port 1433)) -or
             ($port.Protocol -in @('UDP', 'Any') -and (Test-FirewallPortCoverage -Ranges @($port.LocalPort) -Port 1434))
         $isBroad = @($address.RemoteAddress) | Where-Object { $_ -in @('Any', '*', '0.0.0.0/0', 'Internet') }
-        if ($coversSql -and $isBroad) { $rule }
+        $program = [string] $application.Program
+        $firewallService = [string] $serviceFilter.Service
+        $allPrograms = [string]::IsNullOrWhiteSpace($program) -or $program -in @('Any', '*')
+        $allServices = [string]::IsNullOrWhiteSpace($firewallService) -or $firewallService -in @('Any', '*')
+        $appliesToSql = $program -match '(?i)(^|\\)sqlservr\.exe$' -or
+            ($allPrograms -and ($allServices -or $firewallService -ceq $service.Name))
+        if ($coversSql -and $isBroad -and $appliesToSql) { $rule }
     })
     Assert-Condition ($broadSqlRules.Count -eq 0) 'A broad inbound SQL firewall rule was detected.'
 
