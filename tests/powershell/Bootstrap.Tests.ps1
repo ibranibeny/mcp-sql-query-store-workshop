@@ -657,6 +657,9 @@ Describe 'Bootstrap orchestration and evidence contracts' {
         $text | Should -Match 'AdministratorSecret'
         $text | Should -Match "New-Object\s+-ComObject\s+'Schedule\.Service'"
         $text | Should -Match 'RegisterTaskDefinition'
+        # S4U registration keeps the administrator password out of this path entirely.
+        $text | Should -Match 'Principal\.LogonType\s*=\s*2'
+        $text | Should -Not -Match 'SecureStringToBSTR'
         $text | Should -Match 'DeleteTask'
         $text | Should -Match 'LastTaskResult'
         $text | Should -Match 'MaximumAttempts'
@@ -741,11 +744,8 @@ Describe 'Bootstrap orchestration and evidence contracts' {
         $service | Add-Member ScriptMethod NewTask { param($Flags) $null = $Flags; $taskDefinition }.GetNewClosure()
         Mock New-Object { $service } -ParameterFilter { $ComObject -eq 'Schedule.Service' }
 
-        $taskLogon = [Security.SecureString]::new()
-        foreach ($character in [char[]] 'placeholder') { $taskLogon.AppendChar($character) }
         $invoke = {
             Invoke-WorkshopAdministratorBootstrap -UserName 'HOST\facilitator' `
-                -Password $taskLogon `
                 -ScriptPath 'C:\McpSqlWorkshop\Initialize-SqlVm.ps1' `
                 -PayloadPath 'C:\McpSqlWorkshop\protected-bootstrap.cms' `
                 -CompletionPath $completionPath `
