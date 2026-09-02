@@ -1525,7 +1525,15 @@ function ConvertFrom-WorkshopAzNetworkResource {
         return $Resource
     }
     $name = if ($Kind -eq 'ResourceGroup') { [string] $Resource.ResourceGroupName } else { [string] $Resource.Name }
-    $location = [string] $Resource.Location
+    $location = if ($Resource.PSObject.Properties.Name -contains 'Location') {
+        [string] $Resource.Location
+    }
+    elseif ($Kind -like 'PrivateDns*') {
+        'global'
+    }
+    else {
+        ''
+    }
     $tags = if ($Resource.PSObject.Properties.Name -contains 'Tags' -and $null -ne $Resource.Tags) {
         $Resource.Tags
     }

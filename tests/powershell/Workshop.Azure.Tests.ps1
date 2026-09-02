@@ -1485,6 +1485,24 @@ Describe 'Default workshop network operation shape' {
         }
     }
 
+    It 'normalizes private DNS records that do not expose a Location property' {
+        InModuleScope Workshop.Azure {
+            $native = [pscustomobject]@{
+                Id = '/subscriptions/test/resourceGroups/rg/providers/Microsoft.Network/privateDnsZones/example.internal/A/sql01'
+                Name = 'sql01'
+                ZoneName = 'example.internal'
+                RecordType = 'A'
+                Ttl = 300
+                Records = @([pscustomobject]@{ Ipv4Address = '10.20.2.10' })
+            }
+
+            { $script:normalizedRecord = ConvertFrom-WorkshopAzNetworkResource `
+                    -Kind 'PrivateDnsARecord' -Resource $native } | Should -Not -Throw
+            $script:normalizedRecord.Location | Should -BeExactly 'global'
+            $script:normalizedRecord.Ipv4Addresses | Should -Be @('10.20.2.10')
+        }
+    }
+
     It 'derives private-subnet support from command parameter metadata' {
         InModuleScope Workshop.Azure {
             Mock Get-Command {
