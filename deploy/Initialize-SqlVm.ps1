@@ -309,6 +309,7 @@ function Invoke-WorkshopAdministratorBootstrap {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string] $UserName,
+        [Parameter(Mandatory)][Security.SecureString] $Password,
         [Parameter(Mandatory)][string] $ScriptPath,
         [Parameter(Mandatory)][string] $PayloadPath,
         [Parameter(Mandatory)][string] $CompletionPath,
@@ -330,6 +331,8 @@ function Invoke-WorkshopAdministratorBootstrap {
     $registeredTask = $null
     $runningTask = $null
     $action = $null
+    $passwordPointer = [IntPtr]::Zero
+    $plainPassword = $null
     $primaryError = $null
     $readiness = $null
     $cleanupErrors = [System.Collections.Generic.List[string]]::new()
@@ -346,10 +349,10 @@ function Invoke-WorkshopAdministratorBootstrap {
         $taskDefinition = $taskService.NewTask(0)
         $taskDefinition.RegistrationInfo.Description = 'Temporary MCP SQL workshop bootstrap task.'
         $taskDefinition.Principal.UserId = $UserName
-        # S4U: run as the administrator without storing a password. The registering
-        # process is SYSTEM, which holds SeTcbPrivilege, and the task only needs local
-        # access to SQL Server.
-        $taskDefinition.Principal.LogonType = 2
+        # Password logon is the only supported identity switch here. SYSTEM is not a
+        # SQL sysadmin, and Windows refuses an elevated S4U token for a local
+        # administrator account with 0x80070005.
+        $taskDefinition.Principal.LogonType = 1
         $taskDefinition.Principal.RunLevel = 1
         $taskDefinition.Settings.Enabled = $true
         $taskDefinition.Settings.Hidden = $true
@@ -364,9 +367,26 @@ function Invoke-WorkshopAdministratorBootstrap {
         $action.Arguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' +
             $ScriptPath + '" -ProtectedPayloadPath "' + $PayloadPath + '"'
 
-        $registeredTask = $taskFolder.RegisterTaskDefinition(
-            $taskName, $taskDefinition, 6, $UserName, $null, 2, $null
-        )
+        $passwordPointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($Password)
+        $plainPassword = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($passwordPointer)
+        try {
+            $registeredTask = $taskFolder.RegisterTaskDefinition(
+                $taskName, $taskDefinition, 6, $UserName, $plainPassword, 1, $null
+            )
+        }
+        catch {
+            # 0x8007052E is returned for a credential mismatch, which is indistinguishable
+            # from an unknown account in the raw HRESULT. Name the account so the next
+            # reader does not have to rediscover that.
+            throw ("Windows rejected the scheduled-task credential for '$UserName'. " +
+                'Confirm that the administrator password supplied to the deployment is the ' +
+                "one the VM was created with. Underlying error: $($_.Exception.Message)")
+        }
+        finally {
+            $plainPassword = $null
+            [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($passwordPointer)
+            $passwordPointer = [IntPtr]::Zero
+        }
         $runningTask = $registeredTask.Run($null)
 
         for ($attempt = 1; $attempt -le $MaximumAttempts; $attempt++) {
@@ -390,6 +410,10 @@ function Invoke-WorkshopAdministratorBootstrap {
         $primaryError = $_
     }
     finally {
+        $plainPassword = $null
+        if ($passwordPointer -ne [IntPtr]::Zero) {
+            [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($passwordPointer)
+        }
         if ($null -ne $registeredTask) {
             try {
                 Stop-WorkshopScheduledTaskForCleanup -Task $registeredTask
@@ -525,9 +549,10 @@ Assert-Condition (
 $expectedAdministratorIdentity = "$env:COMPUTERNAME\$($payload.AdministratorUserName)"
 $currentIdentity = [Security.Principal.WindowsIdentity]::GetCurrent().Name
 if ($currentIdentity -ine $expectedAdministratorIdentity) {
+    $administratorSecure = ConvertTo-SecureValue -Value ([string] $payload.AdministratorSecret)
     try {
         $null = Invoke-WorkshopAdministratorBootstrap -UserName $expectedAdministratorIdentity `
-            -ScriptPath $PSCommandPath `
+            -Password $administratorSecure -ScriptPath $PSCommandPath `
             -PayloadPath $ProtectedPayloadPath -CompletionPath $readinessPath `
             -ExpectedDeploymentId ([string] $payload.DeploymentId)
     }
