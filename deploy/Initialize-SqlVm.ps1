@@ -129,7 +129,7 @@ function Invoke-LocalSqlQuery {
 
 function Get-SqlService {
     $services = @(Get-CimInstance Win32_Service -Filter "Name LIKE 'MSSQL%'" |
-        Where-Object { $_.Name -notmatch 'Launcher|FDLauncher' })
+        Where-Object { $_.PathName -match '(?i)\\sqlservr\.exe(?:"|\s)' })
     Assert-Condition ($services.Count -eq 1) 'Exactly one SQL Server database engine service is required.'
     $services[0]
 }

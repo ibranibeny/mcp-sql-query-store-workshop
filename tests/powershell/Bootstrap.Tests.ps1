@@ -54,6 +54,8 @@ Describe 'SQL VM bootstrap static contract' {
         $text | Should -Match 'compute\.location\s+-ieq\s+\$payload\.ExpectedLocation'
         $text | Should -Match 'compute\.name\s+-ceq\s+\$payload\.ExpectedVmName'
         $text | Should -Match 'compute\.vmSize\s+-ceq\s+\$payload\.ExpectedVmSize'
+        $text | Should -Match 'PathName.*sqlservr\\\.exe'
+        $text | Should -Not -Match "Where-Object\s*\{\s*\$_.Name\s+-notmatch\s+'Launcher\|FDLauncher'"
     }
 
     It 'maps exact LUN zero and one with expected sizes and verifies 64 KiB NTFS labels' {
