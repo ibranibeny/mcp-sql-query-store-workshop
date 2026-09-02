@@ -12,6 +12,42 @@ Use the same deliberately inefficient stored procedure and the same measured evi
 
 Do not apply either generated proposal immediately. Save both reviews, reconcile them, and apply exactly one candidate through the guarded DBA approval entry point.
 
+## How to run this workshop
+
+### Phase 1. Deploy the environment
+
+The facilitator runs these once from the repository root, signed in to Azure PowerShell.
+
+| Step | Script | Purpose |
+|---|---|---|
+| 1 | `deploy/Test-WorkshopPrerequisites.ps1` | Read-only preflight of context, providers, quota, SKUs, images, and policy |
+| 2 | `deploy/Deploy-WorkshopEnvironment.ps1` | Creates the network, both VMs, and runs guest bootstrap |
+| 3 | `deploy/Capture-DeploymentEvidence.ps1` | Records the deployed state as evidence |
+
+`-FacilitatorCidr` is the only ingress the administration NSG allows. Supply the facilitator public IPv4 as a `/32`.
+
+Deployment proceeds through network and NAT, NSGs and ASGs, private DNS, the SQL VM, SQL bootstrap, the administration VM, and administration bootstrap. SQL bootstrap is the longest stage because it restores `AdventureWorks2022` and builds `lab.FactSales`.
+
+Between sessions, control cost with `deploy/Stop-WorkshopEnvironment.ps1` and `deploy/Resume-WorkshopEnvironment.ps1`. Remove everything with `deploy/Remove-WorkshopEnvironment.ps1`. Resume and removal each require their confirmation phrase typed in full.
+
+### Phase 2. Access path on workshop day
+
+This environment contains no Azure Bastion. Access is RDP to the administration VM public IP, restricted by the administration NSG to the facilitator `/32`.
+
+```mermaid
+flowchart LR
+  F["Facilitator workstation<br/>approved IPv4 /32"] -->|"RDP, TCP 3389"| P["Admin public IP"]
+  P --> A["Windows 11 administration VM<br/>every workshop tool runs here"]
+  A --> V["VS Code, MSSQL, GitHub Copilot"]
+  A --> M["SSMS 22.7+ with Copilot"]
+  A --> C["Read-only SQL MCP server"]
+  V -->|"private DNS, validated TLS, TCP 1433"| S["SQL Server 2022 VM<br/>10.20.2.10, no public IP"]
+  M --> S
+  C --> S
+```
+
+Every workshop action happens inside the administration VM. Do not try to reach SQL Server from a laptop. The SQL VM has no public IP, and that is the intended boundary rather than an obstacle to work around.
+
 ## Safety rules
 
 1. SQL Server remains private. Never add a public IP, public SQL listener, internet firewall exception, or HTTP MCP endpoint.
@@ -226,7 +262,37 @@ Expected custom tools:
 
 Do not approve create, update, delete, arbitrary query, DDL, workload-control, or session-termination operations.
 
-### A5. Inspect the baseline
+### A5. Learn the schema with GitHub Copilot
+
+Understand the data model before judging any optimization proposal. Schema exploration is an MSSQL extension capability, because the extension supplies live database context to Copilot Chat. The SQL MCP server cannot do this. Its `describe_entities` tool reports only the configured read-only entities and never reads user tables.
+
+1. Expand `AdventureWorks2022` in the MSSQL object explorer.
+2. Review `lab.FactSales`, its clustered key, and its existing indexes.
+3. Note the declared column widths, especially `WidePayload`.
+
+Then ask Copilot Chat one question at a time:
+
+```text
+@mssql Describe the tables in the lab schema, their primary keys, and how
+lab.FactSales relates to the AdventureWorks2022 dimension tables.
+```
+
+```text
+@mssql List the existing indexes on lab.FactSales. For each index state the key
+columns, the included columns, and which query shapes it can serve.
+```
+
+```text
+@mssql Based on this schema alone, which access path would a date-range filter on
+lab.FactSales.OrderDate take today, and what would change if that predicate were
+wrapped in CONVERT(date, ...)?
+```
+
+Ghost-text completions inside a `.sql` file do not carry schema context. Use `@mssql` in the chat panel when you want schema-aware answers.
+
+Record what the schema implies before running anything. A schema reading is a hypothesis about access paths, not a measurement.
+
+### A6. Inspect the baseline
 
 1. Open [sql/04-CreateBaselineProcedure.sql](https://github.com/ibranibeny/mcp-sql-query-store-workshop/blob/1aebe319edd7760a6f37fa21149c0474df23b284/sql/04-CreateBaselineProcedure.sql).
 2. Connect the editor to `AdventureWorks2022`.
@@ -235,7 +301,7 @@ Do not approve create, update, delete, arbitrary query, DDL, workload-control, o
 5. Run the invocation once.
 6. Save the `.sqlplan` file and Messages output under the ignored run evidence directory.
 
-### A6. Ask GitHub Copilot to explain
+### A7. Ask GitHub Copilot to explain
 
 Select the baseline source and attach or reference the actual plan. In Copilot Chat use `@mssql /explain`, followed by:
 
@@ -258,7 +324,7 @@ Validation
 
 Reject a response that does not identify the source, parameter values, plan properties, units, or missing evidence.
 
-### A7. Ground the review with SQL MCP
+### A8. Ground the review with SQL MCP
 
 In Agent mode, request only the bounded diagnostics needed for the exact run and UTC window. Approve each tool invocation individually.
 
@@ -284,7 +350,7 @@ Validation
 
 A point-in-time snapshot is not sufficient to classify the baseline target. The workload controller requires three consecutive samples in the target band.
 
-### A8. Ask GitHub Copilot to optimize
+### A9. Ask GitHub Copilot to optimize
 
 Select the same baseline and include the reviewed plan and SQL MCP output. Use `@mssql /optimize`, followed by:
 
