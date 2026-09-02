@@ -2999,6 +2999,23 @@ function Get-DefaultWorkshopEmergencyStopTaskOperationSet {
     }
 }
 
+function ConvertTo-WorkshopUserIdentity {
+    [CmdletBinding()]
+    param([AllowNull()][string] $UserId)
+
+    # Task Scheduler stores 'DOMAIN\user' but reports back only 'user', so the string
+    # forms never match. Resolving both sides to a SID compares the same principal.
+    if ([string]::IsNullOrWhiteSpace($UserId)) { return $null }
+    try {
+        return ([Security.Principal.NTAccount]::new($UserId)).Translate(
+            [Security.Principal.SecurityIdentifier]).Value
+    }
+    catch {
+        Write-Verbose $_.Exception.Message
+        return $UserId
+    }
+}
+
 function ConvertTo-WorkshopEmergencyStopComparableTask {
     [CmdletBinding()]
     param([Parameter(Mandatory)][object] $Task)
@@ -3011,6 +3028,7 @@ function ConvertTo-WorkshopEmergencyStopComparableTask {
         $property = $Task.PSObject.Properties[$name]
         $result[$name] = if ($null -eq $property) { $null } else { $property.Value }
     }
+    $result['UserId'] = ConvertTo-WorkshopUserIdentity -UserId ([string] $result['UserId'])
     [pscustomobject] $result
 }
 
@@ -3076,13 +3094,7 @@ function Initialize-WorkshopEmergencyStopScheduledTask {
         Enabled = $true
         Description = 'Secret-free local safety stop for the MCP SQL workshop.'
     }
-    $comparableExpected = [pscustomobject][ordered]@{
-        Name = $expected.Name; UserId = $expected.UserId; LogonType = $expected.LogonType
-        RunLevel = $expected.RunLevel; Execute = $expected.Execute; Arguments = $expected.Arguments
-        WorkingDirectory = $expected.WorkingDirectory; DailyTime = $expected.DailyTime
-        DaysInterval = $expected.DaysInterval; StartWhenAvailable = $expected.StartWhenAvailable
-        Enabled = $expected.Enabled
-    }
+    $comparableExpected = ConvertTo-WorkshopEmergencyStopComparableTask -Task $expected
     $existing = & $TaskOperations.GetTask $expected.Name
     $existingComparable = if ($null -eq $existing) {
         $null

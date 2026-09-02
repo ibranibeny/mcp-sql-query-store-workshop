@@ -2197,6 +2197,31 @@ Describe 'SQL IaaS and auto-shutdown exact resources' {
     }
 }
 
+Describe 'Scheduled task principal normalization' {
+    It 'compares the task principal by security identifier, not by string form' {
+        # Task Scheduler reports 'user' for a principal registered as 'DOMAIN\user', so an
+        # exact string comparison rejected a correctly installed task.
+        InModuleScope Workshop.Azure {
+            $current = [Security.Principal.WindowsIdentity]::GetCurrent()
+            $qualified = ConvertTo-WorkshopEmergencyStopComparableTask -Task ([pscustomobject]@{
+                Name = 'McpSqlWorkshop-EmergencyStop'; UserId = $current.Name })
+            $bare = ConvertTo-WorkshopEmergencyStopComparableTask -Task ([pscustomobject]@{
+                Name = 'McpSqlWorkshop-EmergencyStop'; UserId = ($current.Name -split '\\')[-1] })
+
+            $qualified.UserId | Should -BeExactly $bare.UserId
+            $qualified.UserId | Should -BeExactly $current.User.Value
+        }
+    }
+
+    It 'leaves an unresolvable principal untouched instead of throwing' {
+        InModuleScope Workshop.Azure {
+            ConvertTo-WorkshopUserIdentity -UserId 'NO SUCH PRINCIPAL 9f3a' |
+                Should -BeExactly 'NO SUCH PRINCIPAL 9f3a'
+            ConvertTo-WorkshopUserIdentity -UserId '' | Should -BeNullOrEmpty
+        }
+    }
+}
+
 Describe 'Scheduled task absence detection' {
     It 'treats every documented not-found shape as absence, and nothing else' -ForEach @(
         @{ Case = 'error id'; Id = 'NoMatchingMSFT_ScheduledTaskObjectsFound'; Category = 'ObjectNotFound'; Message = 'anything'; Expected = $true }
