@@ -2515,10 +2515,12 @@ Describe 'Bootstrap repository supply-chain boundary' {
 
     It 'validates and extracts the archive before invoking the approved bootstrap entry point' {
         $moduleText = Get-Content -LiteralPath (Join-Path $PSScriptRoot '../../deploy/Workshop.Azure.psm1') -Raw
-        $setExtensionAt = $moduleText.IndexOf('SetExtension = {')
-        $validationAt = $moduleText.IndexOf('$null = Expand-WorkshopBootstrapArchive', $setExtensionAt)
-        $executionAt = $moduleText.IndexOf('& (Join-Path `$repo', $setExtensionAt)
-        $validationAt | Should -BeGreaterThan $setExtensionAt
+        $stageAt = $moduleText.IndexOf('StageBootstrapFiles = {')
+        $validationAt = $moduleText.IndexOf('$null = Expand-WorkshopBootstrapArchive', $stageAt)
+        $executionAt = $moduleText.IndexOf("& (Join-Path `$repo 'deploy\__BOOTSTRAP_ENTRY_POINT__')", $stageAt)
+        $extensionAt = $moduleText.IndexOf('SetExtension = {', $stageAt)
+        $validationAt | Should -BeGreaterThan $stageAt
         $executionAt | Should -BeGreaterThan $validationAt
+        $extensionAt | Should -BeGreaterThan $executionAt
     }
 }

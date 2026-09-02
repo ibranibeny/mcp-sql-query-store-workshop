@@ -3276,42 +3276,95 @@ finally { Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue }
                 [Array]::Clear($certificateBytes, 0, $certificateBytes.Length)
             }
         }
-        SetExtension = {
-            param($VmName, $ResourceGroupName, $Location, $ArchiveUri, $ProtectedEnvelope, $BootstrapScript, $RepositoryCommit)
-            $envelopeBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($ProtectedEnvelope))
+        StageBootstrapFiles = {
+            param($VmName, $ResourceGroupName, $ProtectedEnvelope, $BootstrapScript, $RepositoryCommit)
+            $bootstrapEntryPoint = if ($BootstrapScript -ceq 'Initialize-AdminVm.ps1') {
+                'Invoke-AdminBootstrap.ps1'
+            }
+            else {
+                $BootstrapScript
+            }
             $archiveExpansionFunction = ${function:Expand-WorkshopBootstrapArchive}.ToString()
-            $innerScript = @"
+            $launcherTemplate = @'
+$ErrorActionPreference = 'Stop'
+$root = 'C:\McpSqlWorkshop'
+function Expand-WorkshopBootstrapArchive {
+__ARCHIVE_EXPANSION_FUNCTION__
+}
+$archives = @(Get-ChildItem -LiteralPath (Get-Location) -Filter '*.zip' -File)
+if ($archives.Count -ne 1) { throw 'Exactly one immutable repository archive is required.' }
+$repo = Join-Path $root 'repo'
+$null = Expand-WorkshopBootstrapArchive -ArchivePath $archives[0].FullName -DestinationPath $repo `
+    -RepositoryCommit '__REPOSITORY_COMMIT__' -ApprovedBootstrapEntryPoint '__BOOTSTRAP_ENTRY_POINT__'
+$payloadPath = Join-Path $root 'protected-bootstrap.cms'
+if (-not (Test-Path -LiteralPath $payloadPath -PathType Leaf)) {
+    throw 'The staged protected bootstrap payload is unavailable.'
+}
+& (Join-Path $repo 'deploy\__BOOTSTRAP_ENTRY_POINT__') -ProtectedPayloadPath $payloadPath
+'@
+            $launcher = $launcherTemplate.Replace(
+                '__ARCHIVE_EXPANSION_FUNCTION__', $archiveExpansionFunction
+            ).Replace(
+                '__REPOSITORY_COMMIT__', $RepositoryCommit
+            ).Replace(
+                '__BOOTSTRAP_ENTRY_POINT__', $bootstrapEntryPoint
+            )
+            $launcherBytes = [Text.Encoding]::UTF8.GetBytes($launcher)
+            $envelopeBytes = [Text.Encoding]::UTF8.GetBytes($ProtectedEnvelope)
+            try {
+                $launcherBase64 = [Convert]::ToBase64String($launcherBytes)
+                $envelopeBase64 = [Convert]::ToBase64String($envelopeBytes)
+                $launcherHash = [Convert]::ToHexString(
+                    [Security.Cryptography.SHA256]::HashData($launcherBytes)
+                )
+                $envelopeHash = [Convert]::ToHexString(
+                    [Security.Cryptography.SHA256]::HashData($envelopeBytes)
+                )
+                $stageScript = @"
 `$ErrorActionPreference = 'Stop'
 `$root = 'C:\McpSqlWorkshop'
-function Expand-WorkshopBootstrapArchive {
-$archiveExpansionFunction
-}
-`$archives = @(Get-ChildItem -LiteralPath (Get-Location) -Filter '*.zip' -File)
-if (`$archives.Count -ne 1) { throw 'Exactly one immutable repository archive is required.' }
-`$archive = `$archives[0].FullName
-`$repo = Join-Path `$root 'repo'
 New-Item -ItemType Directory -Path `$root -Force | Out-Null
-`$bootstrapEntryPoint = if ('$BootstrapScript' -ceq 'Initialize-AdminVm.ps1') {
-    'Invoke-AdminBootstrap.ps1'
-}
-else {
-    '$BootstrapScript'
-}
-`$null = Expand-WorkshopBootstrapArchive -ArchivePath `$archive -DestinationPath `$repo `
-    -RepositoryCommit '$RepositoryCommit' -ApprovedBootstrapEntryPoint `$bootstrapEntryPoint
+`$launcherPath = Join-Path `$root 'bootstrap-launcher.ps1'
 `$payloadPath = Join-Path `$root 'protected-bootstrap.cms'
+[IO.File]::WriteAllBytes(`$launcherPath, [Convert]::FromBase64String('$launcherBase64'))
 [IO.File]::WriteAllBytes(`$payloadPath, [Convert]::FromBase64String('$envelopeBase64'))
-`$acl = [Security.AccessControl.FileSecurity]::new()
-`$acl.SetAccessRuleProtection(`$true, `$false)
-foreach (`$identity in @('BUILTIN\Administrators','NT AUTHORITY\SYSTEM')) { `$acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(`$identity,'FullControl','Allow')) }
-Set-Acl -LiteralPath `$payloadPath -AclObject `$acl
-& (Join-Path `$repo "deploy\`$bootstrapEntryPoint") -ProtectedPayloadPath `$payloadPath
+foreach (`$path in @(`$launcherPath, `$payloadPath)) {
+    `$acl = [Security.AccessControl.FileSecurity]::new()
+    `$acl.SetAccessRuleProtection(`$true, `$false)
+    foreach (`$identity in @('BUILTIN\Administrators','NT AUTHORITY\SYSTEM')) {
+        `$acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(`$identity,'FullControl','Allow'))
+    }
+    Set-Acl -LiteralPath `$path -AclObject `$acl
+}
+if ((Get-FileHash -LiteralPath `$launcherPath -Algorithm SHA256).Hash -cne '$launcherHash' -or
+    (Get-FileHash -LiteralPath `$payloadPath -Algorithm SHA256).Hash -cne '$envelopeHash') {
+    throw 'Staged bootstrap file hash verification failed.'
+}
+'MCP_BOOTSTRAP_STAGED:${launcherHash}:$envelopeHash'
 "@
-            $encodedCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($innerScript))
+                $result = Invoke-AzVMRunCommand -ResourceGroupName $ResourceGroupName -VMName $VmName `
+                    -CommandId RunPowerShellScript -ScriptString $stageScript -ErrorAction Stop
+                $message = @($result.Value | ForEach-Object Message) -join [Environment]::NewLine
+                if ($message -notmatch [regex]::Escape("MCP_BOOTSTRAP_STAGED:${launcherHash}:$envelopeHash")) {
+                    throw 'Bootstrap launcher and encrypted payload staging was not positively verified.'
+                }
+            }
+            finally {
+                $launcher = $null
+                $launcherBase64 = $null
+                $envelopeBase64 = $null
+                $stageScript = $null
+                [Array]::Clear($launcherBytes, 0, $launcherBytes.Length)
+                [Array]::Clear($envelopeBytes, 0, $envelopeBytes.Length)
+            }
+        }
+        SetExtension = {
+            param($VmName, $ResourceGroupName, $Location, $ArchiveUri, $ProtectedEnvelope, $BootstrapScript, $RepositoryCommit)
+            $null = $ProtectedEnvelope, $RepositoryCommit
             $publicSettings = @{ timestamp = [DateTime]::UtcNow.ToString('yyyyMMddHHmmss') }
             $protectedSettings = @{
                 fileUris = @($ArchiveUri)
-                commandToExecute = "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand $encodedCommand"
+                commandToExecute = 'powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File C:\McpSqlWorkshop\bootstrap-launcher.ps1'
             }
             Set-AzVMExtension -ResourceGroupName $ResourceGroupName -VMName $VmName -Location $Location `
                 -Name "McpSqlWorkshop-$BootstrapScript" -Publisher 'Microsoft.Compute' `
@@ -3347,7 +3400,10 @@ function Assert-WorkshopBootstrapOperationSet {
     [CmdletBinding()]
     param([Parameter(Mandatory)][hashtable] $Operations, [switch] $Admin)
 
-    $required = @('GetRecipientCertificate', 'ProtectPayload', 'SetExtension', 'GetExtension', 'ReadReadiness')
+    $required = @(
+        'GetRecipientCertificate', 'ProtectPayload', 'StageBootstrapFiles',
+        'SetExtension', 'GetExtension', 'ReadReadiness'
+    )
     if ($Admin) { $required += 'ReadPublicCertificate' }
     foreach ($name in $required) {
         if (-not $Operations.ContainsKey($name) -or $Operations[$name] -isnot [scriptblock]) {
@@ -3383,6 +3439,8 @@ function Invoke-WorkshopBootstrapExtension {
     if ([string]::IsNullOrWhiteSpace([string]$protectedEnvelope)) {
         throw "$Role bootstrap payload encryption did not return a CMS envelope."
     }
+    $null = & $Operations.StageBootstrapFiles $vm.Name $Config.ResourceGroupName `
+        $protectedEnvelope $scriptName $ProtectedPayload.RepositoryCommit
     $null = & $Operations.SetExtension $vm.Name $Config.ResourceGroupName $Config.Location `
         $ArchiveUri $protectedEnvelope $scriptName $ProtectedPayload.RepositoryCommit
     $protectedEnvelope = $null

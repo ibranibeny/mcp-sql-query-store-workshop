@@ -530,6 +530,16 @@ Describe 'Bootstrap orchestration and evidence contracts' {
         $moduleText | Should -Not -Match '(?i)Settings\s*=\s*@\{[^}]*password'
     }
 
+    It 'stages the trusted launcher and encrypted payload before using a short extension command' {
+        $moduleText = Get-Content -LiteralPath (Join-Path $script:DeployRoot 'Workshop.Azure.psm1') -Raw
+        $moduleText | Should -Match 'StageBootstrapFiles'
+        $moduleText | Should -Match 'bootstrap-launcher\.ps1'
+        $moduleText | Should -Match 'Invoke-AzVMRunCommand'
+        $moduleText | Should -Not -Match 'commandToExecute\s*=\s*"[^"]*-EncodedCommand'
+        $moduleText.IndexOf('& $Operations.StageBootstrapFiles') |
+            Should -BeLessThan $moduleText.IndexOf('& $Operations.SetExtension')
+    }
+
     It 'starts the administration bootstrap through the PowerShell 5 safe wrapper' {
         $moduleText = Get-Content -LiteralPath (Join-Path $script:DeployRoot 'Workshop.Azure.psm1') -Raw
         $moduleText | Should -Match 'Invoke-AdminBootstrap\.ps1'
@@ -571,6 +581,11 @@ Describe 'Bootstrap orchestration and evidence contracts' {
                 $script:CapturedPayload = $Payload | ConvertTo-Json -Depth 10 | ConvertFrom-Json
                 'encrypted-cms-envelope'
             }
+            StageBootstrapFiles = {
+                param($VmName, $ResourceGroupName, $ProtectedEnvelope, $BootstrapScript, $RepositoryCommit)
+                $null = $VmName, $ResourceGroupName, $BootstrapScript, $RepositoryCommit
+                $ProtectedEnvelope | Should -Be 'encrypted-cms-envelope'
+            }
             SetExtension = {
                 param($VmName, $ResourceGroupName, $Location, $ArchiveUri, $ProtectedEnvelope, $BootstrapScript, $RepositoryCommit)
                 $null = $VmName, $ResourceGroupName, $Location, $ArchiveUri, $BootstrapScript, $RepositoryCommit
@@ -601,6 +616,11 @@ Describe 'Bootstrap orchestration and evidence contracts' {
                 $null = $Recipient
                 $script:CapturedAdminPayload = $Payload | ConvertTo-Json -Depth 10 | ConvertFrom-Json
                 'encrypted-cms-envelope'
+            }
+            StageBootstrapFiles = {
+                param($VmName, $ResourceGroupName, $ProtectedEnvelope, $BootstrapScript, $RepositoryCommit)
+                $null = $VmName, $ResourceGroupName, $BootstrapScript, $RepositoryCommit
+                $ProtectedEnvelope | Should -Be 'encrypted-cms-envelope'
             }
             SetExtension = {
                 param($VmName, $ResourceGroupName, $Location, $ArchiveUri, $ProtectedEnvelope, $BootstrapScript, $RepositoryCommit)
