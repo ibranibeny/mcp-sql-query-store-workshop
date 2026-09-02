@@ -535,6 +535,10 @@ Describe 'Bootstrap orchestration and evidence contracts' {
         $moduleText | Should -Match 'StageBootstrapFiles'
         $moduleText | Should -Match 'bootstrap-launcher\.ps1'
         $moduleText | Should -Match 'Invoke-AzVMRunCommand'
+        $moduleText | Should -Match 'Add-Type\s+-AssemblyName\s+System\.IO\.Compression'
+        $moduleText | Should -Match 'Add-Type\s+-AssemblyName\s+System\.IO\.Compression\.FileSystem'
+        $moduleText.IndexOf('Add-Type -AssemblyName System.IO.Compression') |
+            Should -BeLessThan $moduleText.IndexOf('$null = Expand-WorkshopBootstrapArchive')
         $moduleText | Should -Not -Match 'commandToExecute\s*=\s*"[^"]*-EncodedCommand'
         $moduleText.IndexOf('& $Operations.StageBootstrapFiles') |
             Should -BeLessThan $moduleText.IndexOf('& $Operations.SetExtension')

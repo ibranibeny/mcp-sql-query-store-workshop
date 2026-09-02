@@ -3288,6 +3288,8 @@ finally { Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue }
             $launcherTemplate = @'
 $ErrorActionPreference = 'Stop'
 $root = 'C:\McpSqlWorkshop'
+Add-Type -AssemblyName System.IO.Compression
+Add-Type -AssemblyName System.IO.Compression.FileSystem
 function Expand-WorkshopBootstrapArchive {
 __ARCHIVE_EXPANSION_FUNCTION__
 }
