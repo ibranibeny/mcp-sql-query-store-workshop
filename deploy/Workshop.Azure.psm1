@@ -1551,11 +1551,13 @@ function ConvertFrom-WorkshopAzNetworkResource {
                     Name = [string] $_.Name; Priority = [int] $_.Priority; Direction = [string] $_.Direction
                     Access = [string] $_.Access; Protocol = [string] $_.Protocol
                     SourcePortRange = [string] $_.SourcePortRange; SourceAddressPrefix = [string] $_.SourceAddressPrefix
-                    SourceApplicationSecurityGroupId = Get-WorkshopReferenceId -Reference @($_.SourceApplicationSecurityGroups)[0]
+                    SourceApplicationSecurityGroupId = Get-WorkshopReferenceId -Reference `
+                        ($_.SourceApplicationSecurityGroups | Where-Object { $null -ne $_ } | Select-Object -First 1)
                     SourcePortRanges = @($_.SourcePortRanges); SourceAddressPrefixes = @($_.SourceAddressPrefixes)
                     SourceApplicationSecurityGroupIds = @($_.SourceApplicationSecurityGroups | ForEach-Object { Get-WorkshopReferenceId -Reference $_ })
                     DestinationPortRange = [string] $_.DestinationPortRange; DestinationAddressPrefix = [string] $_.DestinationAddressPrefix
-                    DestinationApplicationSecurityGroupId = Get-WorkshopReferenceId -Reference @($_.DestinationApplicationSecurityGroups)[0]
+                    DestinationApplicationSecurityGroupId = Get-WorkshopReferenceId -Reference `
+                        ($_.DestinationApplicationSecurityGroups | Where-Object { $null -ne $_ } | Select-Object -First 1)
                     DestinationPortRanges = @($_.DestinationPortRanges); DestinationAddressPrefixes = @($_.DestinationAddressPrefixes)
                     DestinationApplicationSecurityGroupIds = @($_.DestinationApplicationSecurityGroups | ForEach-Object { Get-WorkshopReferenceId -Reference $_ })
                 }

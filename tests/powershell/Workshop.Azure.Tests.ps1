@@ -1456,6 +1456,35 @@ Describe 'Default workshop network operation shape' {
         }
     }
 
+    It 'normalizes NSG rules with an empty source ASG collection without indexing past the array' {
+        InModuleScope Workshop.Azure {
+            $destinationAsg = [pscustomobject]@{ Id = '/subscriptions/test/resourceGroups/rg/providers/Microsoft.Network/applicationSecurityGroups/asg-admin' }
+            $native = [pscustomobject]@{
+                Name = 'nsg-test'
+                Id = '/subscriptions/test/resourceGroups/rg/providers/Microsoft.Network/networkSecurityGroups/nsg-test'
+                Location = 'indonesiacentral'
+                Tags = @{ environment = 'workshop'; workload = 'mcp-sql' }
+                SecurityRules = @(
+                    [pscustomobject]@{
+                        Name = 'Allow-Rdp'; Priority = 100; Direction = 'Inbound'; Access = 'Allow'; Protocol = 'Tcp'
+                        SourcePortRange = '*'; SourceAddressPrefix = '203.0.113.10/32'
+                        SourcePortRanges = @(); SourceAddressPrefixes = @()
+                        SourceApplicationSecurityGroups = @()
+                        DestinationPortRange = '3389'; DestinationAddressPrefix = $null
+                        DestinationPortRanges = @(); DestinationAddressPrefixes = @()
+                        DestinationApplicationSecurityGroups = @($destinationAsg)
+                    }
+                )
+            }
+
+            { $script:normalizedNsg = ConvertFrom-WorkshopAzNetworkResource `
+                    -Kind 'NetworkSecurityGroup' -Resource $native } | Should -Not -Throw
+            $script:normalizedNsg.Rules | Should -HaveCount 1
+            $script:normalizedNsg.Rules[0].SourceApplicationSecurityGroupId | Should -BeNullOrEmpty
+            $script:normalizedNsg.Rules[0].DestinationApplicationSecurityGroupId | Should -BeExactly $destinationAsg.Id
+        }
+    }
+
     It 'derives private-subnet support from command parameter metadata' {
         InModuleScope Workshop.Azure {
             Mock Get-Command {
