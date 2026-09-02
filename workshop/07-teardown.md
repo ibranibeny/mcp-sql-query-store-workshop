@@ -32,11 +32,13 @@ For final teardown, invoke the guarded resource-group removal:
   -Confirm:$false
 ```
 
-The exact case-sensitive phrase is `DELETE rg-mcp-sql-workshop`. The function waits for deletion and fails if the resource group or any tagged workshop resource remains.
+The exact case-sensitive phrase is `DELETE rg-mcp-sql-workshop`. The function waits for deletion and fails if the resource group or any tagged workshop resource remains. The tagged-resource check searches the whole subscription, not just the deleted group, so a workshop-tagged resource that was created elsewhere still fails teardown.
+
+If this deployment used the local emergency-stop fallback instead of a DevTestLab schedule, removal also unregisters the `McpSqlWorkshop-EmergencyStop` scheduled task on this workstation and proves it is gone. The returned checkpoint list reports `Local emergency-stop task removed` or `Local emergency-stop task absent`; treat any other value as teardown incomplete.
 
 ## 5. Prove cost stop
 
-Do not end at a successful delete request. Record positive evidence that the resource group is absent and no tagged workshop resources remain. If access prevents proof or a dependency blocks deletion, report teardown incomplete and ongoing billing risk; escalate to the subscription owner.
+Do not end at a successful delete request. Record positive evidence that the resource group is absent, no tagged workshop resources remain, and the local emergency-stop task is gone. If access prevents proof or a dependency blocks deletion, report teardown incomplete and ongoing billing risk; escalate to the subscription owner.
 
 ## 6. Close the workshop
 

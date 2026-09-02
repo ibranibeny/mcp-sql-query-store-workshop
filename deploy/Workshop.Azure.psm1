@@ -845,9 +845,9 @@ ${function:Test-WorkshopPrerequisites} = {
 
     $versionResult = Invoke-WorkshopReadOperation -Operation $Operations.GetPowerShellVersion
     $powerShellVersion = if ($versionResult.Succeeded -and $versionResult.Value.Count -gt 0) { [version] $versionResult.Value[0] } else { [version]'0.0' }
-    Add-WorkshopCheck -Checks $checks -Name 'PowerShell version' -Passed ($powerShellVersion -ge [version]'7.0') `
-        -Detail "Detected PowerShell $powerShellVersion; version 7 or later is required." `
-        -Remediation 'Run the preflight with PowerShell 7 or later.'
+    Add-WorkshopCheck -Checks $checks -Name 'PowerShell version' -Passed ($powerShellVersion -ge [version]'7.4') `
+        -Detail "Detected PowerShell $powerShellVersion; version 7.4 or later is required." `
+        -Remediation 'Run the preflight with PowerShell 7.4 or later.'
 
     $moduleResult = Invoke-WorkshopReadOperation -Operation $Operations.GetModules
     $installedModules = @($moduleResult.Value)
@@ -1255,6 +1255,21 @@ ${function:Test-WorkshopPrerequisites} = {
         -Detail "Expiration date '$($expirationDate.ToString('yyyy-MM-dd'))' must be in the future and no more than seven days away." `
         -Remediation 'Choose an expiration date from tomorrow through seven days from today.'
 
+    $autoShutdownCapability = Get-WorkshopAutoShutdownCapability -Config $Config
+    $autoShutdownDetail = if ($autoShutdownCapability.ScheduleSupported) {
+        "DevTestLab scheduling is supported because schedule and VM location are both '$($autoShutdownCapability.VmLocation)'."
+    }
+    elseif ($autoShutdownCapability.FallbackDocumented) {
+        "DevTestLab cross-region scheduling from '$($autoShutdownCapability.ScheduleLocation)' to '$($autoShutdownCapability.VmLocation)' is unsupported; the documented local emergency stop is required. It runs as the current interactive user at $($Config.AutoShutdownTime) in this workstation's local time zone, so leave this workstation signed in with a valid Azure sign-in until then."
+    }
+    else {
+        "DevTestLab schedule location '$($autoShutdownCapability.ScheduleLocation)' does not match VM location '$($autoShutdownCapability.VmLocation)' and has no approved fallback."
+    }
+    Add-WorkshopCheck -Checks $checks -Name 'DevTestLab auto-shutdown capability' `
+        -Passed ($autoShutdownCapability.ScheduleSupported -or $autoShutdownCapability.FallbackDocumented) `
+        -Detail $autoShutdownDetail `
+        -Remediation "Set AutoShutdownLocation to '$($autoShutdownCapability.VmLocation)' in deploy/WorkshopConfig.psd1, or run deploy/Stop-WorkshopEnvironment.ps1 manually at the end of the workshop."
+
     if ($validCidr) {
         $plan = Get-WorkshopPlan -Config $Config -FacilitatorCidr $FacilitatorCidr -ExpiresOn $ExpiresOn `
             -WindowsClientLicenseAttested $WindowsClientLicenseAttested `
@@ -1269,6 +1284,7 @@ ${function:Test-WorkshopPrerequisites} = {
             Admin = $resolvedImages.Admin
             Sql = $resolvedImages.Sql
         }
+        AutoShutdownCapability = $autoShutdownCapability
         Plan = $plan
     }
 }
@@ -2764,6 +2780,10 @@ function Get-DefaultWorkshopServiceOperationSet {
             $context = Get-AzContext -ErrorAction Stop
             Get-WorkshopNestedIdentifier -InputObject $context -PropertyName 'Subscription'
         }
+        GetTenantId = {
+            $context = Get-AzContext -ErrorAction Stop
+            Get-WorkshopNestedIdentifier -InputObject $context -PropertyName 'Tenant'
+        }
         GetSqlIaas = {
             param($Spec, $ResourceGroupName)
             try {
@@ -2831,6 +2851,11 @@ function Get-DefaultWorkshopServiceOperationSet {
                 -Properties $properties `
                 -Force -ErrorAction Stop
         }
+        EnsureEmergencyStop = {
+            param($Config, $SubscriptionId, $TenantId)
+            Initialize-WorkshopEmergencyStopScheduledTask -Config $Config `
+                -SubscriptionId $SubscriptionId -TenantId $TenantId
+        }
     }
 }
 
@@ -2887,6 +2912,192 @@ function Get-WorkshopShutdownSpecification {
     }
 }
 
+function Get-WorkshopAutoShutdownCapability {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][hashtable] $Config)
+
+    $vmLocation = ([string] $Config.Location).ToLowerInvariant() -replace '[^a-z0-9]', ''
+    $scheduleLocation = ([string] $Config.AutoShutdownLocation).ToLowerInvariant() -replace '[^a-z0-9]', ''
+    $scheduleSupported = $vmLocation -ceq $scheduleLocation
+    $fallbackDocumented = -not $scheduleSupported -and
+        $vmLocation -ceq 'indonesiacentral' -and $scheduleLocation -ceq 'southeastasia'
+    [pscustomobject][ordered]@{
+        ScheduleSupported = $scheduleSupported
+        FallbackDocumented = $fallbackDocumented
+        VmLocation = [string] $Config.Location
+        ScheduleLocation = [string] $Config.AutoShutdownLocation
+        RequiredFallback = if ($fallbackDocumented) { 'LocalEmergencyStop' } else { $null }
+    }
+}
+
+function Get-DefaultWorkshopEmergencyStopTaskOperationSet {
+    [CmdletBinding()]
+    param()
+
+    @{
+        GetCurrentUser = { [Security.Principal.WindowsIdentity]::GetCurrent().Name }
+        GetTask = {
+            param($Name)
+            try {
+                $task = Get-ScheduledTask -TaskName $Name -ErrorAction Stop
+                $trigger = @($task.Triggers)[0]
+                $start = [datetime]::MinValue
+                $dailyTime = if ($null -ne $trigger -and
+                    [datetime]::TryParse([string] $trigger.StartBoundary, [ref] $start)) {
+                    $start.ToString('HHmm', [Globalization.CultureInfo]::InvariantCulture)
+                }
+                else { '' }
+                $action = @($task.Actions)[0]
+                [pscustomobject][ordered]@{
+                    Name = [string] $task.TaskName
+                    UserId = [string] $task.Principal.UserId
+                    LogonType = [string] $task.Principal.LogonType
+                    RunLevel = [string] $task.Principal.RunLevel
+                    Execute = [string] $action.Execute
+                    Arguments = [string] $action.Arguments
+                    WorkingDirectory = [string] $action.WorkingDirectory
+                    DailyTime = $dailyTime
+                    DaysInterval = [int] $trigger.DaysInterval
+                    StartWhenAvailable = [bool] $task.Settings.StartWhenAvailable
+                    Enabled = [bool] $task.Settings.Enabled
+                }
+            }
+            catch {
+                if ($_.FullyQualifiedErrorId -match 'NoMatchingMSFT_ScheduledTask|ObjectNotFound') {
+                    return $null
+                }
+                throw
+            }
+        }
+        CreateTask = {
+            param($Spec)
+            $hours = [int] $Spec.DailyTime.Substring(0, 2)
+            $minutes = [int] $Spec.DailyTime.Substring(2, 2)
+            $action = New-ScheduledTaskAction -Execute $Spec.Execute -Argument $Spec.Arguments `
+                -WorkingDirectory $Spec.WorkingDirectory
+            $trigger = New-ScheduledTaskTrigger -Daily -At ([datetime]::Today.AddHours($hours).AddMinutes($minutes))
+            $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable
+            $principal = New-ScheduledTaskPrincipal -UserId $Spec.UserId -LogonType $Spec.LogonType `
+                -RunLevel $Spec.RunLevel
+            Register-ScheduledTask -TaskName $Spec.Name -Action $action -Trigger $trigger `
+                -Settings $settings -Principal $principal -Description $Spec.Description -ErrorAction Stop
+        }
+    }
+}
+
+function ConvertTo-WorkshopEmergencyStopComparableTask {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][object] $Task)
+
+    $result = [ordered]@{}
+    foreach ($name in @(
+        'Name', 'UserId', 'LogonType', 'RunLevel', 'Execute', 'Arguments',
+        'WorkingDirectory', 'DailyTime', 'DaysInterval', 'StartWhenAvailable', 'Enabled'
+    )) {
+        $property = $Task.PSObject.Properties[$name]
+        $result[$name] = if ($null -eq $property) { $null } else { $property.Value }
+    }
+    [pscustomobject] $result
+}
+
+function Get-WorkshopPwshPath {
+    [CmdletBinding()]
+    param([hashtable] $TaskOperations)
+
+    # Resolve an absolute path so the task does not depend on the PATH of whichever
+    # logon session eventually runs it.
+    if ($null -ne $TaskOperations -and $TaskOperations.ContainsKey('GetPwshPath') -and
+        $TaskOperations['GetPwshPath'] -is [scriptblock]) {
+        $resolved = [string] (& $TaskOperations.GetPwshPath)
+        if (-not [string]::IsNullOrWhiteSpace($resolved)) { return $resolved }
+        throw 'The emergency-stop task requires a resolvable pwsh.exe path.'
+    }
+    $processPath = [string] ([Diagnostics.Process]::GetCurrentProcess().MainModule.FileName)
+    if ($processPath -match '(?i)\\pwsh\.exe$') { return $processPath }
+    $command = Get-Command -Name 'pwsh.exe' -CommandType Application -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    if ($null -ne $command) { return [string] $command.Source }
+    throw 'The emergency-stop task requires a resolvable pwsh.exe path.'
+}
+
+function Initialize-WorkshopEmergencyStopScheduledTask {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][hashtable] $Config,
+        [Parameter(Mandatory)][ValidatePattern('^[0-9a-fA-F-]{36}$')][string] $SubscriptionId,
+        [Parameter(Mandatory)][ValidatePattern('^[0-9a-fA-F-]{36}$')][string] $TenantId,
+        [hashtable] $TaskOperations
+    )
+
+    if ($null -eq $TaskOperations) { $TaskOperations = Get-DefaultWorkshopEmergencyStopTaskOperationSet }
+    foreach ($name in @('GetCurrentUser', 'GetTask', 'CreateTask')) {
+        if (-not $TaskOperations.ContainsKey($name) -or $TaskOperations[$name] -isnot [scriptblock]) {
+            throw "TaskOperations must provide scriptblock '$name'."
+        }
+    }
+    if ([string] $Config.AutoShutdownTime -notmatch '^(?:[01]\d|2[0-3])[0-5]\d$') {
+        throw 'AutoShutdownTime must use 24-hour HHmm format.'
+    }
+    $user = [string] (& $TaskOperations.GetCurrentUser)
+    if ([string]::IsNullOrWhiteSpace($user) -or $user -match '(?i)(^|\\)SYSTEM$') {
+        throw 'The emergency-stop task requires a non-SYSTEM current user identity.'
+    }
+    $stopScript = Join-Path $PSScriptRoot 'Stop-WorkshopEnvironment.ps1'
+    # Task Scheduler hands this string to the process command line verbatim, and Windows
+    # command-line parsing only strips DOUBLE quotes. Single quotes would be passed through
+    # literally and pwsh.exe would reject the script path (exit 64).
+    $arguments = "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$($stopScript.Replace('"', '""'))`" " +
+        "-SubscriptionId $SubscriptionId -TenantId $TenantId -Confirm:`$false"
+    $expected = [pscustomobject][ordered]@{
+        Name = 'McpSqlWorkshop-EmergencyStop'
+        UserId = $user
+        LogonType = 'Interactive'
+        RunLevel = 'Limited'
+        Execute = Get-WorkshopPwshPath -TaskOperations $TaskOperations
+        Arguments = $arguments
+        WorkingDirectory = $PSScriptRoot
+        DailyTime = [string] $Config.AutoShutdownTime
+        DaysInterval = 1
+        StartWhenAvailable = $true
+        Enabled = $true
+        Description = 'Secret-free local safety stop for the MCP SQL workshop.'
+    }
+    $comparableExpected = [pscustomobject][ordered]@{
+        Name = $expected.Name; UserId = $expected.UserId; LogonType = $expected.LogonType
+        RunLevel = $expected.RunLevel; Execute = $expected.Execute; Arguments = $expected.Arguments
+        WorkingDirectory = $expected.WorkingDirectory; DailyTime = $expected.DailyTime
+        DaysInterval = $expected.DaysInterval; StartWhenAvailable = $expected.StartWhenAvailable
+        Enabled = $expected.Enabled
+    }
+    $existing = & $TaskOperations.GetTask $expected.Name
+    $existingComparable = if ($null -eq $existing) {
+        $null
+    }
+    else {
+        ConvertTo-WorkshopEmergencyStopComparableTask -Task $existing
+    }
+    if ($null -ne $existingComparable -and
+        -not (Test-WorkshopNetworkResourceMatch -Expected $comparableExpected -Actual $existingComparable)) {
+        throw "Local emergency-stop task '$($expected.Name)' conflicts with the approved secret-free current-user shape."
+    }
+    if ($null -ne $existingComparable) {
+        return [pscustomobject][ordered]@{ Status = 'matched-and-verified'; Task = $comparableExpected }
+    }
+    $null = & $TaskOperations.CreateTask $expected
+    $readBack = & $TaskOperations.GetTask $expected.Name
+    $readBackComparable = if ($null -eq $readBack) {
+        $null
+    }
+    else {
+        ConvertTo-WorkshopEmergencyStopComparableTask -Task $readBack
+    }
+    if ($null -eq $readBackComparable -or
+        -not (Test-WorkshopNetworkResourceMatch -Expected $comparableExpected -Actual $readBackComparable)) {
+        throw "Local emergency-stop task '$($expected.Name)' was not positively verified after installation."
+    }
+    [pscustomobject][ordered]@{ Status = 'installed-and-verified'; Task = $comparableExpected }
+}
+
 function Set-WorkshopAutoShutdown {
     [CmdletBinding(SupportsShouldProcess)]
     param(
@@ -2895,10 +3106,44 @@ function Set-WorkshopAutoShutdown {
         [hashtable] $Operations
     )
 
+    $capability = Get-WorkshopAutoShutdownCapability -Config $Config
+    if ($null -eq $Operations) { $Operations = Get-DefaultWorkshopServiceOperationSet }
+    if (-not $capability.ScheduleSupported -and $capability.FallbackDocumented) {
+        foreach ($name in @('GetSubscriptionId', 'GetTenantId', 'EnsureEmergencyStop')) {
+            if (-not $Operations.ContainsKey($name) -or $Operations[$name] -isnot [scriptblock]) {
+                throw "Operations must provide scriptblock '$name'."
+            }
+        }
+        $subscriptionId = [string] (& $Operations.GetSubscriptionId)
+        $tenantId = [string] (& $Operations.GetTenantId)
+        if (-not $PSCmdlet.ShouldProcess('McpSqlWorkshop-EmergencyStop', 'Install or exactly match the local emergency-stop task')) {
+            return [pscustomobject][ordered]@{ Completed = $false; Checkpoint = @('ShouldProcess declined') }
+        }
+        $fallbackResult = & $Operations.EnsureEmergencyStop $Config $subscriptionId $tenantId
+        $fallbackStatus = if ($null -ne $fallbackResult -and
+            $fallbackResult.PSObject.Properties.Name -contains 'Status') {
+            [string] $fallbackResult.Status
+        }
+        if ($fallbackStatus -notin @('installed-and-verified', 'matched-and-verified')) {
+            throw 'The local emergency-stop task was not installed or exactly matched and positively verified.'
+        }
+        return [pscustomobject][ordered]@{
+            Completed = $true
+            ScheduleCreationSkipped = $true
+            FallbackRequired = $true
+            Fallback = 'LocalEmergencyStop'
+            FallbackStatus = $fallbackStatus
+            Reason = "DevTestLab cross-region scheduling from '$($capability.ScheduleLocation)' to '$($capability.VmLocation)' is unsupported."
+            Checkpoint = @('AutoShutdown:unsupported-cross-region', "LocalEmergencyStop:$fallbackStatus")
+            Schedules = @()
+        }
+    }
+    if (-not $capability.ScheduleSupported) {
+        throw "DevTestLab cross-region scheduling is unsupported and this location pair is not an approved fallback."
+    }
     if (-not $PSCmdlet.ShouldProcess($Config.ResourceGroupName, 'Create or exactly match both VM auto-shutdown schedules')) {
         return [pscustomobject][ordered]@{ Completed = $false; Checkpoint = @('ShouldProcess declined') }
     }
-    if ($null -eq $Operations) { $Operations = Get-DefaultWorkshopServiceOperationSet }
     foreach ($name in @('GetSubscriptionId', 'GetSchedule', 'CreateSchedule')) {
         if (-not $Operations.ContainsKey($name) -or $Operations[$name] -isnot [scriptblock]) {
             throw "Operations must provide scriptblock '$name'."
@@ -3066,10 +3311,34 @@ function Get-DefaultWorkshopRemoveOperationSet {
                 -ReadOperation $readOperation -WaitOperation { [System.Threading.Thread]::Sleep(3000) }
         }
         GetTaggedResources = {
-            param($Environment, $Workload)
-            @(Get-AzResource -TagName environment -TagValue $Environment -ErrorAction Stop | Where-Object {
-                $null -ne $_.Tags -and $_.Tags['workload'] -eq $Workload
-            })
+            param($Environment, $Workload, $ManagedBy, $SubscriptionId, $ResourceGroupName)
+            $null = $SubscriptionId, $ResourceGroupName
+            try {
+                # This runs after the group is already NotFound, so it must be scoped to the
+                # whole subscription. Scoping it to the deleted group could only ever return
+                # nothing, which would make the absence checkpoint unfalsifiable.
+                @(Get-AzResource -TagName 'managedBy' -TagValue $ManagedBy -ErrorAction Stop | Where-Object {
+                    $null -ne $_.Tags -and
+                    $_.Tags['environment'] -ceq $Environment -and
+                    $_.Tags['workload'] -ceq $Workload -and
+                    $_.Tags['managedBy'] -ceq $ManagedBy
+                })
+            }
+            catch {
+                if (Test-WorkshopAzureNotFound -ErrorRecord $_) { return @() }
+                throw
+            }
+        }
+        RemoveEmergencyStopTask = {
+            # The fallback task lives on the facilitator workstation, so deleting the
+            # resource group alone would leave a daily task pointed at nothing.
+            $name = 'McpSqlWorkshop-EmergencyStop'
+            if ($null -eq (Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue)) { return 'absent' }
+            Unregister-ScheduledTask -TaskName $name -Confirm:$false -ErrorAction Stop
+            if ($null -ne (Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue)) {
+                throw "Local emergency-stop task '$name' still exists after removal."
+            }
+            'removed'
         }
     }
 }
@@ -3090,7 +3359,8 @@ function Remove-WorkshopEnvironment {
         throw "Removal confirmation phrase must be exactly 'DELETE rg-mcp-sql-workshop'."
     }
     if ($null -eq $Operations) { $Operations = Get-DefaultWorkshopRemoveOperationSet }
-    foreach ($name in @('SetContext', 'GetResourceGroup', 'RemoveResourceGroup', 'WaitForRemoval', 'GetTaggedResources')) {
+    foreach ($name in @('SetContext', 'GetResourceGroup', 'RemoveResourceGroup', 'WaitForRemoval',
+        'GetTaggedResources', 'RemoveEmergencyStopTask')) {
         if (-not $Operations.ContainsKey($name) -or $Operations[$name] -isnot [scriptblock]) {
             throw "Operations must provide scriptblock '$name'."
         }
@@ -3104,8 +3374,10 @@ function Remove-WorkshopEnvironment {
     $expectedId = "/subscriptions/$SubscriptionId/resourceGroups/$($Config.ResourceGroupName)"
     if ($resourceGroup.ResourceGroupName -cne $Config.ResourceGroupName -or
         (ConvertTo-WorkshopComparableValue $resourceGroup.ResourceId) -cne (ConvertTo-WorkshopComparableValue $expectedId) -or
-        $null -eq $resourceGroup.Tags -or $resourceGroup.Tags['environment'] -cne 'workshop' -or
-        $resourceGroup.Tags['workload'] -cne 'mcp-sql') {
+        $null -eq $resourceGroup.Tags -or
+        $resourceGroup.Tags['environment'] -cne [string] $Config.Tags.environment -or
+        $resourceGroup.Tags['workload'] -cne [string] $Config.Tags.workload -or
+        $resourceGroup.Tags['managedBy'] -cne [string] $Config.Tags.managedBy) {
         throw 'Target resource group name, subscription-qualified ID, or required workshop tags did not match.'
     }
     if (-not $PSCmdlet.ShouldProcess($expectedId, 'Permanently remove the workshop resource group')) {
@@ -3119,13 +3391,22 @@ function Remove-WorkshopEnvironment {
     if ($null -eq $postRead -or $postRead.Status -cne 'NotFound' -or $null -ne $postRead.ResourceGroup) {
         throw 'Resource group deletion was not verified by an explicit NotFound read.'
     }
-    $remaining = @(& $Operations.GetTaggedResources 'workshop' 'mcp-sql')
+    $remaining = @(& $Operations.GetTaggedResources $Config.Tags.environment $Config.Tags.workload `
+        $Config.Tags.managedBy `
+        $SubscriptionId $Config.ResourceGroupName)
     if ($remaining.Count -gt 0) {
         throw "Tagged workshop resource absence verification failed; $($remaining.Count) resource(s) remain."
     }
+    $emergencyStopState = [string] (& $Operations.RemoveEmergencyStopTask)
+    if ($emergencyStopState -cnotin @('absent', 'removed')) {
+        throw "Local emergency-stop task removal returned unexpected state '$emergencyStopState'."
+    }
     [pscustomobject][ordered]@{
         Completed = $true
-        Checkpoint = @('Resource group removal requested', 'Resource group NotFound verified', 'Tagged resource absence verified')
+        Checkpoint = @(
+            'Resource group removal requested', 'Resource group NotFound verified',
+            'Tagged resource absence verified', "Local emergency-stop task $emergencyStopState"
+        )
     }
 }
 
@@ -3273,6 +3554,23 @@ function Get-DefaultWorkshopBootstrapOperationSet {
     param()
 
     @{
+        GetSubscriptionId = {
+            $context = Get-AzContext -ErrorAction Stop
+            $subscriptionId = Get-WorkshopNestedIdentifier -InputObject $context -PropertyName 'Subscription'
+            if ([string]::IsNullOrWhiteSpace($subscriptionId)) {
+                throw 'The active Azure context did not return a subscription ID for bootstrap locking.'
+            }
+            $subscriptionId
+        }
+        AcquireDeploymentLock = {
+            param($SubscriptionId, $ResourceGroupName, $VmName)
+            Enter-WorkshopBootstrapLock -SubscriptionId $SubscriptionId `
+                -ResourceGroupName $ResourceGroupName -VmName $VmName
+        }
+        ReleaseDeploymentLock = {
+            param($Lease)
+            Exit-WorkshopBootstrapLock -Lease $Lease
+        }
         GetRecipientCertificate = {
             param($VmName, $ResourceGroupName)
             $command = @'
@@ -3327,7 +3625,7 @@ finally { Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue }
             }
         }
         StageBootstrapFiles = {
-            param($VmName, $ResourceGroupName, $ProtectedEnvelope, $BootstrapScript, $RepositoryCommit)
+            param($VmName, $ResourceGroupName, $ProtectedEnvelope, $BootstrapScript, $RepositoryCommit, $DeploymentId)
             $bootstrapEntryPoint = if ($BootstrapScript -ceq 'Initialize-AdminVm.ps1') {
                 'Invoke-AdminBootstrap.ps1'
             }
@@ -3338,6 +3636,7 @@ finally { Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue }
             $launcherTemplate = @'
 $ErrorActionPreference = 'Stop'
 $root = 'C:\McpSqlWorkshop'
+$deploymentRoot = Join-Path $root 'deployments\__DEPLOYMENT_ID__'
 Add-Type -AssemblyName System.IO.Compression
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 function Expand-WorkshopBootstrapArchive {
@@ -3345,10 +3644,10 @@ __ARCHIVE_EXPANSION_FUNCTION__
 }
 $archives = @(Get-ChildItem -LiteralPath (Get-Location) -Filter '*.zip' -File)
 if ($archives.Count -ne 1) { throw 'Exactly one immutable repository archive is required.' }
-$repo = Join-Path $root 'repo'
+$repo = Join-Path $deploymentRoot 'repo'
 $null = Expand-WorkshopBootstrapArchive -ArchivePath $archives[0].FullName -DestinationPath $repo `
     -RepositoryCommit '__REPOSITORY_COMMIT__' -ApprovedBootstrapEntryPoint '__BOOTSTRAP_ENTRY_POINT__'
-$payloadPath = Join-Path $root 'protected-bootstrap.cms'
+$payloadPath = Join-Path $deploymentRoot 'protected-bootstrap.cms'
 if (-not (Test-Path -LiteralPath $payloadPath -PathType Leaf)) {
     throw 'The staged protected bootstrap payload is unavailable.'
 }
@@ -3360,6 +3659,8 @@ if (-not (Test-Path -LiteralPath $payloadPath -PathType Leaf)) {
                 '__REPOSITORY_COMMIT__', $RepositoryCommit
             ).Replace(
                 '__BOOTSTRAP_ENTRY_POINT__', $bootstrapEntryPoint
+            ).Replace(
+                '__DEPLOYMENT_ID__', $DeploymentId
             )
             $launcherBytes = [Text.Encoding]::UTF8.GetBytes($launcher)
             $envelopeBytes = [Text.Encoding]::UTF8.GetBytes($ProtectedEnvelope)
@@ -3374,10 +3675,14 @@ if (-not (Test-Path -LiteralPath $payloadPath -PathType Leaf)) {
                 )
                 $stageScript = @"
 `$ErrorActionPreference = 'Stop'
-`$root = 'C:\McpSqlWorkshop'
-New-Item -ItemType Directory -Path `$root -Force | Out-Null
-`$launcherPath = Join-Path `$root 'bootstrap-launcher.ps1'
-`$payloadPath = Join-Path `$root 'protected-bootstrap.cms'
+`$deploymentRoot = 'C:\McpSqlWorkshop\deployments\$DeploymentId'
+New-Item -ItemType Directory -Path `$deploymentRoot -Force | Out-Null
+# Each retry stages a fresh repository copy, so drop the folders of earlier attempts.
+Get-ChildItem -LiteralPath 'C:\McpSqlWorkshop\deployments' -Directory -ErrorAction SilentlyContinue |
+    Where-Object { `$_.Name -cne '$DeploymentId' } |
+    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+`$launcherPath = Join-Path `$deploymentRoot 'bootstrap-launcher.ps1'
+`$payloadPath = Join-Path `$deploymentRoot 'protected-bootstrap.cms'
 [IO.File]::WriteAllBytes(`$launcherPath, [Convert]::FromBase64String('$launcherBase64'))
 [IO.File]::WriteAllBytes(`$payloadPath, [Convert]::FromBase64String('$envelopeBase64'))
 foreach (`$path in @(`$launcherPath, `$payloadPath)) {
@@ -3411,12 +3716,12 @@ if ((Get-FileHash -LiteralPath `$launcherPath -Algorithm SHA256).Hash -cne '$lau
             }
         }
         SetExtension = {
-            param($VmName, $ResourceGroupName, $Location, $ArchiveUri, $ProtectedEnvelope, $BootstrapScript, $RepositoryCommit)
+            param($VmName, $ResourceGroupName, $Location, $ArchiveUri, $ProtectedEnvelope, $BootstrapScript, $RepositoryCommit, $DeploymentId)
             $null = $ProtectedEnvelope, $RepositoryCommit
             $publicSettings = @{ timestamp = [DateTime]::UtcNow.ToString('yyyyMMddHHmmss') }
             $protectedSettings = @{
                 fileUris = @($ArchiveUri)
-                commandToExecute = 'powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File C:\McpSqlWorkshop\bootstrap-launcher.ps1'
+                commandToExecute = "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File C:\McpSqlWorkshop\deployments\$DeploymentId\bootstrap-launcher.ps1"
             }
             Set-AzVMExtension -ResourceGroupName $ResourceGroupName -VMName $VmName -Location $Location `
                 -Name "McpSqlWorkshop-$BootstrapScript" -Publisher 'Microsoft.Compute' `
@@ -3427,8 +3732,14 @@ if ((Get-FileHash -LiteralPath `$launcherPath -Algorithm SHA256).Hash -cne '$lau
         }
         GetExtension = {
             param($VmName, $ResourceGroupName, $BootstrapScript)
-            Get-AzVMExtension -ResourceGroupName $ResourceGroupName -VMName $VmName `
-                -Name "McpSqlWorkshop-$BootstrapScript" -Status -ErrorAction Stop
+            try {
+                Get-AzVMExtension -ResourceGroupName $ResourceGroupName -VMName $VmName `
+                    -Name "McpSqlWorkshop-$BootstrapScript" -Status -ErrorAction Stop
+            }
+            catch {
+                if (Test-WorkshopAzureNotFound -ErrorRecord $_) { return $null }
+                throw
+            }
         }
         ReadReadiness = {
             param($VmName, $ResourceGroupName, $Path)
@@ -3453,6 +3764,7 @@ function Assert-WorkshopBootstrapOperationSet {
     param([Parameter(Mandatory)][hashtable] $Operations, [switch] $Admin)
 
     $required = @(
+        'GetSubscriptionId', 'AcquireDeploymentLock', 'ReleaseDeploymentLock',
         'GetRecipientCertificate', 'ProtectPayload', 'StageBootstrapFiles',
         'SetExtension', 'GetExtension', 'ReadReadiness'
     )
@@ -3462,6 +3774,131 @@ function Assert-WorkshopBootstrapOperationSet {
             throw "Operations must provide scriptblock '$name'."
         }
     }
+}
+
+function Enter-WorkshopBootstrapLock {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string] $SubscriptionId,
+        [Parameter(Mandatory)][string] $ResourceGroupName,
+        [Parameter(Mandatory)][string] $VmName,
+        [ValidateRange(0, 60000)][int] $TimeoutMilliseconds = 15000
+    )
+
+    $identity = "$($SubscriptionId.ToLowerInvariant())|$($ResourceGroupName.ToLowerInvariant())|$($VmName.ToLowerInvariant())"
+    # The identity holds no secret; hashing only keeps the mutex name short and legal.
+    $bytes = [Text.UTF8Encoding]::new($false).GetBytes($identity)
+    $hash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes))
+    # Global\ with default security is deliberate: two facilitators signed in to different
+    # sessions on the same jump host must exclude each other, which Local\ or a
+    # current-user ACL would not do. The name is a hash of non-secret identifiers, so the
+    # worst local abuse is a denial of service bounded by TimeoutMilliseconds.
+    $mutex = $null
+    $acquired = $false
+    try {
+        $mutex = [Threading.Mutex]::new($false, "Global\McpSqlWorkshop-Bootstrap-$hash")
+        try { $acquired = $mutex.WaitOne($TimeoutMilliseconds) }
+        catch [Threading.AbandonedMutexException] { $acquired = $true }
+        if (-not $acquired) {
+            throw "Another local bootstrap attempt holds the deployment lock for VM '$VmName'."
+        }
+        [pscustomobject][ordered]@{
+            Mutex = $mutex
+            Acquired = $true
+            Name = "Global\McpSqlWorkshop-Bootstrap-$hash"
+        }
+    }
+    catch [UnauthorizedAccessException] {
+        # Another account already owns the name, which is contention, not a defect.
+        if ($null -ne $mutex) { $mutex.Dispose() }
+        throw "Another local bootstrap attempt holds the deployment lock for VM '$VmName'."
+    }
+    catch {
+        if ($null -ne $mutex) {
+            if ($acquired) {
+                try { $mutex.ReleaseMutex() } catch { Write-Verbose $_.Exception.Message }
+            }
+            $mutex.Dispose()
+        }
+        throw
+    }
+}
+
+function Exit-WorkshopBootstrapLock {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][psobject] $Lease)
+
+    if ($Lease.Acquired -and $null -ne $Lease.Mutex) {
+        try { $Lease.Mutex.ReleaseMutex() }
+        finally {
+            $Lease.Acquired = $false
+            $Lease.Mutex.Dispose()
+        }
+    }
+}
+
+function Get-WorkshopBootstrapExtensionState {
+    [CmdletBinding()]
+    param([AllowNull()][object] $Extension)
+
+    if ($null -eq $Extension) { return 'Absent' }
+    $known = @{
+        succeeded = 'Succeeded'; failed = 'Failed'; canceled = 'Canceled'
+        creating = 'Creating'; updating = 'Updating'; deleting = 'Deleting'; transitioning = 'Transitioning'
+    }
+    $signals = [System.Collections.Generic.List[string]]::new()
+    $invalid = $false
+    $pending = [System.Collections.Generic.Queue[object]]::new()
+    $pending.Enqueue($Extension)
+    $visited = 0
+    while ($pending.Count -gt 0 -and $visited -lt 16) {
+        $candidate = $pending.Dequeue()
+        $visited++
+        if ($null -eq $candidate -or $candidate -is [string] -or $candidate -is [ValueType]) {
+            $invalid = $true
+            continue
+        }
+        $candidateProperties = @($candidate.PSObject.Properties | ForEach-Object Name)
+        foreach ($wrapperName in @('Resource', 'Value')) {
+            if ($candidateProperties -contains $wrapperName) {
+                $wrapped = $candidate.$wrapperName
+                if ($null -eq $wrapped) { $invalid = $true } else { $pending.Enqueue($wrapped) }
+            }
+        }
+        if ($candidateProperties -contains 'ProvisioningState') {
+            $state = $candidate.ProvisioningState
+            if ($state -isnot [string] -or [string]::IsNullOrWhiteSpace($state) -or
+                -not $known.ContainsKey($state.ToLowerInvariant())) {
+                $invalid = $true
+            }
+            else { $signals.Add($known[$state.ToLowerInvariant()]) }
+        }
+        foreach ($statusContainer in @(
+            @{ Parent = $candidate; Name = 'Statuses' },
+            @{ Parent = if ($candidateProperties -contains 'InstanceView') { $candidate.InstanceView } else { $null }; Name = 'Statuses' }
+        )) {
+            $parent = $statusContainer.Parent
+            $parentProperties = if ($null -eq $parent) { @() } else { @($parent.PSObject.Properties | ForEach-Object Name) }
+            if ($null -eq $parent -or $parentProperties -notcontains $statusContainer.Name) { continue }
+            $statuses = @($parent.($statusContainer.Name))
+            if ($statuses.Count -eq 0) { $invalid = $true; continue }
+            foreach ($status in $statuses) {
+                $statusProperties = if ($null -eq $status) { @() } else { @($status.PSObject.Properties | ForEach-Object Name) }
+                if ($null -eq $status -or $statusProperties -notcontains 'Code' -or
+                    $status.Code -isnot [string] -or
+                    $status.Code -notmatch '(?i)^provisioningstate/([a-z]+)(?:/.*)?$' -or
+                    -not $known.ContainsKey($Matches[1].ToLowerInvariant())) {
+                    $invalid = $true
+                }
+                else { $signals.Add($known[$Matches[1].ToLowerInvariant()]) }
+            }
+        }
+    }
+    $distinct = @($signals | Sort-Object -Unique)
+    # A truncated traversal may have dropped a contradicting signal, so fail closed.
+    if ($pending.Count -gt 0) { $invalid = $true }
+    if ($invalid -or $distinct.Count -ne 1) { return 'Unknown' }
+    $distinct[0]
 }
 
 function Invoke-WorkshopBootstrapExtension {
@@ -3483,28 +3920,74 @@ function Invoke-WorkshopBootstrapExtension {
     else {
         'C:\McpSqlWorkshop\evidence\admin-vm-readiness.json'
     }
-    $recipientCertificate = & $Operations.GetRecipientCertificate $vm.Name $Config.ResourceGroupName
-    if ([string]::IsNullOrWhiteSpace([string]$recipientCertificate)) {
-        throw "$Role bootstrap payload recipient certificate was not returned."
-    }
-    $protectedEnvelope = & $Operations.ProtectPayload $recipientCertificate $ProtectedPayload
-    if ([string]::IsNullOrWhiteSpace([string]$protectedEnvelope)) {
-        throw "$Role bootstrap payload encryption did not return a CMS envelope."
-    }
-    $null = & $Operations.StageBootstrapFiles $vm.Name $Config.ResourceGroupName `
-        $protectedEnvelope $scriptName $ProtectedPayload.RepositoryCommit
-    $null = & $Operations.SetExtension $vm.Name $Config.ResourceGroupName $Config.Location `
-        $ArchiveUri $protectedEnvelope $scriptName $ProtectedPayload.RepositoryCommit
+    $lease = $null
     $protectedEnvelope = $null
-    $extension = & $Operations.GetExtension $vm.Name $Config.ResourceGroupName $scriptName
-    $status = [string] @($extension.Statuses | Select-Object -Last 1).Code
-    if ($status -notmatch '/succeeded$') {
-        throw "$Role bootstrap extension did not report a succeeded provisioning state."
+    $primaryError = $null
+    $releaseError = $null
+    try {
+        $lease = & $Operations.AcquireDeploymentLock ([string] (& $Operations.GetSubscriptionId)) `
+            $Config.ResourceGroupName $vm.Name
+        $lockedExtension = & $Operations.GetExtension $vm.Name $Config.ResourceGroupName $scriptName
+        $lockedState = Get-WorkshopBootstrapExtensionState -Extension $lockedExtension
+        if ($lockedState -eq 'Unknown') {
+            throw "$Role bootstrap extension state is Unknown and cannot be safely reconciled."
+        }
+        if ($lockedState -in @('Creating', 'Updating', 'Deleting', 'Transitioning')) {
+            throw "$Role bootstrap extension has an active operation in state '$lockedState'."
+        }
+        $recipientCertificate = & $Operations.GetRecipientCertificate $vm.Name $Config.ResourceGroupName
+        if ([string]::IsNullOrWhiteSpace([string]$recipientCertificate)) {
+            throw "$Role bootstrap payload recipient certificate was not returned."
+        }
+        $protectedEnvelope = & $Operations.ProtectPayload $recipientCertificate $ProtectedPayload
+        if ([string]::IsNullOrWhiteSpace([string]$protectedEnvelope)) {
+            throw "$Role bootstrap payload encryption did not return a CMS envelope."
+        }
+        $null = & $Operations.StageBootstrapFiles $vm.Name $Config.ResourceGroupName `
+            $protectedEnvelope $scriptName $ProtectedPayload.RepositoryCommit $ProtectedPayload.DeploymentId
+        $null = & $Operations.SetExtension $vm.Name $Config.ResourceGroupName $Config.Location `
+            $ArchiveUri $protectedEnvelope $scriptName $ProtectedPayload.RepositoryCommit $ProtectedPayload.DeploymentId
+        $extension = & $Operations.GetExtension $vm.Name $Config.ResourceGroupName $scriptName
+        $status = Get-WorkshopBootstrapExtensionState -Extension $extension
+        if ($status -cne 'Succeeded') {
+            throw "$Role bootstrap extension did not report a succeeded provisioning state."
+        }
+        $readiness = & $Operations.ReadReadiness $vm.Name $Config.ResourceGroupName $readinessPath
+        $readinessDeploymentProperty = if ($null -eq $readiness) {
+            $null
+        }
+        else {
+            $readiness.PSObject.Properties['DeploymentId']
+        }
+        $readinessDeploymentId = if ($null -eq $readinessDeploymentProperty) {
+            $null
+        }
+        else {
+            $readinessDeploymentProperty.Value
+        }
+        if ($null -eq $readiness -or $readiness.Completed -isnot [bool] -or -not $readiness.Completed -or
+            [string] $readinessDeploymentId -cne [string] $ProtectedPayload.DeploymentId) {
+            throw "$Role bootstrap readiness did not report Completed=true for the expected deployment."
+        }
     }
-    $readiness = & $Operations.ReadReadiness $vm.Name $Config.ResourceGroupName $readinessPath
-    if ($null -eq $readiness -or $readiness.Completed -isnot [bool] -or -not $readiness.Completed) {
-        throw "$Role bootstrap readiness did not report Completed=true."
+    catch { $primaryError = $_ }
+    finally {
+        $protectedEnvelope = $null
+        if ($null -ne $lease) {
+            try { $null = & $Operations.ReleaseDeploymentLock $lease }
+            catch { $releaseError = $_ }
+        }
     }
+    if ($null -ne $releaseError) {
+        if ($null -ne $primaryError) {
+            throw [InvalidOperationException]::new(
+                "$($primaryError.Exception.Message) Local bootstrap lock release also failed: $($releaseError.Exception.Message)",
+                $primaryError.Exception
+            )
+        }
+        throw $releaseError
+    }
+    if ($null -ne $primaryError) { throw $primaryError }
     [pscustomobject][ordered]@{
         Completed = $true
         Checkpoint = @("$Role bootstrap extension succeeded", "$Role readiness positively read")
@@ -3521,7 +4004,12 @@ function Initialize-WorkshopSqlVm {
         [Parameter(Mandatory)][Security.SecureString] $McpReaderPassword,
         [Parameter(Mandatory)][ValidatePattern('^https://github\.com/[^/]+/[^/]+(?:\.git)?$')][string] $RepositoryUrl,
         [Parameter(Mandatory)][ValidatePattern('^[0-9a-f]{40}$')][string] $RepositoryCommit,
-        [Parameter(Mandatory)][ValidatePattern('^[0-9a-fA-F-]{36}$')][string] $DeploymentId,
+        [Parameter(Mandatory)][ValidateScript({
+            # Must match the canonical form the guest bootstrap validates, or the mismatch
+            # would only surface inside the VM.
+            [guid] $parsed = [guid]::Empty
+            [guid]::TryParseExact($_, 'D', [ref] $parsed) -and $parsed.ToString('D') -ceq $_
+        })][string] $DeploymentId,
         [hashtable] $Operations
     )
 
@@ -3554,7 +4042,7 @@ function Initialize-WorkshopSqlVm {
             AdministratorSecret = $administratorSecret
             DataDiskGiB = [int] $Config.SqlVm.DataDiskGiB
             LogDiskGiB = [int] $Config.SqlVm.LogDiskGiB
-            RepositoryRoot = 'C:\McpSqlWorkshop\repo'
+            RepositoryRoot = "C:\McpSqlWorkshop\deployments\$DeploymentId\repo"
             RepositoryCommit = $RepositoryCommit
             AdventureWorksBackupUri = [string] $Config.AdventureWorksBackup.Uri
             AdventureWorksBackupSha256 = [string] $Config.AdventureWorksBackup.Sha256
@@ -3584,7 +4072,12 @@ function Initialize-WorkshopAdminVm {
         [Parameter(Mandatory)][Security.SecureString] $McpReaderPassword,
         [Parameter(Mandatory)][ValidatePattern('^https://github\.com/[^/]+/[^/]+(?:\.git)?$')][string] $RepositoryUrl,
         [Parameter(Mandatory)][ValidatePattern('^[0-9a-f]{40}$')][string] $RepositoryCommit,
-        [Parameter(Mandatory)][ValidatePattern('^[0-9a-fA-F-]{36}$')][string] $DeploymentId,
+        [Parameter(Mandatory)][ValidateScript({
+            # Must match the canonical form the guest bootstrap validates, or the mismatch
+            # would only surface inside the VM.
+            [guid] $parsed = [guid]::Empty
+            [guid]::TryParseExact($_, 'D', [ref] $parsed) -and $parsed.ToString('D') -ceq $_
+        })][string] $DeploymentId,
         [Parameter(Mandatory)][ValidateNotNullOrEmpty()][string] $InteractiveUserName,
         [Parameter(Mandatory)][bool] $WindowsClientLicenseAttested,
         [Parameter(Mandatory)][psobject] $SqlReadiness,

@@ -2431,7 +2431,7 @@ Describe 'Task 12 workload orchestration' {
 Describe 'Task 3 worker cleanup lifecycle' {
     Context 'private worker lifecycle helpers' {
         BeforeAll {
-            function New-FakeDisposable {
+            function NewFakeDisposable {
                 param([Parameter(Mandatory)][object] $State, [Parameter(Mandatory)][string] $Counter)
 
                 $resource = [pscustomobject]@{ State = $State; Counter = $Counter }
@@ -2444,7 +2444,7 @@ Describe 'Task 3 worker cleanup lifecycle' {
                 return $resource
             }
 
-            function New-FakeWorkerLifecycle {
+            function NewFakeWorkerLifecycle {
                 param(
                     [bool] $StopCompletes = $true,
                     [bool] $InvocationCompletesWithStop = $true,
@@ -2466,6 +2466,7 @@ Describe 'Task 3 worker cleanup lifecycle' {
                 $waitHandle = [pscustomobject]@{ State = $state; AsyncResult = $asyncResult }
                 $waitHandle | Add-Member ScriptMethod WaitOne {
                     param([TimeSpan] $Timeout)
+                    $null = $Timeout
                     $this.State.WaitOne++
                     if ($this.State.StopCompletes -and $this.State.InvocationCompletesWithStop) {
                         $this.AsyncResult.IsCompleted = $true
@@ -2481,6 +2482,7 @@ Describe 'Task 3 worker cleanup lifecycle' {
                 }
                 $powerShell | Add-Member ScriptMethod BeginStop {
                     param($Callback, $State)
+                    $null = $Callback, $State
                     $this.State.BeginStop++
                     if ($this.State.BeginStopThrows) {
                         $this.AsyncResult.IsCompleted = $true
@@ -2490,11 +2492,13 @@ Describe 'Task 3 worker cleanup lifecycle' {
                 }
                 $powerShell | Add-Member ScriptMethod EndStop {
                     param($StopResult)
+                    $null = $StopResult
                     $this.State.EndStop++
                     if ($this.State.EndStopThrows) { throw 'EndStop failed.' }
                 }
                 $powerShell | Add-Member ScriptMethod EndInvoke {
                     param($Result)
+                    $null = $Result
                     $this.State.EndInvoke++
                 }
                 $powerShell | Add-Member ScriptMethod Dispose {
@@ -2504,9 +2508,9 @@ Describe 'Task 3 worker cleanup lifecycle' {
                 return [pscustomobject]@{
                     State = $state
                     PowerShell = $powerShell
-                    Runspace = New-FakeDisposable $state 'RunspaceDispose'
+                    Runspace = NewFakeDisposable $state 'RunspaceDispose'
                     AsyncResult = $asyncResult
-                    ReadySignal = New-FakeDisposable $state 'ReadySignalDispose'
+                    ReadySignal = NewFakeDisposable $state 'ReadySignalDispose'
                 }
             }
         }
@@ -2520,7 +2524,7 @@ Describe 'Task 3 worker cleanup lifecycle' {
         }
 
         It 'ends a completed cancellation and disposes every safe resource exactly once' {
-            $fake = New-FakeWorkerLifecycle
+            $fake = NewFakeWorkerLifecycle
             $module = Get-Module Workshop.Workload
             $handle = & $module {
                 param($PowerShell, $Runspace, $AsyncResult, $ReadySignal)
@@ -2541,7 +2545,7 @@ Describe 'Task 3 worker cleanup lifecycle' {
         }
 
         It 'returns within two seconds and retains ownership without synchronous cleanup when cancellation times out' {
-            $fake = New-FakeWorkerLifecycle -StopCompletes $false -CompleteInvocationOnTimeout $true
+            $fake = NewFakeWorkerLifecycle -StopCompletes $false -CompleteInvocationOnTimeout $true
             $module = Get-Module Workshop.Workload
             $handle = & $module {
                 param($PowerShell, $Runspace, $AsyncResult, $ReadySignal)
@@ -2565,14 +2569,14 @@ Describe 'Task 3 worker cleanup lifecycle' {
         }
 
         It 'reaps a retained timeout worker only after its invocation later completes' {
-            $fake = New-FakeWorkerLifecycle -StopCompletes $false
+            $fake = NewFakeWorkerLifecycle -StopCompletes $false
             $module = Get-Module Workshop.Workload
             $handle = & $module {
                 param($PowerShell, $Runspace, $AsyncResult, $ReadySignal)
                 ConvertTo-WorkshopWorkerHandle -PowerShell $PowerShell -Runspace $Runspace `
                     -AsyncResult $AsyncResult -ReadySignal $ReadySignal
             } $fake.PowerShell $fake.Runspace $fake.AsyncResult $fake.ReadySignal
-            try { $handle.StopWithin(1) } catch { }
+            try { $handle.StopWithin(1) } catch { Write-Verbose $_.Exception.Message }
 
             $fake.State.StopCompletes = $true
             $fake.AsyncResult.IsCompleted = $true
@@ -2587,7 +2591,7 @@ Describe 'Task 3 worker cleanup lifecycle' {
         }
 
         It 'defers EndStop when the stop signal precedes invocation completion' {
-            $fake = New-FakeWorkerLifecycle -StopCompletes $true -InvocationCompletesWithStop $false
+            $fake = NewFakeWorkerLifecycle -StopCompletes $true -InvocationCompletesWithStop $false
             $module = Get-Module Workshop.Workload
             $handle = & $module {
                 param($PowerShell, $Runspace, $AsyncResult, $ReadySignal)
@@ -2609,7 +2613,7 @@ Describe 'Task 3 worker cleanup lifecycle' {
             @{ BeginStopThrows = $true; EndStopThrows = $false; Expected = 'BeginStop failed.' }
             @{ BeginStopThrows = $false; EndStopThrows = $true; Expected = 'EndStop failed.' }
         ) {
-            $fake = New-FakeWorkerLifecycle -BeginStopThrows $BeginStopThrows -EndStopThrows $EndStopThrows
+            $fake = NewFakeWorkerLifecycle -BeginStopThrows $BeginStopThrows -EndStopThrows $EndStopThrows
             $module = Get-Module Workshop.Workload
             $handle = & $module {
                 param($PowerShell, $Runspace, $AsyncResult, $ReadySignal)
@@ -2627,7 +2631,7 @@ Describe 'Task 3 worker cleanup lifecycle' {
         }
 
         It 'preserves the setup failure when bounded cleanup also fails' {
-            $fake = New-FakeWorkerLifecycle -PowerShellDisposeThrows $true
+            $fake = NewFakeWorkerLifecycle -PowerShellDisposeThrows $true
             $setupError = try { throw [InvalidOperationException]::new('original setup failure') } catch { $_ }
             $module = Get-Module Workshop.Workload
 
@@ -2649,7 +2653,7 @@ Describe 'Task 3 worker cleanup lifecycle' {
         }
 
         It 'retains a completed worker when one disposal fails and retries only that resource' {
-            $fake = New-FakeWorkerLifecycle -PowerShellDisposeThrows $true
+            $fake = NewFakeWorkerLifecycle -PowerShellDisposeThrows $true
             $module = Get-Module Workshop.Workload
             $handle = & $module {
                 param($PowerShell, $Runspace, $AsyncResult, $ReadySignal)
@@ -2689,7 +2693,7 @@ Describe 'Task 3 worker cleanup lifecycle' {
         }
 
         It 'retains and reaps partial setup cleanup before BeginInvoke' {
-            $fake = New-FakeWorkerLifecycle -PowerShellDisposeThrows $true
+            $fake = NewFakeWorkerLifecycle -PowerShellDisposeThrows $true
             $module = Get-Module Workshop.Workload
             & $module {
                 $script:WorkerOrphans.Clear()
@@ -2705,7 +2709,7 @@ Describe 'Task 3 worker cleanup lifecycle' {
                         -CapacityReserved $true -TimeoutMilliseconds 100
                 } $fake.PowerShell $fake.Runspace $fake.ReadySignal $setupError
             }
-            catch { }
+            catch { Write-Verbose $_.Exception.Message }
             $fake.State.PowerShellDisposeThrows = $false
 
             & $module { Assert-WorkshopWorkerCapacity }

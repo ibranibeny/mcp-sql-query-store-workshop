@@ -191,6 +191,120 @@ function Get-WorkshopAccessibleRsaPrivateKey {
     }
 }
 
+function Read-WorkshopBootstrapReadiness {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string] $Path,
+        [Parameter(Mandatory)][ValidateScript({
+            $parsed = [guid]::Empty
+            [guid]::TryParseExact($_, 'D', [ref] $parsed) -and $parsed.ToString('D') -ceq $_
+        })][string] $ExpectedDeploymentId
+    )
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw 'SQL bootstrap administrator task completed without readiness evidence.'
+    }
+    try {
+        $readiness = Get-Content -LiteralPath $Path -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    }
+    catch {
+        throw [System.IO.InvalidDataException]::new('SQL bootstrap readiness evidence is malformed.', $_.Exception)
+    }
+    $deploymentProperties = @($readiness.PSObject.Properties | Where-Object {
+        [string]::Equals($_.Name, 'DeploymentId', [StringComparison]::OrdinalIgnoreCase)
+    })
+    if ($deploymentProperties.Count -ne 1 -or
+        [string] $deploymentProperties[0].Value -cne $ExpectedDeploymentId) {
+        throw 'SQL bootstrap readiness evidence does not match the expected deployment identity.'
+    }
+    $completedProperty = $readiness.PSObject.Properties['Completed']
+    if ($null -eq $completedProperty -or $completedProperty.Value -isnot [bool] -or
+        -not $completedProperty.Value) {
+        throw 'SQL bootstrap readiness evidence did not report Boolean Completed=true.'
+    }
+    $readiness
+}
+
+function Test-WorkshopScheduledTaskNotFound {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][System.Management.Automation.ErrorRecord] $ErrorRecord)
+
+    # Schedule.Service GetTask reports HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND), which the
+    # method-invocation wrapper can nest one or more levels deep.
+    $exception = $ErrorRecord.Exception
+    for ($depth = 0; $null -ne $exception -and $depth -lt 8; $depth++) {
+        if ($exception.HResult -eq -2147024894) { return $true }
+        $exception = $exception.InnerException
+    }
+    return $false
+}
+
+function Stop-WorkshopScheduledTaskForCleanup {
+    [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'Low')]
+    param([Parameter(Mandatory)][object] $Task)
+
+    if ([int] $Task.State -notin @(2, 4)) { return }
+    if (-not $PSCmdlet.ShouldProcess('Temporary bootstrap task', 'Stop')) {
+        throw 'Stopping the temporary bootstrap task was declined, so cleanup cannot be proven.'
+    }
+    $Task.Stop(0)
+}
+
+function Remove-WorkshopScheduledTaskWithProof {
+    [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'Low')]
+    param(
+        [Parameter(Mandatory)][object] $TaskFolder,
+        [Parameter(Mandatory)][string] $TaskName
+    )
+
+    if (-not $PSCmdlet.ShouldProcess($TaskName, 'Delete the temporary bootstrap task')) {
+        throw "Deleting temporary bootstrap task '$TaskName' was declined, so cleanup cannot be proven."
+    }
+    try {
+        $TaskFolder.DeleteTask($TaskName, 0)
+    }
+    catch {
+        # Registration can fail before the task exists; absence is already the goal.
+        if (Test-WorkshopScheduledTaskNotFound -ErrorRecord $_) { return }
+        throw
+    }
+    $survivor = $null
+    try {
+        $survivor = $TaskFolder.GetTask($TaskName)
+    }
+    catch {
+        if (-not (Test-WorkshopScheduledTaskNotFound -ErrorRecord $_)) { throw }
+        return
+    }
+    if ($null -ne $survivor -and [Runtime.InteropServices.Marshal]::IsComObject($survivor)) {
+        $null = [Runtime.InteropServices.Marshal]::FinalReleaseComObject($survivor)
+    }
+    throw "Temporary bootstrap task '$TaskName' still exists after deletion."
+}
+
+function Get-WorkshopBootstrapFailure {
+    [CmdletBinding()]
+    param(
+        [AllowNull()][System.Management.Automation.ErrorRecord] $PrimaryError,
+        [AllowNull()][string[]] $CleanupErrors
+    )
+
+    $cleanup = @($CleanupErrors | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    if ($null -ne $PrimaryError) {
+        if ($cleanup.Count -eq 0) { return $PrimaryError }
+        return [InvalidOperationException]::new(
+            "SQL bootstrap failed: $($PrimaryError.Exception.Message) Cleanup also failed: $($cleanup -join '; ')",
+            $PrimaryError.Exception
+        )
+    }
+    if ($cleanup.Count -gt 0) {
+        return [InvalidOperationException]::new(
+            "SQL bootstrap task body succeeded, but cleanup could not be proven: $($cleanup -join '; ')"
+        )
+    }
+    return $null
+}
+
 function Invoke-WorkshopAdministratorBootstrap {
     [CmdletBinding()]
     param(
@@ -199,6 +313,10 @@ function Invoke-WorkshopAdministratorBootstrap {
         [Parameter(Mandatory)][string] $ScriptPath,
         [Parameter(Mandatory)][string] $PayloadPath,
         [Parameter(Mandatory)][string] $CompletionPath,
+        [Parameter(Mandatory)][ValidateScript({
+            $parsed = [guid]::Empty
+            [guid]::TryParseExact($_, 'D', [ref] $parsed) -and $parsed.ToString('D') -ceq $_
+        })][string] $ExpectedDeploymentId,
         [ValidateRange(1, 7200)][int] $MaximumAttempts = 7200,
         [scriptblock] $WaitOperation = { [Threading.Thread]::Sleep(3000) }
     )
@@ -212,7 +330,16 @@ function Invoke-WorkshopAdministratorBootstrap {
     $action = $null
     $passwordPointer = [IntPtr]::Zero
     $plainPassword = $null
+    $primaryError = $null
+    $readiness = $null
+    $cleanupErrors = [System.Collections.Generic.List[string]]::new()
     try {
+        if (Test-Path -LiteralPath $CompletionPath -PathType Leaf) {
+            Remove-Item -LiteralPath $CompletionPath -Force -ErrorAction Stop
+        }
+        if (Test-Path -LiteralPath $CompletionPath -PathType Leaf) {
+            throw 'Pre-existing SQL bootstrap readiness evidence could not be removed.'
+        }
         $taskService = New-Object -ComObject 'Schedule.Service'
         $taskService.Connect()
         $taskFolder = $taskService.GetFolder('\')
@@ -244,25 +371,25 @@ function Invoke-WorkshopAdministratorBootstrap {
         $passwordPointer = [IntPtr]::Zero
         $runningTask = $registeredTask.Run($null)
 
-        $completionObserved = $false
         for ($attempt = 1; $attempt -le $MaximumAttempts; $attempt++) {
-            if (Test-Path -LiteralPath $CompletionPath -PathType Leaf) {
-                $completionObserved = $true
-            }
             $state = [int] $runningTask.State
             if ($state -notin @(2, 4)) {
                 $lastResult = [int] $registeredTask.LastTaskResult
                 if ($lastResult -ne 0) {
                     throw "SQL bootstrap administrator task failed with result $lastResult."
                 }
-                if (-not $completionObserved) {
-                    throw 'SQL bootstrap administrator task completed without readiness evidence.'
-                }
-                return
+                $readiness = Read-WorkshopBootstrapReadiness -Path $CompletionPath `
+                    -ExpectedDeploymentId $ExpectedDeploymentId
+                break
             }
             if ($attempt -lt $MaximumAttempts) { & $WaitOperation $attempt }
         }
-        throw "SQL bootstrap administrator task did not finish within $MaximumAttempts checks."
+        if ($null -eq $readiness) {
+            throw "SQL bootstrap administrator task did not finish within $MaximumAttempts checks."
+        }
+    }
+    catch {
+        $primaryError = $_
     }
     finally {
         $plainPassword = $null
@@ -271,20 +398,26 @@ function Invoke-WorkshopAdministratorBootstrap {
         }
         if ($null -ne $registeredTask) {
             try {
-                if ([int] $registeredTask.State -eq 4) { $registeredTask.Stop(0) }
+                Stop-WorkshopScheduledTaskForCleanup -Task $registeredTask
             }
-            catch { Write-Verbose 'Temporary bootstrap task was already stopped.' }
+            catch { $cleanupErrors.Add("Temporary bootstrap task stop failed: $($_.Exception.Message)") }
         }
         if ($null -ne $taskFolder) {
-            try { $taskFolder.DeleteTask($taskName, 0) }
-            catch { Write-Warning 'Temporary bootstrap task cleanup could not be verified.' }
+            try {
+                Remove-WorkshopScheduledTaskWithProof -TaskFolder $taskFolder -TaskName $taskName
+            }
+            catch { $cleanupErrors.Add("Temporary bootstrap task cleanup could not be verified: $($_.Exception.Message)") }
         }
         foreach ($comObject in @($action, $runningTask, $registeredTask, $taskDefinition, $taskFolder, $taskService)) {
             if ($null -ne $comObject -and [Runtime.InteropServices.Marshal]::IsComObject($comObject)) {
-                $null = [Runtime.InteropServices.Marshal]::FinalReleaseComObject($comObject)
+                try { $null = [Runtime.InteropServices.Marshal]::FinalReleaseComObject($comObject) }
+                catch { $cleanupErrors.Add("Temporary bootstrap COM release failed: $($_.Exception.Message)") }
             }
         }
     }
+    $failure = Get-WorkshopBootstrapFailure -PrimaryError $primaryError -CleanupErrors $cleanupErrors.ToArray()
+    if ($null -ne $failure) { throw $failure }
+    $readiness
 }
 
 function Mount-WorkshopDisk {
@@ -387,14 +520,23 @@ $protectedPayload = Get-Content -LiteralPath $ProtectedPayloadPath -Raw
 $payload = Unprotect-CmsMessage -Content $protectedPayload | ConvertFrom-Json
 $protectedPayload = $null
 
+# Validate the deployment identity once, here, so both the elevation branch and the
+# already-elevated branch inherit the same canonical-form guarantee.
+$parsedDeploymentId = [guid]::Empty
+Assert-Condition (
+    [guid]::TryParseExact([string] $payload.DeploymentId, 'D', [ref] $parsedDeploymentId) -and
+    $parsedDeploymentId.ToString('D') -ceq [string] $payload.DeploymentId
+) 'Protected bootstrap payload does not carry a canonical lowercase deployment identifier.'
+
 $expectedAdministratorIdentity = "$env:COMPUTERNAME\$($payload.AdministratorUserName)"
 $currentIdentity = [Security.Principal.WindowsIdentity]::GetCurrent().Name
 if ($currentIdentity -ine $expectedAdministratorIdentity) {
     $administratorSecure = ConvertTo-SecureValue -Value ([string] $payload.AdministratorSecret)
     try {
-        Invoke-WorkshopAdministratorBootstrap -UserName $expectedAdministratorIdentity `
+        $null = Invoke-WorkshopAdministratorBootstrap -UserName $expectedAdministratorIdentity `
             -Password $administratorSecure -ScriptPath $PSCommandPath `
-            -PayloadPath $ProtectedPayloadPath -CompletionPath $readinessPath
+            -PayloadPath $ProtectedPayloadPath -CompletionPath $readinessPath `
+            -ExpectedDeploymentId ([string] $payload.DeploymentId)
     }
     finally {
         $payload.AdministratorSecret = $null

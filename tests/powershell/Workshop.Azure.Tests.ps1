@@ -418,6 +418,48 @@ Describe 'Workshop plan and card' {
 }
 
 Describe 'Non-destructive workshop preflight' {
+    It 'requires PowerShell 7.4 consistently' -ForEach @(
+        @{ Version = '7.3.99'; Expected = 'Failed' }
+        @{ Version = '7.4.0'; Expected = 'Passed' }
+    ) {
+        $ops = Get-PassingOperationSet
+        $candidate = [version] $Version
+        $ops.GetPowerShellVersion = { $candidate }.GetNewClosure()
+
+        $result = Invoke-PassingPreflight -Operations $ops
+        $check = $result.Checks | Where-Object Name -EQ 'PowerShell version'
+
+        $check.Status | Should -Be $Expected
+        $check.Detail | Should -Match '7\.4 or later'
+        $check.Remediation | Should -Match 'PowerShell 7\.4 or later|^$'
+    }
+
+    It 'records unsupported cross-region auto-shutdown with the documented local emergency-stop fallback' {
+        $result = Invoke-PassingPreflight
+        $capability = $result.AutoShutdownCapability
+        $check = $result.Checks | Where-Object Name -EQ 'DevTestLab auto-shutdown capability'
+
+        $result.Passed | Should -BeTrue
+        $check.Status | Should -Be 'Passed'
+        $capability.ScheduleSupported | Should -BeFalse
+        $capability.VmLocation | Should -BeExactly 'indonesiacentral'
+        $capability.ScheduleLocation | Should -BeExactly 'southeastasia'
+        $capability.RequiredFallback | Should -BeExactly 'LocalEmergencyStop'
+        $check.Detail | Should -Match 'unsupported.*local emergency stop|required.*local emergency stop'
+    }
+
+    It 'fails an unrecognized schedule-location mismatch instead of treating it as documented fallback' {
+        $config = Import-PowerShellDataFile $script:ConfigPath
+        $config.AutoShutdownLocation = 'eastus'
+
+        $result = Invoke-PassingPreflight -Config $config
+        $check = $result.Checks | Where-Object Name -EQ 'DevTestLab auto-shutdown capability'
+
+        $result.Passed | Should -BeFalse
+        $check.Status | Should -Be 'Failed'
+        $result.AutoShutdownCapability.RequiredFallback | Should -BeNullOrEmpty
+    }
+
     It 'requires the Private DNS module before deployment can pass preflight' {
         $result = Invoke-PassingPreflight
 
@@ -1919,12 +1961,21 @@ Describe 'SQL IaaS and auto-shutdown exact resources' {
         $script:IaasCreates = 0
         $script:Schedules = @{}
         $script:ScheduleCreates = [System.Collections.Generic.List[object]]::new()
+        $script:EmergencyStopCalls = 0
+        $script:EmergencyStopResult = [pscustomobject]@{ Status = 'installed-and-verified' }
         $script:ServiceOperations = @{
             GetSubscriptionId = { '11111111-1111-1111-1111-111111111111' }
+            GetTenantId = { '22222222-2222-2222-2222-222222222222' }
             GetSqlIaas = { $script:Iaas }
             CreateSqlIaas = { param($Spec) $script:IaasCreates++; $script:Iaas = $Spec }
             GetSchedule = { param($Name) if ($script:Schedules.ContainsKey($Name)) { $script:Schedules[$Name] } }
             CreateSchedule = { param($Spec) $script:ScheduleCreates.Add($Spec); $script:Schedules[$Spec.Name] = $Spec }
+            EnsureEmergencyStop = {
+                param($Config, $SubscriptionId, $TenantId)
+                $null = $Config, $SubscriptionId, $TenantId
+                $script:EmergencyStopCalls++
+                $script:EmergencyStopResult
+            }
         }
     }
 
@@ -1946,18 +1997,63 @@ Describe 'SQL IaaS and auto-shutdown exact resources' {
         $script:IaasCreates | Should -Be 0
     }
 
-    It 'creates exact daily 1900 shutdown schedules for both VMs and is idempotent' {
-        $first = Set-WorkshopAutoShutdown -Config $script:Config -TimeZoneId 'SE Asia Standard Time' `
+    It 'completes unsupported cross-region fallback only after emergency stop is installed and verified' {
+        $result = Set-WorkshopAutoShutdown -Config $script:Config -TimeZoneId 'SE Asia Standard Time' `
             -Operations $script:ServiceOperations
-        $second = Set-WorkshopAutoShutdown -Config $script:Config -TimeZoneId 'SE Asia Standard Time' `
+
+        $result.Completed | Should -BeTrue
+        $result.ScheduleCreationSkipped | Should -BeTrue
+        $result.FallbackRequired | Should -BeTrue
+        $result.Fallback | Should -BeExactly 'LocalEmergencyStop'
+        $result.FallbackStatus | Should -BeExactly 'installed-and-verified'
+        $result.Checkpoint | Should -Contain 'LocalEmergencyStop:installed-and-verified'
+        $result.Reason | Should -Match 'southeastasia.*indonesiacentral|cross-region'
+        $script:EmergencyStopCalls | Should -Be 1
+        $script:ScheduleCreates | Should -HaveCount 0
+    }
+
+    It 'reports a positively verified exact existing emergency stop as matched' {
+        $script:EmergencyStopResult = [pscustomobject]@{ Status = 'matched-and-verified' }
+
+        $result = Set-WorkshopAutoShutdown -Config $script:Config -Operations $script:ServiceOperations
+
+        $result.Completed | Should -BeTrue
+        $result.FallbackStatus | Should -BeExactly 'matched-and-verified'
+        $result.Checkpoint | Should -Contain 'LocalEmergencyStop:matched-and-verified'
+    }
+
+    It 'blocks deployment when emergency-stop verification is not positive' -ForEach @($null, 'required', 'verification-failed') {
+        $status = $_
+        $script:EmergencyStopResult = if ($null -eq $status) { $null } else { [pscustomobject]@{ Status = $status } }
+
+        { Set-WorkshopAutoShutdown -Config $script:Config -Operations $script:ServiceOperations } |
+            Should -Throw '*emergency-stop*verified*'
+    }
+
+    It 'rejects an unrecognized cross-region schedule configuration without Azure mutation' {
+        $config = Import-PowerShellDataFile $script:ConfigPath
+        $config.AutoShutdownLocation = 'eastus'
+
+        { Set-WorkshopAutoShutdown -Config $config -Operations $script:ServiceOperations } |
+            Should -Throw '*not an approved fallback*'
+        $script:ScheduleCreates | Should -HaveCount 0
+    }
+
+    It 'creates exact daily 1900 shutdown schedules when the schedule and VM locations match and is idempotent' {
+        $config = Import-PowerShellDataFile $script:ConfigPath
+        $config.AutoShutdownLocation = $config.Location
+        $first = Set-WorkshopAutoShutdown -Config $config -TimeZoneId 'SE Asia Standard Time' `
+            -Operations $script:ServiceOperations
+        $second = Set-WorkshopAutoShutdown -Config $config -TimeZoneId 'SE Asia Standard Time' `
             -Operations $script:ServiceOperations
 
         $first.Completed | Should -BeTrue
         $second.Completed | Should -BeTrue
         $script:ScheduleCreates | Should -HaveCount 2
+        $script:EmergencyStopCalls | Should -Be 0
         @($script:ScheduleCreates.Name) | Should -Be @('shutdown-computevm-vm-mcpsql-admin', 'shutdown-computevm-vm-mcpsql-sql')
         foreach ($schedule in $script:ScheduleCreates) {
-            $schedule.Location | Should -Be 'southeastasia'
+            $schedule.Location | Should -Be 'indonesiacentral'
             $schedule.Status | Should -Be 'Enabled'
             $schedule.TaskType | Should -Be 'ComputeVmShutdownTask'
             $schedule.DailyRecurrenceTime | Should -Be '1900'
@@ -1968,23 +2064,133 @@ Describe 'SQL IaaS and auto-shutdown exact resources' {
         }
     }
 
+    It 'creates or exactly matches a secret-free current-user emergency-stop task through fake task operations' {
+        InModuleScope Workshop.Azure -Parameters @{ Config = $script:Config } {
+            param($Config)
+            $script:task = $null
+            $script:createdSpecs = [System.Collections.Generic.List[object]]::new()
+            $taskOperations = @{
+                GetCurrentUser = { 'CONTOSO\facilitator' }
+                GetPwshPath = { 'C:\Program Files\PowerShell\7\pwsh.exe' }
+                GetTask = { param($Name) $null = $Name; $script:task }
+                CreateTask = { param($Spec) $script:createdSpecs.Add($Spec); $script:task = $Spec }
+            }
+
+            $first = Initialize-WorkshopEmergencyStopScheduledTask -Config $Config `
+                -SubscriptionId '11111111-1111-1111-1111-111111111111' `
+                -TenantId '22222222-2222-2222-2222-222222222222' -TaskOperations $taskOperations
+            $second = Initialize-WorkshopEmergencyStopScheduledTask -Config $Config `
+                -SubscriptionId '11111111-1111-1111-1111-111111111111' `
+                -TenantId '22222222-2222-2222-2222-222222222222' -TaskOperations $taskOperations
+
+            $first.Status | Should -BeExactly 'installed-and-verified'
+            $second.Status | Should -BeExactly 'matched-and-verified'
+            $script:createdSpecs | Should -HaveCount 1
+            $spec = $script:createdSpecs[0]
+            $spec.Name | Should -BeExactly 'McpSqlWorkshop-EmergencyStop'
+            $spec.UserId | Should -BeExactly 'CONTOSO\facilitator'
+            $spec.UserId | Should -Not -Be 'SYSTEM'
+            $spec.LogonType | Should -BeExactly 'Interactive'
+            $spec.DailyTime | Should -BeExactly '1900'
+            $spec.StartWhenAvailable | Should -BeTrue
+            $spec.Execute | Should -BeExactly 'C:\Program Files\PowerShell\7\pwsh.exe'
+            $spec.Arguments | Should -Match ([regex]::Escape('-SubscriptionId 11111111-1111-1111-1111-111111111111'))
+            $spec.Arguments | Should -Match ([regex]::Escape('-TenantId 22222222-2222-2222-2222-222222222222'))
+            $spec.Arguments | Should -Match ([regex]::Escape('-Confirm:$false'))
+            $spec.Arguments | Should -Match 'Stop-WorkshopEnvironment\.ps1'
+            $spec.Arguments | Should -Not -Match '(?i)password|secret|token'
+        }
+    }
+
+    It 'produces emergency-stop arguments that pwsh.exe actually accepts and binds' {
+        # Task Scheduler passes Arguments to the process command line verbatim, so the only
+        # trustworthy assertion is running the generated string. The real script path is
+        # swapped for a stub while leaving the generated quoting untouched.
+        $probeRoot = Join-Path $TestDrive 'mcpsql stop probe'
+        $null = New-Item -ItemType Directory -Path $probeRoot -Force
+        try {
+            $stub = Join-Path $probeRoot 'Stop-WorkshopEnvironment.ps1'
+            Set-Content -LiteralPath $stub -Encoding utf8 -Value @(
+                'param([string] $SubscriptionId, [string] $TenantId, [switch] $Confirm)'
+                '"BOUND|$SubscriptionId|$TenantId|$($Confirm.IsPresent)"'
+            )
+            $spec = InModuleScope Workshop.Azure -Parameters @{ Config = $script:Config } {
+                param($Config)
+                $probe = @{ Task = $null; Captured = $null }
+                $taskOperations = @{
+                    GetCurrentUser = { 'CONTOSO\facilitator' }
+                    GetPwshPath = { (Get-Process -Id $PID).Path }
+                    GetTask = { param($Name) $null = $Name; $probe.Task }.GetNewClosure()
+                    CreateTask = { param($Spec) $probe.Captured = $Spec; $probe.Task = $Spec }.GetNewClosure()
+                }
+                $null = Initialize-WorkshopEmergencyStopScheduledTask -Config $Config `
+                    -SubscriptionId '11111111-1111-1111-1111-111111111111' `
+                    -TenantId '22222222-2222-2222-2222-222222222222' -TaskOperations $taskOperations
+                $probe.Captured
+            }
+
+            $realScript = (Resolve-Path (Join-Path $PSScriptRoot '../../deploy/Stop-WorkshopEnvironment.ps1')).Path
+            $spec.Arguments | Should -Match ([regex]::Escape($realScript))
+            $arguments = $spec.Arguments.Replace($realScript, $stub)
+            $stdout = Join-Path $probeRoot 'out.txt'
+            $stderr = Join-Path $probeRoot 'err.txt'
+            $process = Start-Process -FilePath $spec.Execute -ArgumentList $arguments `
+                -NoNewWindow -Wait -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+            ((Get-Content -LiteralPath $stderr -Raw) + '').Trim() | Should -BeNullOrEmpty
+            $process.ExitCode | Should -Be 0
+            ((Get-Content -LiteralPath $stdout -Raw) + '').Trim() |
+                Should -BeExactly 'BOUND|11111111-1111-1111-1111-111111111111|22222222-2222-2222-2222-222222222222|False'
+        }
+        finally {
+            Remove-Item -LiteralPath $probeRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'rejects conflicting or unverifiable emergency-stop task state through fakes' -ForEach @(
+        @{ Case = 'conflict'; Expected = '*conflicts with the approved secret-free current-user shape*' },
+        @{ Case = 'missing-readback'; Expected = '*was not positively verified after installation*' }
+    ) {
+        InModuleScope Workshop.Azure -Parameters @{ Config = $script:Config; Case = $Case; Expected = $Expected } {
+            param($Config, $Case, $Expected)
+            $configuration = $Config
+            $script:task = if ($Case -eq 'conflict') {
+                [pscustomobject]@{ Name = 'McpSqlWorkshop-EmergencyStop'; UserId = 'SYSTEM' }
+            } else { $null }
+            $taskOperations = @{
+                GetCurrentUser = { 'CONTOSO\facilitator' }
+                GetPwshPath = { 'C:\Program Files\PowerShell\7\pwsh.exe' }
+                GetTask = { param($Name) $null = $Name; $script:task }
+                CreateTask = { param($Spec) $null = $Spec }
+            }
+
+            { Initialize-WorkshopEmergencyStopScheduledTask -Config $configuration `
+                    -SubscriptionId '11111111-1111-1111-1111-111111111111' `
+                    -TenantId '22222222-2222-2222-2222-222222222222' -TaskOperations $taskOperations } |
+                Should -Throw $Expected
+        }
+    }
+
     It 'refuses a conflicting shutdown schedule before creating the other schedule' {
+        $config = Import-PowerShellDataFile $script:ConfigPath
+        $config.AutoShutdownLocation = $config.Location
         $script:Schedules['shutdown-computevm-vm-mcpsql-sql'] = [pscustomobject]@{
             Name='shutdown-computevm-vm-mcpsql-sql'; Id='/wrong'; Status='Enabled'; TaskType='ComputeVmShutdownTask'
             DailyRecurrenceTime='2000'; TimeZoneId='SE Asia Standard Time'; TargetResourceId='/wrong'
         }
-        { Set-WorkshopAutoShutdown -Config $script:Config -TimeZoneId 'SE Asia Standard Time' `
+        { Set-WorkshopAutoShutdown -Config $config -TimeZoneId 'SE Asia Standard Time' `
                 -Operations $script:ServiceOperations } | Should -Throw '*conflicts with the approved shape*'
         $script:ScheduleCreates | Should -HaveCount 0
     }
 
     It 'refuses notification drift in an otherwise matching shutdown schedule' {
-        $null = Set-WorkshopAutoShutdown -Config $script:Config -TimeZoneId 'UTC' `
+        $config = Import-PowerShellDataFile $script:ConfigPath
+        $config.AutoShutdownLocation = $config.Location
+        $null = Set-WorkshopAutoShutdown -Config $config -TimeZoneId 'UTC' `
             -Operations $script:ServiceOperations
         $script:ScheduleCreates.Clear()
         $script:Schedules['shutdown-computevm-vm-mcpsql-admin'].NotificationStatus = 'Enabled'
 
-        { Set-WorkshopAutoShutdown -Config $script:Config -TimeZoneId 'UTC' `
+        { Set-WorkshopAutoShutdown -Config $config -TimeZoneId 'UTC' `
                 -Operations $script:ServiceOperations } | Should -Throw '*conflicts with the approved shape*'
         $script:ScheduleCreates | Should -HaveCount 0
     }
@@ -2025,7 +2231,9 @@ Describe 'Workshop stop and guarded removal' {
             RemoveResourceGroup = { $script:RemoveCalls++; $script:GroupRemoved = $true }
             WaitForRemoval = { $true }
             GetTaggedResources = { @() }
+            RemoveEmergencyStopTask = { $script:EmergencyStopRemovals++; 'removed' }
         }
+        $script:EmergencyStopRemovals = 0
     }
 
     It 'deallocates and verifies exactly both approved VMs' {
@@ -2055,11 +2263,13 @@ Describe 'Workshop stop and guarded removal' {
         @{ Case='phrase'; Phrase='delete rg-mcp-sql-workshop' }
         @{ Case='environment tag'; Phrase='DELETE rg-mcp-sql-workshop' }
         @{ Case='workload tag'; Phrase='DELETE rg-mcp-sql-workshop' }
+        @{ Case='managedBy tag'; Phrase='DELETE rg-mcp-sql-workshop' }
         @{ Case='ID'; Phrase='DELETE rg-mcp-sql-workshop' }
     ) {
         if ($Case -ne 'phrase') {
             $environment = if ($Case -eq 'environment tag') { 'prod' } else { 'workshop' }
             $workload = if ($Case -eq 'workload tag') { 'other' } else { 'mcp-sql' }
+            $managedBy = if ($Case -eq 'managedBy tag') { 'other' } else { 'PowerShell' }
             $resourceId = if ($Case -eq 'ID') {
                 '/subscriptions/other/resourceGroups/rg-mcp-sql-workshop'
             }
@@ -2072,7 +2282,7 @@ Describe 'Workshop stop and guarded removal' {
                     ResourceGroup = [pscustomobject]@{
                         ResourceGroupName = 'rg-mcp-sql-workshop'
                         ResourceId = $resourceId
-                        Tags = @{ environment = $environment; workload = $workload }
+                        Tags = @{ environment = $environment; workload = $workload; managedBy = $managedBy }
                     }
                 }
             }.GetNewClosure()
@@ -2085,12 +2295,33 @@ Describe 'Workshop stop and guarded removal' {
     }
 
     It 'removes, waits boundedly, verifies typed NotFound, and verifies no tagged resources remain' {
+        $script:TaggedAbsenceArguments = $null
+        $script:RemoveOperations.GetTaggedResources = {
+            param($Environment, $Workload, $ManagedBy, $SubscriptionId, $ResourceGroupName)
+            $script:TaggedAbsenceArguments = @($Environment, $Workload, $ManagedBy, $SubscriptionId, $ResourceGroupName)
+            @()
+        }
         $result = Remove-WorkshopEnvironment -Config $script:Config `
             -SubscriptionId '11111111-1111-1111-1111-111111111111' `
             -ConfirmationPhrase 'DELETE rg-mcp-sql-workshop' -Operations $script:RemoveOperations -Confirm:$false
 
         $result.Completed | Should -BeTrue
         $script:RemoveCalls | Should -Be 1
+        $script:EmergencyStopRemovals | Should -Be 1
+        $result.Checkpoint | Should -Contain 'Local emergency-stop task removed'
+        $script:TaggedAbsenceArguments | Should -Be @(
+            'workshop', 'mcp-sql', 'PowerShell',
+            '11111111-1111-1111-1111-111111111111', 'rg-mcp-sql-workshop'
+        )
+    }
+
+    It 'fails closed when the local emergency-stop task cannot be proven removed' {
+        $script:RemoveOperations.RemoveEmergencyStopTask = { 'still-present' }
+
+        { Remove-WorkshopEnvironment -Config $script:Config `
+                -SubscriptionId '11111111-1111-1111-1111-111111111111' `
+                -ConfirmationPhrase 'DELETE rg-mcp-sql-workshop' -Operations $script:RemoveOperations -Confirm:$false } |
+            Should -Throw '*emergency-stop task removal returned unexpected state*'
     }
 
     It 'fails closed for auth/network reads and for remaining tagged resources' -ForEach @('read-error', 'remaining') {
@@ -2102,6 +2333,42 @@ Describe 'Workshop stop and guarded removal' {
                 -SubscriptionId '11111111-1111-1111-1111-111111111111' `
                 -ConfirmationPhrase 'DELETE rg-mcp-sql-workshop' -Operations $script:RemoveOperations -Confirm:$false } |
             Should -Throw
+    }
+
+    It 'searches the whole subscription for tagged survivors instead of the deleted group' {
+        InModuleScope Workshop.Azure {
+            $operations = Get-DefaultWorkshopRemoveOperationSet
+            # Pester injects mock parameters through its own scope, so the capture has to be
+            # script-scoped; it is removed again below.
+            $script:TagQueryProbe = $null
+            Mock Get-AzResource {
+                $script:TagQueryProbe = @{ TagName = $TagName; TagValue = $TagValue; Group = $ResourceGroupName }
+                @(
+                    [pscustomobject]@{
+                        ResourceId = '/subscriptions/sub/resourceGroups/rg-elsewhere/providers/Microsoft.Storage/storageAccounts/leaked'
+                        Tags = @{ environment = 'workshop'; workload = 'mcp-sql'; managedBy = 'PowerShell' }
+                    },
+                    [pscustomobject]@{
+                        ResourceId = '/subscriptions/sub/resourceGroups/rg-other/providers/Microsoft.Storage/storageAccounts/unrelated'
+                        Tags = @{ environment = 'other'; workload = 'mcp-sql'; managedBy = 'PowerShell' }
+                    }
+                )
+            }
+
+            try {
+                $remaining = @(& $operations.GetTaggedResources 'workshop' 'mcp-sql' 'PowerShell' `
+                    'sub' 'rg-mcp-sql-workshop')
+
+                # Scoping the query to the already-deleted group would make this unfalsifiable.
+                $script:TagQueryProbe.Group | Should -BeNullOrEmpty
+                $script:TagQueryProbe.TagName | Should -BeExactly 'managedBy'
+                $remaining | Should -HaveCount 1
+                $remaining[0].ResourceId | Should -Match 'rg-elsewhere'
+            }
+            finally {
+                Remove-Variable -Name TagQueryProbe -Scope Script -ErrorAction SilentlyContinue
+            }
+        }
     }
 
     It 'polls removal to typed NotFound with an injected non-sleeping waiter' {
@@ -2130,6 +2397,284 @@ Describe 'Workshop stop and guarded removal' {
             { Wait-WorkshopResourceGroupRemoval -Name 'rg' -MaximumAttempts 2 `
                     -ReadOperation { throw 'AuthorizationFailed' } -WaitOperation { throw 'must not wait' } } |
                 Should -Throw '*AuthorizationFailed*'
+        }
+    }
+}
+
+Describe 'Bootstrap deployment serialization and staging isolation' {
+    BeforeEach {
+        $script:BootstrapOrder = [System.Collections.Generic.List[string]]::new()
+        $script:LockReleased = $false
+        $script:BootstrapOps = @{
+            GetRecipientCertificate = { $script:BootstrapOrder.Add('certificate'); 'certificate' }
+            ProtectPayload = { $script:BootstrapOrder.Add('protect'); 'envelope' }
+            GetSubscriptionId = { $script:BootstrapOrder.Add('subscription'); '11111111-1111-1111-1111-111111111111' }
+            AcquireDeploymentLock = {
+                param($SubscriptionId, $ResourceGroupName, $VmName)
+                $script:BootstrapOrder.Add("lock:$SubscriptionId/$ResourceGroupName/$VmName")
+                [pscustomobject]@{ Acquired = $true }
+            }
+            ReleaseDeploymentLock = { param($Lease) $null = $Lease; $script:LockReleased = $true; $script:BootstrapOrder.Add('unlock') }
+            StageBootstrapFiles = {
+                param($VmName, $ResourceGroupName, $ProtectedEnvelope, $BootstrapScript, $RepositoryCommit, $DeploymentId)
+                $null = $VmName, $ResourceGroupName, $ProtectedEnvelope, $BootstrapScript, $RepositoryCommit
+                $script:BootstrapOrder.Add("stage:$DeploymentId")
+            }
+            SetExtension = {
+                param($VmName, $ResourceGroupName, $Location, $ArchiveUri, $ProtectedEnvelope, $BootstrapScript, $RepositoryCommit, $DeploymentId)
+                $null = $VmName, $ResourceGroupName, $Location, $ArchiveUri, $ProtectedEnvelope, $BootstrapScript, $RepositoryCommit
+                $script:BootstrapOrder.Add("set:$DeploymentId")
+            }
+            GetExtension = {
+                $script:BootstrapOrder.Add('status')
+                [pscustomobject]@{ ProvisioningState = 'Succeeded'; Statuses = @([pscustomobject]@{ Code = 'ProvisioningState/succeeded' }) }
+            }
+            ReadReadiness = {
+                $script:BootstrapOrder.Add('readiness')
+                [pscustomobject]@{ Completed = $true; DeploymentId = '11111111-2222-3333-4444-555555555555'; Certificate = [pscustomobject]@{ PublicCertificatePath='C:\public.cer'; PublicCertificateSha256=('A' * 64) } }
+            }
+        }
+    }
+
+    It 'excludes a concurrent holder of the same deployment key, isolates other keys, and reacquires after release' {
+        $modulePath = (Get-Module Workshop.Azure).Path
+        # Mutex ownership is per thread, so the competing probe must run on its own runspace.
+        $probeOnOtherThread = {
+            param($ModulePath, $SubscriptionId, $ResourceGroupName, $VmName)
+            $shell = [powershell]::Create()
+            try {
+                $null = $shell.AddScript({
+                    param($ModulePath, $SubscriptionId, $ResourceGroupName, $VmName)
+                    Import-Module $ModulePath -Force
+                    & (Get-Module Workshop.Azure) {
+                        param($SubscriptionId, $ResourceGroupName, $VmName)
+                        try {
+                            $lease = Enter-WorkshopBootstrapLock -SubscriptionId $SubscriptionId `
+                                -ResourceGroupName $ResourceGroupName -VmName $VmName -TimeoutMilliseconds 250
+                            Exit-WorkshopBootstrapLock -Lease $lease
+                            'acquired'
+                        }
+                        catch { 'blocked' }
+                    } $SubscriptionId $ResourceGroupName $VmName
+                }).AddArgument($ModulePath).AddArgument($SubscriptionId).
+                    AddArgument($ResourceGroupName).AddArgument($VmName)
+                [string] @($shell.Invoke())[-1]
+            }
+            finally { $shell.Dispose() }
+        }
+
+        $lease = InModuleScope Workshop.Azure {
+            Enter-WorkshopBootstrapLock -SubscriptionId '11111111-1111-1111-1111-111111111111' `
+                -ResourceGroupName 'rg-mcp-sql-workshop' -VmName 'vm-mcpsql-sql' -TimeoutMilliseconds 1000
+        }
+        try {
+            $lease.Acquired | Should -BeTrue
+            & $probeOnOtherThread $modulePath '11111111-1111-1111-1111-111111111111' `
+                'rg-mcp-sql-workshop' 'vm-mcpsql-sql' | Should -BeExactly 'blocked'
+            & $probeOnOtherThread $modulePath '11111111-1111-1111-1111-111111111111' `
+                'rg-mcp-sql-workshop' 'vm-mcpsql-admin' | Should -BeExactly 'acquired'
+        }
+        finally {
+            InModuleScope Workshop.Azure -Parameters @{ Lease = $lease } {
+                param($Lease)
+                Exit-WorkshopBootstrapLock -Lease $Lease
+            }
+        }
+        $lease.Acquired | Should -BeFalse
+        & $probeOnOtherThread $modulePath '11111111-1111-1111-1111-111111111111' `
+            'rg-mcp-sql-workshop' 'vm-mcpsql-sql' | Should -BeExactly 'acquired'
+    }
+
+    It 'holds one deployment-keyed local lock around staging, extension mutation, status, and readiness readback' {
+        $result = Initialize-WorkshopSqlVm -Config $script:Config -AdministratorCredential (Get-TestCredential) `
+            -DatabaseMasterKeyPassword (Get-TestCredential).Password -McpReaderPassword (Get-TestCredential).Password `
+            -RepositoryUrl 'https://github.com/ibranibeny/mcp-sql-query-store-workshop.git' `
+            -RepositoryCommit '0123456789abcdef0123456789abcdef01234567' `
+            -DeploymentId '11111111-2222-3333-4444-555555555555' -Operations $script:BootstrapOps
+
+        $result.Completed | Should -BeTrue
+        $script:LockReleased | Should -BeTrue
+        $script:BootstrapOrder.IndexOf('lock:11111111-1111-1111-1111-111111111111/rg-mcp-sql-workshop/vm-mcpsql-sql') |
+            Should -BeLessThan $script:BootstrapOrder.IndexOf('status')
+        $script:BootstrapOrder.IndexOf('lock:11111111-1111-1111-1111-111111111111/rg-mcp-sql-workshop/vm-mcpsql-sql') |
+            Should -BeLessThan $script:BootstrapOrder.IndexOf('certificate')
+        $script:BootstrapOrder.IndexOf('subscription') |
+            Should -BeLessThan $script:BootstrapOrder.IndexOf('lock:11111111-1111-1111-1111-111111111111/rg-mcp-sql-workshop/vm-mcpsql-sql')
+        $script:BootstrapOrder.IndexOf('certificate') |
+            Should -BeLessThan $script:BootstrapOrder.IndexOf('protect')
+        $script:BootstrapOrder.IndexOf('protect') |
+            Should -BeLessThan $script:BootstrapOrder.IndexOf('stage:11111111-2222-3333-4444-555555555555')
+        $script:BootstrapOrder.IndexOf('stage:11111111-2222-3333-4444-555555555555') |
+            Should -BeLessThan $script:BootstrapOrder.IndexOf('set:11111111-2222-3333-4444-555555555555')
+        $script:BootstrapOrder.IndexOf('set:11111111-2222-3333-4444-555555555555') |
+            Should -BeLessThan $script:BootstrapOrder.LastIndexOf('status')
+        $script:BootstrapOrder[-1] | Should -Be 'unlock'
+    }
+
+    It 'releases the local lock when extension mutation fails' {
+        $script:BootstrapOps.SetExtension = { throw 'extension failed' }
+        { Initialize-WorkshopSqlVm -Config $script:Config -AdministratorCredential (Get-TestCredential) `
+                -DatabaseMasterKeyPassword (Get-TestCredential).Password -McpReaderPassword (Get-TestCredential).Password `
+                -RepositoryUrl 'https://github.com/ibranibeny/mcp-sql-query-store-workshop.git' `
+                -RepositoryCommit '0123456789abcdef0123456789abcdef01234567' `
+                -DeploymentId '11111111-2222-3333-4444-555555555555' -Operations $script:BootstrapOps } |
+            Should -Throw '*extension failed*'
+        $script:LockReleased | Should -BeTrue
+    }
+
+    It 'rejects a non-canonical deployment identifier before any host or guest mutation' -ForEach @(
+        '11111111-2222-3333-4444-55555555555F',
+        '{11111111-2222-3333-4444-555555555555}',
+        '11111111222233334444555555555555'
+    ) {
+        $candidate = $_
+        { Initialize-WorkshopSqlVm -Config $script:Config -AdministratorCredential (Get-TestCredential) `
+                -DatabaseMasterKeyPassword (Get-TestCredential).Password -McpReaderPassword (Get-TestCredential).Password `
+                -RepositoryUrl 'https://github.com/ibranibeny/mcp-sql-query-store-workshop.git' `
+                -RepositoryCommit '0123456789abcdef0123456789abcdef01234567' `
+                -DeploymentId $candidate -Operations $script:BootstrapOps } |
+            Should -Throw '*DeploymentId*'
+        $script:BootstrapOrder | Should -BeNullOrEmpty
+    }
+
+    It 'rejects a transitioning existing custom extension under the lock before certificate or staging' -ForEach @('Creating','Updating','Deleting','Transitioning') {
+        $state = $_
+        $script:BootstrapOps.GetExtension = {
+            [pscustomobject]@{ ProvisioningState = $state; Statuses = @([pscustomobject]@{ Code = "ProvisioningState/$($state.ToLowerInvariant())" }) }
+        }.GetNewClosure()
+        { Initialize-WorkshopSqlVm -Config $script:Config -AdministratorCredential (Get-TestCredential) `
+                -DatabaseMasterKeyPassword (Get-TestCredential).Password -McpReaderPassword (Get-TestCredential).Password `
+                -RepositoryUrl 'https://github.com/ibranibeny/mcp-sql-query-store-workshop.git' `
+                -RepositoryCommit '0123456789abcdef0123456789abcdef01234567' `
+                -DeploymentId '11111111-2222-3333-4444-555555555555' -Operations $script:BootstrapOps } |
+            Should -Throw '*active*operation*'
+        @($script:BootstrapOrder | Where-Object { $_ -like 'lock:*' }) | Should -HaveCount 1
+        @($script:BootstrapOrder | Where-Object { $_ -in @('certificate','protect') -or $_ -like 'stage:*' -or $_ -like 'set:*' }) |
+            Should -HaveCount 0
+        $script:BootstrapOrder[-1] | Should -Be 'unlock'
+    }
+
+    It 'normalizes only agreeing extension-state signals and fails closed otherwise' -ForEach @(
+        @{ Case='absent'; Extension=$null; Expected='Absent' }
+        @{ Case='succeeded'; Extension=[pscustomobject]@{ ProvisioningState='Succeeded'; Statuses=@([pscustomobject]@{ Code='ProvisioningState/succeeded' }); InstanceView=[pscustomobject]@{ Statuses=@([pscustomobject]@{ Code='ProvisioningState/Succeeded' }) } }; Expected='Succeeded' }
+        @{ Case='failed nested'; Extension=[pscustomobject]@{ Resource=[pscustomobject]@{ Value=[pscustomobject]@{ ProvisioningState='Failed'; Statuses=@([pscustomobject]@{ Code='ProvisioningState/failed' }) } } }; Expected='Failed' }
+        @{ Case='transitioning'; Extension=[pscustomobject]@{ Statuses=@([pscustomobject]@{ Code='ProvisioningState/updating' }) }; Expected='Updating' }
+        @{ Case='empty'; Extension=[pscustomobject]@{}; Expected='Unknown' }
+        @{ Case='malformed'; Extension=[pscustomobject]@{ ProvisioningState=@{ Bad='shape' } }; Expected='Unknown' }
+        @{ Case='unknown'; Extension=[pscustomobject]@{ Statuses=@([pscustomobject]@{ Code='ProvisioningState/banana' }) }; Expected='Unknown' }
+        @{ Case='contradictory'; Extension=[pscustomobject]@{ ProvisioningState='Succeeded'; Statuses=@([pscustomobject]@{ Code='ProvisioningState/failed' }) }; Expected='Unknown' }
+        @{ Case='failed with exit code'; Extension=[pscustomobject]@{ ProvisioningState='Failed'; Statuses=@([pscustomobject]@{ Code='ProvisioningState/failed/-196608' }) }; Expected='Failed' }
+        @{ Case='succeeded with trailing segment'; Extension=[pscustomobject]@{ Statuses=@([pscustomobject]@{ Code='ProvisioningState/succeeded/0' }) }; Expected='Succeeded' }
+        @{ Case='unknown with exit code'; Extension=[pscustomobject]@{ Statuses=@([pscustomobject]@{ Code='ProvisioningState/banana/-1' }) }; Expected='Unknown' }
+    ) {
+        InModuleScope Workshop.Azure -Parameters @{ Value = $Extension; ExpectedState = $Expected } {
+            param($Value, $ExpectedState)
+            Get-WorkshopBootstrapExtensionState -Extension $Value | Should -BeExactly $ExpectedState
+        }
+    }
+
+    It 'fails closed when the extension graph is too deep to traverse completely' {
+        InModuleScope Workshop.Azure {
+            $node = [pscustomobject]@{ ProvisioningState = 'Succeeded' }
+            foreach ($depth in 1..20) { $node = [pscustomobject]@{ Resource = $node } }
+            Get-WorkshopBootstrapExtensionState -Extension $node | Should -BeExactly 'Unknown'
+        }
+    }
+
+    It 'rejects unknown extension state under the lock before certificate or mutation' {
+        $script:BootstrapOps.GetExtension = { [pscustomobject]@{} }
+
+        { Initialize-WorkshopSqlVm -Config $script:Config -AdministratorCredential (Get-TestCredential) `
+                -DatabaseMasterKeyPassword (Get-TestCredential).Password -McpReaderPassword (Get-TestCredential).Password `
+                -RepositoryUrl 'https://github.com/ibranibeny/mcp-sql-query-store-workshop.git' `
+                -RepositoryCommit '0123456789abcdef0123456789abcdef01234567' `
+                -DeploymentId '11111111-2222-3333-4444-555555555555' -Operations $script:BootstrapOps } |
+            Should -Throw '*Unknown*'
+        @($script:BootstrapOrder | Where-Object { $_ -like 'lock:*' }) | Should -HaveCount 1
+        @($script:BootstrapOrder | Where-Object { $_ -in @('certificate','protect') -or $_ -like 'stage:*' -or $_ -like 'set:*' }) |
+            Should -HaveCount 0
+        $script:BootstrapOrder[-1] | Should -Be 'unlock'
+    }
+
+    It 'allows redeploy over an extension that previously failed with an Azure exit code' {
+        $script:PriorExtension = [pscustomobject]@{
+            ProvisioningState = 'Failed'
+            Statuses = @([pscustomobject]@{ Code = 'ProvisioningState/failed/-196608' })
+        }
+        $script:BootstrapOps.GetExtension = {
+            param($VmName, $ResourceGroupName, $Name)
+            $null = $VmName, $ResourceGroupName, $Name
+            $script:BootstrapOrder.Add('status')
+            $prior = $script:PriorExtension
+            $script:PriorExtension = [pscustomobject]@{ ProvisioningState = 'Succeeded' }
+            $prior
+        }
+
+        $result = Initialize-WorkshopSqlVm -Config $script:Config -AdministratorCredential (Get-TestCredential) `
+            -DatabaseMasterKeyPassword (Get-TestCredential).Password -McpReaderPassword (Get-TestCredential).Password `
+            -RepositoryUrl 'https://github.com/ibranibeny/mcp-sql-query-store-workshop.git' `
+            -RepositoryCommit '0123456789abcdef0123456789abcdef01234567' `
+            -DeploymentId '11111111-2222-3333-4444-555555555555' -Operations $script:BootstrapOps
+
+        $result.Completed | Should -BeTrue
+        @($script:BootstrapOrder | Where-Object { $_ -like 'set:*' }) | Should -HaveCount 1
+    }
+
+    It 'rejects readiness that carries no deployment identifier' {
+        $script:BootstrapOps.ReadReadiness = { [pscustomobject]@{ Completed = $true } }
+
+        { Initialize-WorkshopSqlVm -Config $script:Config -AdministratorCredential (Get-TestCredential) `
+                -DatabaseMasterKeyPassword (Get-TestCredential).Password -McpReaderPassword (Get-TestCredential).Password `
+                -RepositoryUrl 'https://github.com/ibranibeny/mcp-sql-query-store-workshop.git' `
+                -RepositoryCommit '0123456789abcdef0123456789abcdef01234567' `
+                -DeploymentId '11111111-2222-3333-4444-555555555555' -Operations $script:BootstrapOps } |
+            Should -Throw '*did not report Completed=true for the expected deployment*'
+        $script:BootstrapOrder[-1] | Should -Be 'unlock'
+    }
+
+    It 'uses deployment-specific guest paths and a short secret-free extension command' {
+        InModuleScope Workshop.Azure {
+            $deploymentId = '11111111-2222-3333-4444-555555555555'
+            $operations = Get-DefaultWorkshopBootstrapOperationSet
+            $probe = @{ Staged = $null; Extension = $null }
+            # Pester injects mock parameters through its own scope, so the capture has to be
+            # script-scoped; it is removed again below.
+            $script:StagingProbe = $probe
+            Mock Invoke-AzVMRunCommand {
+                $script:StagingProbe.Staged = $ScriptString
+                [pscustomobject]@{ Value = @([pscustomobject]@{ Message = 'placeholder' }) }
+            }
+            Mock Set-AzVMExtension {
+                $script:StagingProbe.Extension = @{ Protected = $ProtectedSettingString; Public = $SettingString }
+                [pscustomobject]@{ ProvisioningState = 'Succeeded' }
+            }
+
+            try {
+                # Staging verifies its own hash, so the placeholder response is expected to fail.
+                { & $operations.StageBootstrapFiles 'vm-mcpsql-admin' 'rg-mcp-sql-workshop' `
+                    'encrypted-cms-envelope' 'Initialize-AdminVm.ps1' `
+                    '0123456789abcdef0123456789abcdef01234567' $deploymentId } |
+                    Should -Throw '*was not positively verified*'
+
+                $probe.Staged | Should -Match ([regex]::Escape("C:\McpSqlWorkshop\deployments\$deploymentId"))
+                $probe.Staged | Should -Match 'bootstrap-launcher\.ps1'
+                $probe.Staged | Should -Match 'protected-bootstrap\.cms'
+                $probe.Staged | Should -Match 'Staged bootstrap file hash verification failed'
+                # Earlier attempts must be pruned so retries cannot accumulate repository copies.
+                $probe.Staged | Should -Match ([regex]::Escape("-cne '$deploymentId'"))
+
+                $null = & $operations.SetExtension 'vm-mcpsql-admin' 'rg-mcp-sql-workshop' 'indonesiacentral' `
+                    'https://example.invalid/archive.zip' 'encrypted-cms-envelope' 'Initialize-AdminVm.ps1' `
+                    '0123456789abcdef0123456789abcdef01234567' $deploymentId
+                $command = [string] ($probe.Extension.Protected | ConvertFrom-Json).commandToExecute
+                $command | Should -Match ([regex]::Escape("C:\McpSqlWorkshop\deployments\$deploymentId\bootstrap-launcher.ps1"))
+                $command | Should -Not -Match '(?i)encrypted-cms-envelope|secret|password'
+                [string] $probe.Extension.Public |
+                    Should -Not -Match '(?i)encrypted-cms-envelope|secret|password'
+            }
+            finally {
+                Remove-Variable -Name StagingProbe -Scope Script -ErrorAction SilentlyContinue
+            }
         }
     }
 }

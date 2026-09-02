@@ -482,6 +482,7 @@ namespace Microsoft.Data.SqlClient {
 
 Describe 'Bootstrap orchestration and evidence contracts' {
     BeforeAll {
+        $script:SqlContract = Get-ScriptContract -Path $script:SqlBootstrapPath
         Import-Module $script:ModulePath -Force
         $script:BootstrapConfig = Import-PowerShellDataFile (Join-Path $script:DeployRoot 'WorkshopConfig.psd1')
         $script:SecureValue = [Security.SecureString]::new()
@@ -612,6 +613,9 @@ Describe 'Bootstrap orchestration and evidence contracts' {
     It 'orchestrates SQL bootstrap through injected operations and returns only readiness evidence' {
         $script:CapturedPayload = $null
         $operations = @{
+            GetSubscriptionId = { '11111111-1111-1111-1111-111111111111' }
+            AcquireDeploymentLock = { [pscustomobject]@{ Acquired = $true } }
+            ReleaseDeploymentLock = { param($Lease) $null = $Lease }
             GetRecipientCertificate = { 'public-recipient-certificate' }
             ProtectPayload = {
                 param($Recipient, $Payload)
@@ -630,7 +634,7 @@ Describe 'Bootstrap orchestration and evidence contracts' {
                 $ProtectedEnvelope | Should -Be 'encrypted-cms-envelope'
             }
             GetExtension = { [pscustomobject]@{ Statuses = @([pscustomobject]@{ Code = 'ProvisioningState/succeeded' }) } }
-            ReadReadiness = { [pscustomobject]@{ Completed = $true; Certificate = [pscustomobject]@{ PublicCertificatePath = 'C:\public.cer'; PublicCertificateSha256 = ('A' * 64) } } }
+            ReadReadiness = { [pscustomobject]@{ Completed = $true; DeploymentId = '11111111-2222-3333-4444-555555555555'; Certificate = [pscustomobject]@{ PublicCertificatePath = 'C:\public.cer'; PublicCertificateSha256 = ('A' * 64) } } }
         }
         $result = Initialize-WorkshopSqlVm -Config $script:BootstrapConfig `
             -AdministratorCredential $script:AdministratorCredential `
@@ -662,10 +666,314 @@ Describe 'Bootstrap orchestration and evidence contracts' {
         $text | Should -Not -Match 'Arguments[^\r\n]*AdministratorSecret'
     }
 
+    It 'binds administrator bootstrap completion to fresh deployment-specific readiness and verified task cleanup' -ForEach @(
+        @{ Case = 'matching'; Written = '11111111-2222-3333-4444-555555555555'; Throws = $false }
+        @{ Case = 'mismatched'; Written = '99999999-2222-3333-4444-555555555555'; Throws = $true }
+        @{ Case = 'stale left behind'; Written = $null; Throws = $true }
+    ) {
+        foreach ($name in @(
+            'Read-WorkshopBootstrapReadiness', 'Test-WorkshopScheduledTaskNotFound',
+            'Stop-WorkshopScheduledTaskForCleanup', 'Remove-WorkshopScheduledTaskWithProof',
+            'Get-WorkshopBootstrapFailure', 'Invoke-WorkshopAdministratorBootstrap'
+        )) {
+            $definition = $script:SqlContract.Ast.FindAll({
+                param($node)
+                $node -is [System.Management.Automation.Language.FunctionDefinitionAst]
+            }, $true) | Where-Object Name -EQ $name | Select-Object -First 1
+            $definition | Should -Not -BeNullOrEmpty
+            . ([scriptblock]::Create($definition.Extent.Text))
+        }
+
+        $completionPath = Join-Path $TestDrive "readiness-$($Case -replace '\s', '-').json"
+        # Stale evidence from an earlier deployment must not be able to satisfy this run.
+        Set-Content -LiteralPath $completionPath -Encoding UTF8 `
+            -Value '{"Completed":true,"DeploymentId":"aaaaaaaa-2222-3333-4444-555555555555"}'
+        # ScriptMethod bodies do not share the Pester script scope, so the probe state is a
+        # closure-captured reference type instead.
+        $state = @{
+            Order = [System.Collections.Generic.List[string]]::new()
+            StaleAtRegistration = $true
+            Deleted = 0
+        }
+        $writtenId = $Written
+
+        $action = [pscustomobject]@{ Path = ''; Arguments = '' }
+        $actions = [pscustomobject]@{}
+        $actions | Add-Member ScriptMethod Create { param($Type) $null = $Type; $action }.GetNewClosure()
+        $taskDefinition = [pscustomobject]@{
+            RegistrationInfo = [pscustomobject]@{ Description = '' }
+            Principal = [pscustomobject]@{ UserId = ''; LogonType = 0; RunLevel = 0 }
+            Settings = [pscustomobject]@{
+                Enabled = $false; Hidden = $false; StartWhenAvailable = $false; AllowDemandStart = $false
+                DisallowStartIfOnBatteries = $true; StopIfGoingOnBatteries = $true; ExecutionTimeLimit = ''
+            }
+            Actions = $actions
+        }
+        $runningTask = [pscustomobject]@{ State = 3 }
+        $registeredTask = [pscustomobject]@{ LastTaskResult = 0; State = 3 }
+        $registeredTask | Add-Member ScriptMethod Run { param($Parameters) $null = $Parameters; $runningTask }.GetNewClosure()
+        $registeredTask | Add-Member ScriptMethod Stop { param($Flags) $null = $Flags }
+        $taskFolder = [pscustomobject]@{}
+        $taskFolder | Add-Member ScriptMethod RegisterTaskDefinition {
+            param($Name, $Definition, $Flags, $User, $Secret, $LogonType, $Sddl)
+            $null = $Name, $Definition, $Flags, $User, $Secret, $LogonType, $Sddl
+            $state.Order.Add('register')
+            $state.StaleAtRegistration = Test-Path -LiteralPath $completionPath -PathType Leaf
+            if ($null -ne $writtenId) {
+                Set-Content -LiteralPath $completionPath -Encoding UTF8 `
+                    -Value ('{"Completed":true,"DeploymentId":"' + $writtenId + '"}')
+            }
+            $registeredTask
+        }.GetNewClosure()
+        $taskFolder | Add-Member ScriptMethod DeleteTask {
+            param($Name, $Flags)
+            $null = $Name, $Flags
+            $state.Order.Add('delete')
+            $state.Deleted++
+        }.GetNewClosure()
+        $taskFolder | Add-Member ScriptMethod GetTask {
+            param($Name)
+            throw [IO.FileNotFoundException]::new("The system cannot find the file specified. ($Name)")
+        }
+        $service = [pscustomobject]@{}
+        $service | Add-Member ScriptMethod Connect { }
+        $service | Add-Member ScriptMethod GetFolder { param($Path) $null = $Path; $taskFolder }.GetNewClosure()
+        $service | Add-Member ScriptMethod NewTask { param($Flags) $null = $Flags; $taskDefinition }.GetNewClosure()
+        Mock New-Object { $service } -ParameterFilter { $ComObject -eq 'Schedule.Service' }
+
+        $taskLogon = [Security.SecureString]::new()
+        foreach ($character in [char[]] 'placeholder') { $taskLogon.AppendChar($character) }
+        $invoke = {
+            Invoke-WorkshopAdministratorBootstrap -UserName 'HOST\facilitator' `
+                -Password $taskLogon `
+                -ScriptPath 'C:\McpSqlWorkshop\Initialize-SqlVm.ps1' `
+                -PayloadPath 'C:\McpSqlWorkshop\protected-bootstrap.cms' `
+                -CompletionPath $completionPath `
+                -ExpectedDeploymentId '11111111-2222-3333-4444-555555555555' `
+                -MaximumAttempts 1 -WaitOperation { param($Attempt) $null = $Attempt }
+        }
+
+        if ($Throws) { $invoke | Should -Throw }
+        else { (& $invoke).DeploymentId | Should -BeExactly '11111111-2222-3333-4444-555555555555' }
+
+        # The stale document must be gone before the task is ever registered, and the
+        # temporary task must be deleted with proof on every path.
+        $state.StaleAtRegistration | Should -BeFalse
+        $state.Order | Should -Contain 'register'
+        $state.Deleted | Should -Be 1
+        $state.Order.IndexOf('register') | Should -BeLessThan $state.Order.IndexOf('delete')
+    }
+
+    It 'keeps the administrator bootstrap contract free of secret-bearing task arguments' {
+        $function = $script:SqlContract.Ast.Find({
+            param($node)
+            $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -eq 'Invoke-WorkshopAdministratorBootstrap'
+        }, $true)
+        $function | Should -Not -BeNullOrEmpty
+        $parameter = $function.Body.ParamBlock.Parameters | Where-Object {
+            $_.Name.VariablePath.UserPath -eq 'ExpectedDeploymentId'
+        }
+        $parameter | Should -Not -BeNullOrEmpty
+        ($parameter.Attributes | Where-Object TypeName -Match 'Parameter').NamedArguments |
+            Where-Object ArgumentName -EQ 'Mandatory' | Should -Not -BeNullOrEmpty
+        $function.Extent.Text | Should -Not -Match 'Arguments[^\r\n]*plainPassword'
+    }
+
+    It 'stops queued and running temporary tasks before deletion through executable cleanup behavior' -ForEach @(
+        @{ State = 2; ExpectedStops = 1 }
+        @{ State = 4; ExpectedStops = 1 }
+        @{ State = 3; ExpectedStops = 0 }
+    ) {
+        $function = $script:SqlContract.Ast.Find({
+            param($node)
+            $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -eq 'Stop-WorkshopScheduledTaskForCleanup'
+        }, $true)
+        $function | Should -Not -BeNullOrEmpty
+        . ([scriptblock]::Create($function.Extent.Text))
+        $script:stopCalls = 0
+        $task = [pscustomobject]@{ State = $State }
+        $task | Add-Member -MemberType ScriptMethod -Name Stop -Value { param($Flags) $null = $Flags; $script:stopCalls++ }
+
+        { Stop-WorkshopScheduledTaskForCleanup -Task $task } | Should -Not -Throw
+        $script:stopCalls | Should -Be $ExpectedStops
+    }
+
+    It 'surfaces executable temporary-task stop failures for cleanup aggregation' {
+        $function = $script:SqlContract.Ast.Find({
+            param($node)
+            $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -eq 'Stop-WorkshopScheduledTaskForCleanup'
+        }, $true)
+        . ([scriptblock]::Create($function.Extent.Text))
+        $task = [pscustomobject]@{ State = 2 }
+        $task | Add-Member -MemberType ScriptMethod -Name Stop -Value { throw 'queued stop failed' }
+
+        { Stop-WorkshopScheduledTaskForCleanup -Task $task } | Should -Throw '*queued stop failed*'
+    }
+
+    It 'proves temporary-task deletion and rejects a task that survives deletion' -ForEach @(
+        @{ Survives = $false }
+        @{ Survives = $true }
+    ) {
+        foreach ($name in @('Test-WorkshopScheduledTaskNotFound', 'Remove-WorkshopScheduledTaskWithProof')) {
+            $definition = $script:SqlContract.Ast.FindAll({
+                param($node)
+                $node -is [System.Management.Automation.Language.FunctionDefinitionAst]
+            }, $true) | Where-Object Name -EQ $name | Select-Object -First 1
+            $definition | Should -Not -BeNullOrEmpty
+            . ([scriptblock]::Create($definition.Extent.Text))
+        }
+        $script:deleteCalls = 0
+        $folder = [pscustomobject]@{ Survives = $Survives }
+        $folder | Add-Member ScriptMethod DeleteTask { param($Name, $Flags) $null = $Name, $Flags; $script:deleteCalls++ }
+        $folder | Add-Member ScriptMethod GetTask {
+            param($Name)
+            $null = $Name
+            if ($this.Survives) { return [pscustomobject]@{ Name = $Name } }
+            throw [IO.FileNotFoundException]::new('The system cannot find the file specified.')
+        }
+
+        $action = { Remove-WorkshopScheduledTaskWithProof -TaskFolder $folder -TaskName 'McpSqlWorkshop-SqlBootstrap-1' }
+        if ($Survives) { $action | Should -Throw '*still exists after deletion*' }
+        else { $action | Should -Not -Throw }
+        $script:deleteCalls | Should -Be 1
+    }
+
+    It 'treats only ERROR_FILE_NOT_FOUND as proof of deletion, including when it is wrapped' -ForEach @(
+        @{ Case = 'direct not found'; Throws = $false }
+        @{ Case = 'wrapped not found'; Throws = $false }
+        @{ Case = 'access denied'; Throws = $true }
+    ) {
+        foreach ($name in @('Test-WorkshopScheduledTaskNotFound', 'Remove-WorkshopScheduledTaskWithProof')) {
+            $definition = $script:SqlContract.Ast.FindAll({
+                param($node)
+                $node -is [System.Management.Automation.Language.FunctionDefinitionAst]
+            }, $true) | Where-Object Name -EQ $name | Select-Object -First 1
+            . ([scriptblock]::Create($definition.Extent.Text))
+        }
+        $lookupCase = $Case
+        $folder = [pscustomobject]@{}
+        $folder | Add-Member ScriptMethod DeleteTask { param($Name, $Flags) $null = $Name, $Flags }
+        $folder | Add-Member ScriptMethod GetTask {
+            param($Name)
+            $null = $Name
+            switch ($lookupCase) {
+                'direct not found' { throw [IO.FileNotFoundException]::new('The system cannot find the file specified.') }
+                'wrapped not found' {
+                    throw [InvalidOperationException]::new(
+                        'Exception calling "GetTask".',
+                        [IO.FileNotFoundException]::new('The system cannot find the file specified.'))
+                }
+                default { throw [UnauthorizedAccessException]::new('Access is denied.') }
+            }
+        }.GetNewClosure()
+
+        $action = { Remove-WorkshopScheduledTaskWithProof -TaskFolder $folder -TaskName 'McpSqlWorkshop-SqlBootstrap-1' }
+        if ($Throws) { $action | Should -Throw '*Access is denied*' }
+        else { $action | Should -Not -Throw }
+    }
+
+    It 'treats a never-registered task as already absent instead of a cleanup failure' {
+        foreach ($name in @('Test-WorkshopScheduledTaskNotFound', 'Remove-WorkshopScheduledTaskWithProof')) {
+            $definition = $script:SqlContract.Ast.FindAll({
+                param($node)
+                $node -is [System.Management.Automation.Language.FunctionDefinitionAst]
+            }, $true) | Where-Object Name -EQ $name | Select-Object -First 1
+            . ([scriptblock]::Create($definition.Extent.Text))
+        }
+        $probe = @{ LookedUp = $false }
+        $folder = [pscustomobject]@{}
+        $folder | Add-Member ScriptMethod DeleteTask {
+            param($Name, $Flags)
+            $null = $Name, $Flags
+            throw [IO.FileNotFoundException]::new('The system cannot find the file specified.')
+        }
+        $folder | Add-Member ScriptMethod GetTask {
+            param($Name)
+            $null = $Name
+            $probe.LookedUp = $true
+            [pscustomobject]@{ Name = 'unexpected survivor' }
+        }.GetNewClosure()
+
+        { Remove-WorkshopScheduledTaskWithProof -TaskFolder $folder -TaskName 'McpSqlWorkshop-SqlBootstrap-1' } |
+            Should -Not -Throw
+        $probe.LookedUp | Should -BeFalse
+    }
+
+    It 'preserves the primary bootstrap failure and reports unproven cleanup' -ForEach @(
+        @{ Case = 'primary-only'; HasPrimary = $true; Cleanup = @() }
+        @{ Case = 'primary-and-cleanup'; HasPrimary = $true; Cleanup = @('cleanup could not be verified') }
+        @{ Case = 'cleanup-only'; HasPrimary = $false; Cleanup = @('cleanup could not be verified') }
+        @{ Case = 'success'; HasPrimary = $false; Cleanup = @() }
+    ) {
+        $definition = $script:SqlContract.Ast.FindAll({
+            param($node)
+            $node -is [System.Management.Automation.Language.FunctionDefinitionAst]
+        }, $true) | Where-Object Name -EQ 'Get-WorkshopBootstrapFailure' | Select-Object -First 1
+        $definition | Should -Not -BeNullOrEmpty
+        . ([scriptblock]::Create($definition.Extent.Text))
+        $primary = if ($HasPrimary) {
+            try { throw [InvalidOperationException]::new('readiness evidence was rejected') } catch { $_ }
+        }
+
+        $failure = Get-WorkshopBootstrapFailure -PrimaryError $primary -CleanupErrors $Cleanup
+
+        switch ($Case) {
+            'primary-only' {
+                $failure | Should -BeOfType ([System.Management.Automation.ErrorRecord])
+                $failure.Exception.Message | Should -BeExactly 'readiness evidence was rejected'
+            }
+            'primary-and-cleanup' {
+                $failure.Message | Should -Match 'readiness evidence was rejected'
+                $failure.Message | Should -Match 'Cleanup also failed'
+                $failure.InnerException.Message | Should -BeExactly 'readiness evidence was rejected'
+            }
+            'cleanup-only' {
+                $failure.Message | Should -Match 'task body succeeded, but cleanup could not be proven'
+                $failure.InnerException | Should -BeNullOrEmpty
+            }
+            'success' { $failure | Should -BeNullOrEmpty }
+        }
+    }
+
+    It 'accepts only Boolean true readiness for the exact canonical deployment identifier' -ForEach @(
+        @{ Case = 'matching'; Json = '{"Completed":true,"DeploymentId":"11111111-2222-3333-4444-555555555555"}'; Throws = $false }
+        @{ Case = 'lowercase property'; Json = '{"Completed":true,"deploymentId":"11111111-2222-3333-4444-555555555555"}'; Throws = $false }
+        @{ Case = 'mismatch'; Json = '{"Completed":true,"DeploymentId":"99999999-2222-3333-4444-555555555555"}'; Throws = $true }
+        @{ Case = 'string true'; Json = '{"Completed":"true","DeploymentId":"11111111-2222-3333-4444-555555555555"}'; Throws = $true }
+        @{ Case = 'malformed'; Json = '{not-json'; Throws = $true }
+    ) {
+        $function = $script:SqlContract.Ast.Find({
+            param($node)
+            $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -eq 'Read-WorkshopBootstrapReadiness'
+        }, $true)
+        $function | Should -Not -BeNullOrEmpty
+        . ([scriptblock]::Create($function.Extent.Text))
+        $path = Join-Path $TestDrive "$Case.json"
+        Set-Content -LiteralPath $path -Value $Json -Encoding UTF8
+        $operation = { Read-WorkshopBootstrapReadiness -Path $path `
+            -ExpectedDeploymentId '11111111-2222-3333-4444-555555555555' }
+        if ($Throws) { $operation | Should -Throw }
+        else { (& $operation).DeploymentId | Should -BeExactly '11111111-2222-3333-4444-555555555555' }
+    }
+
+    It 'passes the protected payload deployment identifier to the administrator bootstrap' {
+        $text = $script:SqlContract.Text
+        $text | Should -Match 'Invoke-WorkshopAdministratorBootstrap[\s\S]*-ExpectedDeploymentId\s+\(\[string\]\s*\$payload\.DeploymentId\)'
+        $text | Should -Match 'DeploymentId\s*=\s*\[string\]\$payload\.DeploymentId'
+        $text | Should -Match '\[System\.IO\.InvalidDataException\]'
+    }
+
     It 'transfers only the SQL public certificate through injected admin operations' {
         $script:CapturedAdminPayload = $null
         $publicBytes = [byte[]](1, 2, 3, 4)
         $operations = @{
+            GetSubscriptionId = { '11111111-1111-1111-1111-111111111111' }
+            AcquireDeploymentLock = { [pscustomobject]@{ Acquired = $true } }
+            ReleaseDeploymentLock = { param($Lease) $null = $Lease }
             GetRecipientCertificate = { 'public-recipient-certificate' }
             ProtectPayload = {
                 param($Recipient, $Payload)
@@ -684,7 +992,7 @@ Describe 'Bootstrap orchestration and evidence contracts' {
                 $ProtectedEnvelope | Should -Be 'encrypted-cms-envelope'
             }
             GetExtension = { [pscustomobject]@{ Statuses = @([pscustomobject]@{ Code = 'ProvisioningState/succeeded' }) } }
-            ReadReadiness = { [pscustomobject]@{ Completed = $true } }
+            ReadReadiness = { [pscustomobject]@{ Completed = $true; DeploymentId = '11111111-2222-3333-4444-555555555555' } }
             ReadPublicCertificate = { [Convert]::ToBase64String($publicBytes) }.GetNewClosure()
         }
         $sqlReadiness = [pscustomobject]@{
@@ -700,6 +1008,7 @@ Describe 'Bootstrap orchestration and evidence contracts' {
             -SqlReadiness $sqlReadiness -Operations $operations
 
         $result.Completed | Should -BeTrue
+        $script:CapturedAdminPayload.RepositoryRoot | Should -BeExactly 'C:\McpSqlWorkshop\workspace'
         $script:CapturedAdminPayload.PublicCertificateBase64 | Should -Be ([Convert]::ToBase64String($publicBytes))
         $script:CapturedAdminPayload.PSObject.Properties.Name | Should -Not -Contain 'PrivateKey'
         ($result | ConvertTo-Json -Depth 10) | Should -Not -Match 'unit-test-secret-value'
