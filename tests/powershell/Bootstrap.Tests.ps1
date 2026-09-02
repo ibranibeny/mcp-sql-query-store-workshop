@@ -58,6 +58,17 @@ Describe 'SQL VM bootstrap static contract' {
         $text | Should -Not -Match "Where-Object\s*\{\s*\$_.Name\s+-notmatch\s+'Launcher\|FDLauncher'"
     }
 
+    It 'uses canonical SqlClient keyword indexers compatible with Windows PowerShell 5' {
+        $text = $script:SqlContract.Text
+        foreach ($keyword in @(
+            'Data Source', 'Initial Catalog', 'Integrated Security', 'Encrypt',
+            'TrustServerCertificate', 'Application Name'
+        )) {
+            $text | Should -Match ("\['{0}'\]\s*=" -f [regex]::Escape($keyword))
+        }
+        $text | Should -Not -Match '\$builder\.(DataSource|InitialCatalog|IntegratedSecurity|Encrypt|TrustServerCertificate|ApplicationName)\s*='
+    }
+
     It 'maps exact LUN zero and one with expected sizes and verifies 64 KiB NTFS labels' {
         $text = $script:SqlContract.Text
         $text | Should -Match 'Mount-WorkshopDisk\s+-Lun\s+0'

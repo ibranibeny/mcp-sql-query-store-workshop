@@ -69,12 +69,12 @@ function Get-VerifiedAdventureWorksBackup {
 function Invoke-LocalSqlScalar {
     param([Parameter(Mandatory)][string] $Query, [string] $Database = 'master', [switch] $BootstrapTrust)
     $builder = [System.Data.SqlClient.SqlConnectionStringBuilder]::new()
-    $builder.DataSource = if ($BootstrapTrust) { 'localhost' } else { $privateDnsName }
-    $builder.InitialCatalog = $Database
-    $builder.IntegratedSecurity = $true
-    $builder.Encrypt = $true
-    $builder.TrustServerCertificate = $BootstrapTrust.IsPresent
-    $builder.ApplicationName = 'MCP-SQL-Workshop-Bootstrap'
+    $builder['Data Source'] = if ($BootstrapTrust) { 'localhost' } else { $privateDnsName }
+    $builder['Initial Catalog'] = $Database
+    $builder['Integrated Security'] = $true
+    $builder['Encrypt'] = $true
+    $builder['TrustServerCertificate'] = $BootstrapTrust.IsPresent
+    $builder['Application Name'] = 'MCP-SQL-Workshop-Bootstrap'
     $connection = [System.Data.SqlClient.SqlConnection]::new($builder.ConnectionString)
     $command = $null
     try {
@@ -94,12 +94,12 @@ function Invoke-LocalSqlScalar {
 function Invoke-LocalSqlQuery {
     param([Parameter(Mandatory)][string] $Query, [string] $Database = 'master', [switch] $BootstrapTrust)
     $builder = [System.Data.SqlClient.SqlConnectionStringBuilder]::new()
-    $builder.DataSource = if ($BootstrapTrust) { 'localhost' } else { $privateDnsName }
-    $builder.InitialCatalog = $Database
-    $builder.IntegratedSecurity = $true
-    $builder.Encrypt = $true
-    $builder.TrustServerCertificate = $BootstrapTrust.IsPresent
-    $builder.ApplicationName = 'MCP-SQL-Workshop-Bootstrap'
+    $builder['Data Source'] = if ($BootstrapTrust) { 'localhost' } else { $privateDnsName }
+    $builder['Initial Catalog'] = $Database
+    $builder['Integrated Security'] = $true
+    $builder['Encrypt'] = $true
+    $builder['TrustServerCertificate'] = $BootstrapTrust.IsPresent
+    $builder['Application Name'] = 'MCP-SQL-Workshop-Bootstrap'
     $connection = [System.Data.SqlClient.SqlConnection]::new($builder.ConnectionString)
     $command = $null
     $reader = $null
