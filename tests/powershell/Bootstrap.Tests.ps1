@@ -51,6 +51,9 @@ Describe 'SQL VM bootstrap static contract' {
         $text | Should -Match 'Enterprise'
         $text | Should -Match 'Win32_Tpm|Get-Tpm'
         $text | Should -Match 'Confirm-SecureBootUEFI'
+        $text | Should -Match 'compute\.location\s+-ieq\s+\$payload\.ExpectedLocation'
+        $text | Should -Match 'compute\.name\s+-ceq\s+\$payload\.ExpectedVmName'
+        $text | Should -Match 'compute\.vmSize\s+-ceq\s+\$payload\.ExpectedVmSize'
     }
 
     It 'maps exact LUN zero and one with expected sizes and verifies 64 KiB NTFS labels' {
@@ -292,6 +295,9 @@ Describe 'Administration VM bootstrap static contract' {
         $text | Should -Match 'Confirm-SecureBootUEFI'
         $text | Should -Match 'Win32_Tpm|Get-Tpm'
         $text | Should -Match 'publicIpAddress'
+        $text | Should -Match 'compute\.location\s+-ieq\s+\$payload\.ExpectedLocation'
+        $text | Should -Match 'compute\.name\s+-ceq\s+\$payload\.ExpectedVmName'
+        $text | Should -Match 'compute\.vmSize\s+-ceq\s+\$payload\.ExpectedVmSize'
     }
 
     It 'installs exact official winget packages and VS Code extensions noninteractively and reads versions back' {

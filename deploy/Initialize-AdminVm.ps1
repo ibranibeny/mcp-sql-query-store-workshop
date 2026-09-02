@@ -373,7 +373,7 @@ try {
     $metadata = Invoke-RestMethod -Headers @{ Metadata = 'true' } -Method Get -Uri $metadataUri -TimeoutSec 10
     Assert-Condition ($metadata.compute.name -ceq $payload.ExpectedVmName) 'IMDS VM identity does not match.'
     Assert-Condition ($metadata.compute.vmSize -ceq $payload.ExpectedVmSize) 'IMDS VM size does not match.'
-    Assert-Condition ($metadata.compute.location -ceq $payload.ExpectedLocation) 'IMDS VM location does not match.'
+    Assert-Condition ($metadata.compute.location -ieq $payload.ExpectedLocation) 'IMDS VM location does not match.'
     $imdsPublicIps = @($metadata.network.interface.ipv4.ipAddress.publicIpAddress | Where-Object { $_ })
     Assert-Condition ($imdsPublicIps.Count -eq 1) 'Administration VM IMDS public IP boundary is not exactly one address.'
 

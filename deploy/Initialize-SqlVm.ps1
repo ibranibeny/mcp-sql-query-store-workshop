@@ -247,7 +247,7 @@ try {
     $metadata = Invoke-RestMethod -Headers @{ Metadata = 'true' } -Method Get -Uri $metadataUri -TimeoutSec 10
     Assert-Condition ($metadata.compute.name -ceq $payload.ExpectedVmName) 'IMDS VM identity does not match.'
     Assert-Condition ($metadata.compute.vmSize -ceq $payload.ExpectedVmSize) 'IMDS VM size does not match.'
-    Assert-Condition ($metadata.compute.location -ceq $payload.ExpectedLocation) 'IMDS VM location does not match.'
+    Assert-Condition ($metadata.compute.location -ieq $payload.ExpectedLocation) 'IMDS VM location does not match.'
     foreach ($interface in @($metadata.network.interface)) {
         foreach ($address in @($interface.ipv4.ipAddress)) {
             Assert-Condition ([string]::IsNullOrWhiteSpace([string] $address.publicIpAddress)) 'SQL VM must not have a public IP.'
