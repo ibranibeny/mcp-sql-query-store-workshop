@@ -191,251 +191,115 @@ function Get-WorkshopAccessibleRsaPrivateKey {
     }
 }
 
-function Read-WorkshopBootstrapReadiness {
+function Get-DefaultWorkshopSqlSysadminOperationSet {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSReviewUnusedParameter', 'InstanceName',
+        Justification = 'Captured by the returned operation closures.')]
     [CmdletBinding()]
+    param([Parameter(Mandatory)][string] $InstanceName)
+
+    @{
+        CurrentPrincipal = { [Security.Principal.WindowsIdentity]::GetCurrent().Name }
+        IsSysadmin = {
+            param($Principal)
+            $query = "SET NOCOUNT ON; SELECT IS_SRVROLEMEMBER('sysadmin', '$Principal');"
+            $value = & sqlcmd.exe -S localhost -E -h -1 -W -Q $query 2>&1 |
+                ForEach-Object { "$_".Trim() } | Where-Object { $_ -in '0', '1' } | Select-Object -First 1
+            $value -eq '1'
+        }
+        LocalAdminsGroup = {
+            (New-Object Security.Principal.SecurityIdentifier('S-1-5-32-544')).Translate(
+                [Security.Principal.NTAccount]).Value -replace '.*\\', ''
+        }
+        IsSystemLocalAdmin = {
+            param($Group)
+            @(Get-LocalGroupMember -Group $Group -ErrorAction SilentlyContinue |
+                Where-Object { $_.SID.Value -eq 'S-1-5-18' }).Count -gt 0
+        }
+        AddSystemLocalAdmin = { param($Group) Add-LocalGroupMember -Group $Group -Member 'NT AUTHORITY\SYSTEM' -ErrorAction Stop }
+        RemoveSystemLocalAdmin = { param($Group) Remove-LocalGroupMember -Group $Group -Member 'NT AUTHORITY\SYSTEM' -ErrorAction Stop }
+        StopSqlService = { Stop-Service -Name $InstanceName -Force -ErrorAction Stop }.GetNewClosure()
+        StartSqlService = { Start-Service -Name $InstanceName -ErrorAction Stop }.GetNewClosure()
+        WaitForService = { Start-Sleep -Seconds 10 }
+        StartSingleUser = {
+            $service = Get-CimInstance Win32_Service -Filter "Name='$InstanceName'" -ErrorAction Stop
+            $binary = ($service.PathName -replace '^"([^"]+)".*', '$1')
+            Start-Process -FilePath $binary -ArgumentList '-c', '-m"SQLCMD"', '-s', $InstanceName `
+                -WindowStyle Hidden -PassThru -ErrorAction Stop
+        }.GetNewClosure()
+        StopSingleUser = { param($Engine) if ($null -ne $Engine -and -not $Engine.HasExited) { $Engine.Kill() } }
+        WaitForEngine = { Start-Sleep -Seconds 20 }
+        GrantSysadmin = {
+            param($Principal)
+            $grant = "SET NOCOUNT ON; IF SUSER_ID('$Principal') IS NULL CREATE LOGIN [$Principal] FROM WINDOWS; " +
+                "ALTER SERVER ROLE sysadmin ADD MEMBER [$Principal]; SELECT IS_SRVROLEMEMBER('sysadmin', '$Principal');"
+            $value = & sqlcmd.exe -S localhost -E -h -1 -W -Q $grant 2>&1 |
+                ForEach-Object { "$_".Trim() } | Where-Object { $_ -in '0', '1' } | Select-Object -First 1
+            $value -eq '1'
+        }
+    }
+}
+
+function Set-WorkshopCurrentPrincipalSysadmin {
+    [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'High')]
     param(
-        [Parameter(Mandatory)][string] $Path,
-        [Parameter(Mandatory)][ValidateScript({
-            $parsed = [guid]::Empty
-            [guid]::TryParseExact($_, 'D', [ref] $parsed) -and $parsed.ToString('D') -ceq $_
-        })][string] $ExpectedDeploymentId
+        [Parameter(Mandatory)][string] $InstanceName,
+        [hashtable] $Operations
     )
 
-    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
-        throw 'SQL bootstrap administrator task completed without readiness evidence.'
+    if ($null -eq $Operations) { $Operations = Get-DefaultWorkshopSqlSysadminOperationSet -InstanceName $InstanceName }
+    foreach ($name in @(
+        'CurrentPrincipal', 'IsSysadmin', 'LocalAdminsGroup', 'IsSystemLocalAdmin', 'AddSystemLocalAdmin',
+        'RemoveSystemLocalAdmin', 'StopSqlService', 'StartSqlService', 'WaitForService', 'StartSingleUser',
+        'StopSingleUser', 'WaitForEngine', 'GrantSysadmin'
+    )) {
+        if (-not $Operations.ContainsKey($name) -or $Operations[$name] -isnot [scriptblock]) {
+            throw "Operations must provide scriptblock '$name'."
+        }
     }
+
+    $principal = [string] (& $Operations.CurrentPrincipal)
+    if ((& $Operations.IsSysadmin $principal) -eq $true) { return 'already-sysadmin' }
+    if (-not $PSCmdlet.ShouldProcess($principal, 'Grant SQL sysadmin via single-user recovery')) {
+        throw 'SQL sysadmin grant was declined, so bootstrap cannot proceed.'
+    }
+
+    # SQL single-user mode grants sysadmin to the local Administrators group. SYSTEM
+    # is not a member by default, so it joins for the duration of the recovery only.
+    # The instance stays Windows-authentication-only throughout.
+    $group = [string] (& $Operations.LocalAdminsGroup)
+    $addedToAdmins = $false
+    $serviceStopped = $false
+    $engine = $null
     try {
-        $readiness = Get-Content -LiteralPath $Path -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
-    }
-    catch {
-        throw [System.IO.InvalidDataException]::new('SQL bootstrap readiness evidence is malformed.', $_.Exception)
-    }
-    $deploymentProperties = @($readiness.PSObject.Properties | Where-Object {
-        [string]::Equals($_.Name, 'DeploymentId', [StringComparison]::OrdinalIgnoreCase)
-    })
-    if ($deploymentProperties.Count -ne 1 -or
-        [string] $deploymentProperties[0].Value -cne $ExpectedDeploymentId) {
-        throw 'SQL bootstrap readiness evidence does not match the expected deployment identity.'
-    }
-    $completedProperty = $readiness.PSObject.Properties['Completed']
-    if ($null -eq $completedProperty -or $completedProperty.Value -isnot [bool] -or
-        -not $completedProperty.Value) {
-        throw 'SQL bootstrap readiness evidence did not report Boolean Completed=true.'
-    }
-    $readiness
-}
-
-function Test-WorkshopScheduledTaskNotFound {
-    [CmdletBinding()]
-    param([Parameter(Mandatory)][System.Management.Automation.ErrorRecord] $ErrorRecord)
-
-    # Schedule.Service GetTask reports HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND), which the
-    # method-invocation wrapper can nest one or more levels deep.
-    $exception = $ErrorRecord.Exception
-    for ($depth = 0; $null -ne $exception -and $depth -lt 8; $depth++) {
-        if ($exception.HResult -eq -2147024894) { return $true }
-        $exception = $exception.InnerException
-    }
-    return $false
-}
-
-function Stop-WorkshopScheduledTaskForCleanup {
-    [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'Low')]
-    param([Parameter(Mandatory)][object] $Task)
-
-    if ([int] $Task.State -notin @(2, 4)) { return }
-    if (-not $PSCmdlet.ShouldProcess('Temporary bootstrap task', 'Stop')) {
-        throw 'Stopping the temporary bootstrap task was declined, so cleanup cannot be proven.'
-    }
-    $Task.Stop(0)
-}
-
-function Remove-WorkshopScheduledTaskWithProof {
-    [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'Low')]
-    param(
-        [Parameter(Mandatory)][object] $TaskFolder,
-        [Parameter(Mandatory)][string] $TaskName
-    )
-
-    if (-not $PSCmdlet.ShouldProcess($TaskName, 'Delete the temporary bootstrap task')) {
-        throw "Deleting temporary bootstrap task '$TaskName' was declined, so cleanup cannot be proven."
-    }
-    try {
-        $TaskFolder.DeleteTask($TaskName, 0)
-    }
-    catch {
-        # Registration can fail before the task exists; absence is already the goal.
-        if (Test-WorkshopScheduledTaskNotFound -ErrorRecord $_) { return }
-        throw
-    }
-    $survivor = $null
-    try {
-        $survivor = $TaskFolder.GetTask($TaskName)
-    }
-    catch {
-        if (-not (Test-WorkshopScheduledTaskNotFound -ErrorRecord $_)) { throw }
-        return
-    }
-    if ($null -ne $survivor -and [Runtime.InteropServices.Marshal]::IsComObject($survivor)) {
-        $null = [Runtime.InteropServices.Marshal]::FinalReleaseComObject($survivor)
-    }
-    throw "Temporary bootstrap task '$TaskName' still exists after deletion."
-}
-
-function Get-WorkshopBootstrapFailure {
-    [CmdletBinding()]
-    param(
-        [AllowNull()][System.Management.Automation.ErrorRecord] $PrimaryError,
-        [AllowNull()][string[]] $CleanupErrors
-    )
-
-    $cleanup = @($CleanupErrors | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
-    if ($null -ne $PrimaryError) {
-        if ($cleanup.Count -eq 0) { return $PrimaryError }
-        return [InvalidOperationException]::new(
-            "SQL bootstrap failed: $($PrimaryError.Exception.Message) Cleanup also failed: $($cleanup -join '; ')",
-            $PrimaryError.Exception
-        )
-    }
-    if ($cleanup.Count -gt 0) {
-        return [InvalidOperationException]::new(
-            "SQL bootstrap task body succeeded, but cleanup could not be proven: $($cleanup -join '; ')"
-        )
-    }
-    return $null
-}
-
-function Invoke-WorkshopAdministratorBootstrap {
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory)][string] $UserName,
-        [Parameter(Mandatory)][Security.SecureString] $Password,
-        [Parameter(Mandatory)][string] $ScriptPath,
-        [Parameter(Mandatory)][string] $PayloadPath,
-        [Parameter(Mandatory)][string] $CompletionPath,
-        [Parameter(Mandatory)][ValidateScript({
-            $parsed = [guid]::Empty
-            [guid]::TryParseExact($_, 'D', [ref] $parsed) -and $parsed.ToString('D') -ceq $_
-        })][string] $ExpectedDeploymentId,
-        # 3s per attempt. The default is 60 minutes and the ceiling 75, because
-        # CustomScriptExtension times out near 90; a longer budget only produces a
-        # multi-hour stuck extension instead of an actionable failure.
-        [ValidateRange(1, 1500)][int] $MaximumAttempts = 1200,
-        [scriptblock] $WaitOperation = { [Threading.Thread]::Sleep(3000) }
-    )
-
-    $taskName = 'McpSqlWorkshop-SqlBootstrap-' + [guid]::NewGuid().ToString('N')
-    $taskService = $null
-    $taskFolder = $null
-    $taskDefinition = $null
-    $registeredTask = $null
-    $runningTask = $null
-    $action = $null
-    $passwordPointer = [IntPtr]::Zero
-    $plainPassword = $null
-    $primaryError = $null
-    $readiness = $null
-    $cleanupErrors = [System.Collections.Generic.List[string]]::new()
-    try {
-        if (Test-Path -LiteralPath $CompletionPath -PathType Leaf) {
-            Remove-Item -LiteralPath $CompletionPath -Force -ErrorAction Stop
+        if (-not (& $Operations.IsSystemLocalAdmin $group)) {
+            $null = & $Operations.AddSystemLocalAdmin $group
+            $addedToAdmins = $true
         }
-        if (Test-Path -LiteralPath $CompletionPath -PathType Leaf) {
-            throw 'Pre-existing SQL bootstrap readiness evidence could not be removed.'
+        $null = & $Operations.StopSqlService
+        $serviceStopped = $true
+        $engine = & $Operations.StartSingleUser
+        $null = & $Operations.WaitForEngine
+        $granted = & $Operations.GrantSysadmin $principal
+        if ($granted -ne $true) {
+            throw "Single-user sysadmin grant did not confirm for '$principal'."
         }
-        $taskService = New-Object -ComObject 'Schedule.Service'
-        $taskService.Connect()
-        $taskFolder = $taskService.GetFolder('\')
-        $taskDefinition = $taskService.NewTask(0)
-        $taskDefinition.RegistrationInfo.Description = 'Temporary MCP SQL workshop bootstrap task.'
-        $taskDefinition.Principal.UserId = $UserName
-        # Password logon is the only supported identity switch here. SYSTEM is not a
-        # SQL sysadmin, and Windows refuses an elevated S4U token for a local
-        # administrator account with 0x80070005.
-        $taskDefinition.Principal.LogonType = 1
-        $taskDefinition.Principal.RunLevel = 1
-        $taskDefinition.Settings.Enabled = $true
-        $taskDefinition.Settings.Hidden = $true
-        $taskDefinition.Settings.StartWhenAvailable = $true
-        $taskDefinition.Settings.AllowDemandStart = $true
-        $taskDefinition.Settings.DisallowStartIfOnBatteries = $false
-        $taskDefinition.Settings.StopIfGoingOnBatteries = $false
-        $taskDefinition.Settings.ExecutionTimeLimit = 'PT6H'
-        $action = $taskDefinition.Actions.Create(0)
-        $powerShellPath = Join-Path $PSHOME 'powershell.exe'
-        $action.Path = $powerShellPath
-        $action.Arguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' +
-            $ScriptPath + '" -ProtectedPayloadPath "' + $PayloadPath + '"'
-
-        $passwordPointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($Password)
-        $plainPassword = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($passwordPointer)
-        try {
-            $registeredTask = $taskFolder.RegisterTaskDefinition(
-                $taskName, $taskDefinition, 6, $UserName, $plainPassword, 1, $null
-            )
-        }
-        catch {
-            # 0x8007052E is returned for a credential mismatch, which is indistinguishable
-            # from an unknown account in the raw HRESULT. Name the account so the next
-            # reader does not have to rediscover that.
-            throw ("Windows rejected the scheduled-task credential for '$UserName'. " +
-                'Confirm that the administrator password supplied to the deployment is the ' +
-                "one the VM was created with. Underlying error: $($_.Exception.Message)")
-        }
-        finally {
-            $plainPassword = $null
-            [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($passwordPointer)
-            $passwordPointer = [IntPtr]::Zero
-        }
-        $runningTask = $registeredTask.Run($null)
-
-        for ($attempt = 1; $attempt -le $MaximumAttempts; $attempt++) {
-            $state = [int] $runningTask.State
-            if ($state -notin @(2, 4)) {
-                $lastResult = [int] $registeredTask.LastTaskResult
-                if ($lastResult -ne 0) {
-                    throw "SQL bootstrap administrator task failed with result $lastResult."
-                }
-                $readiness = Read-WorkshopBootstrapReadiness -Path $CompletionPath `
-                    -ExpectedDeploymentId $ExpectedDeploymentId
-                break
-            }
-            if ($attempt -lt $MaximumAttempts) { & $WaitOperation $attempt }
-        }
-        if ($null -eq $readiness) {
-            throw "SQL bootstrap administrator task did not finish within $MaximumAttempts checks."
-        }
-    }
-    catch {
-        $primaryError = $_
     }
     finally {
-        $plainPassword = $null
-        if ($passwordPointer -ne [IntPtr]::Zero) {
-            [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($passwordPointer)
+        $null = & $Operations.StopSingleUser $engine
+        if ($serviceStopped) {
+            $null = & $Operations.StartSqlService
+            $null = & $Operations.WaitForService
         }
-        if ($null -ne $registeredTask) {
-            try {
-                Stop-WorkshopScheduledTaskForCleanup -Task $registeredTask
-            }
-            catch { $cleanupErrors.Add("Temporary bootstrap task stop failed: $($_.Exception.Message)") }
-        }
-        if ($null -ne $taskFolder) {
-            try {
-                Remove-WorkshopScheduledTaskWithProof -TaskFolder $taskFolder -TaskName $taskName
-            }
-            catch { $cleanupErrors.Add("Temporary bootstrap task cleanup could not be verified: $($_.Exception.Message)") }
-        }
-        foreach ($comObject in @($action, $runningTask, $registeredTask, $taskDefinition, $taskFolder, $taskService)) {
-            if ($null -ne $comObject -and [Runtime.InteropServices.Marshal]::IsComObject($comObject)) {
-                try { $null = [Runtime.InteropServices.Marshal]::FinalReleaseComObject($comObject) }
-                catch { $cleanupErrors.Add("Temporary bootstrap COM release failed: $($_.Exception.Message)") }
-            }
+        if ($addedToAdmins) {
+            try { $null = & $Operations.RemoveSystemLocalAdmin $group }
+            catch { Write-Warning "Could not remove SYSTEM from the local Administrators group: $($_.Exception.Message)" }
         }
     }
-    $failure = Get-WorkshopBootstrapFailure -PrimaryError $primaryError -CleanupErrors $cleanupErrors.ToArray()
-    if ($null -ne $failure) { throw $failure }
-    $readiness
+
+    if ((& $Operations.IsSysadmin $principal) -ne $true) {
+        throw "Current principal '$principal' is not a SQL sysadmin after single-user recovery."
+    }
+    'granted-and-verified'
 }
 
 function Mount-WorkshopDisk {
@@ -546,23 +410,13 @@ Assert-Condition (
     $parsedDeploymentId.ToString('D') -ceq [string] $payload.DeploymentId
 ) 'Protected bootstrap payload does not carry a canonical lowercase deployment identifier.'
 
-$expectedAdministratorIdentity = "$env:COMPUTERNAME\$($payload.AdministratorUserName)"
-$currentIdentity = [Security.Principal.WindowsIdentity]::GetCurrent().Name
-if ($currentIdentity -ine $expectedAdministratorIdentity) {
-    $administratorSecure = ConvertTo-SecureValue -Value ([string] $payload.AdministratorSecret)
-    try {
-        $null = Invoke-WorkshopAdministratorBootstrap -UserName $expectedAdministratorIdentity `
-            -Password $administratorSecure -ScriptPath $PSCommandPath `
-            -PayloadPath $ProtectedPayloadPath -CompletionPath $readinessPath `
-            -ExpectedDeploymentId ([string] $payload.DeploymentId)
-    }
-    finally {
-        $payload.AdministratorSecret = $null
-        $administratorSecure = $null
-        Remove-Item -LiteralPath $ProtectedPayloadPath -Force -ErrorAction SilentlyContinue
-    }
-    return
-}
+# The CustomScriptExtension runs as SYSTEM, which this SQL image does not make a
+# sysadmin. Windows also refuses every documented way to relaunch the bootstrap as the
+# local administrator on this image (0x8007052E for password logon, 0x80070005 for S4U).
+# Grant the current SYSTEM principal sysadmin through SQL single-user recovery instead,
+# then run the remaining bootstrap directly. The instance stays Windows-auth-only and no
+# administrator password is used on this path.
+$null = Set-WorkshopCurrentPrincipalSysadmin -InstanceName 'MSSQLSERVER' -Confirm:$false
 
 try {
     $metadata = Invoke-RestMethod -Headers @{ Metadata = 'true' } -Method Get -Uri $metadataUri -TimeoutSec 10
