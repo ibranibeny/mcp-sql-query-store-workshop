@@ -549,7 +549,9 @@ try {
     $extensionVersions = @(Invoke-NativeChecked -FilePath $codePath -ArgumentList @('--extensions-dir', $extensionDirectory, '--list-extensions', '--show-versions'))
     foreach ($extensionId in $extensionIds) {
         if ($extensionOutcomes[$extensionId] -ceq 'BuiltIn') { continue }
-        Assert-Condition ($extensionVersions -match "^$([regex]::Escape($extensionId))@") "VS Code extension '$extensionId' version could not be read back."
+        # -match against an array returns the matching elements, not a Boolean, so count explicitly.
+        $extensionInstalled = @($extensionVersions | Where-Object { $_ -match "^$([regex]::Escape($extensionId))@" }).Count -ge 1
+        Assert-Condition $extensionInstalled "VS Code extension '$extensionId' version could not be read back."
     }
     $builtInExtensions = @($extensionIds | Where-Object { $extensionOutcomes[$_] -ceq 'BuiltIn' })
 
