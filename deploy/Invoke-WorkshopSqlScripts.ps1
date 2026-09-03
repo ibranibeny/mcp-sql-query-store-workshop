@@ -328,8 +328,11 @@ try {
     Write-WorkshopSessionContext -Connection $connection -Key 'PlannedDataPath' -Value $DataPath
     Write-WorkshopSessionContext -Connection $connection -Key 'MinimumFreeSpaceMB' -Value $MinimumFreeSpaceMB
     Write-WorkshopSessionContext -Connection $connection -Key 'BackupPath' -Value $BackupPath
-    Write-WorkshopSessionContext -Connection $connection -Key 'DataPath' -Value $DataPath
-    Write-WorkshopSessionContext -Connection $connection -Key 'LogPath' -Value $LogPath
+    # sql/02 restores with MOVE ... TO these values, so they must be full .mdf/.ldf file
+    # paths, not the directories used for the sql/00 free-space check (PlannedDataPath).
+    # sql/02 forbids underscores in the path, so the log file uses the '.ldf' base name.
+    Write-WorkshopSessionContext -Connection $connection -Key 'DataPath' -Value (Join-Path $DataPath ($DatabaseName + '.mdf'))
+    Write-WorkshopSessionContext -Connection $connection -Key 'LogPath' -Value (Join-Path $LogPath ($DatabaseName + '.ldf'))
 
     $escapedBackupPath = $BackupPath.Replace("'", "''")
     Invoke-WorkshopSqlCommand -Connection $connection `
@@ -378,8 +381,21 @@ END CATCH;
             Write-WorkshopSessionContext -Connection $connection -Key 'McpReaderPassword' -Value $McpReaderPassword
         }
 
+        $batchIndex = 0
         foreach ($batch in $scriptBatches) {
-            Invoke-WorkshopSqlCommand -Connection $connection -CommandText $batch
+            $batchIndex++
+            try {
+                Invoke-WorkshopSqlCommand -Connection $connection -CommandText $batch
+            }
+            catch {
+                $sqlLine = '?'
+                $probe = $_.Exception
+                while ($null -ne $probe) {
+                    if ($probe.PSObject.Properties['LineNumber']) { $sqlLine = $probe.LineNumber; break }
+                    $probe = $probe.InnerException
+                }
+                throw "$scriptName (batch $batchIndex of $($scriptBatches.Count), SQL line $sqlLine): $($_.Exception.Message)"
+            }
         }
     }
 
@@ -406,12 +422,12 @@ OUTER APPLY
 WHERE object_schema.name = N'lab' AND object_entry.is_ms_shipped = 0 AND object_entry.type IN ('U', 'V', 'P');
 IF EXISTS
 (
-    SELECT ObjectName, ObjectType, DefinitionHash, SchemaHash FROM @CurrentLabObjects
+    SELECT ObjectName COLLATE DATABASE_DEFAULT, ObjectType COLLATE DATABASE_DEFAULT, DefinitionHash, SchemaHash FROM @CurrentLabObjects
     EXCEPT
-    SELECT ObjectName, ObjectType, DefinitionHash, SchemaHash FROM WorkshopAdmin.dbo.LabObjectOwnership
-    WHERE MarkerId = @MarkerId AND SchemaVersion = @SchemaVersion AND DatabaseName = DB_NAME()
+    SELECT ObjectName COLLATE DATABASE_DEFAULT, ObjectType COLLATE DATABASE_DEFAULT, DefinitionHash, SchemaHash FROM WorkshopAdmin.dbo.LabObjectOwnership
+    WHERE MarkerId = @MarkerId AND SchemaVersion = @SchemaVersion AND DatabaseName COLLATE DATABASE_DEFAULT = DB_NAME() COLLATE DATABASE_DEFAULT
 )
-AND EXISTS (SELECT 1 FROM WorkshopAdmin.dbo.LabObjectOwnership WHERE MarkerId = @MarkerId AND SchemaVersion = @SchemaVersion AND DatabaseName = DB_NAME())
+AND EXISTS (SELECT 1 FROM WorkshopAdmin.dbo.LabObjectOwnership WHERE MarkerId = @MarkerId AND SchemaVersion = @SchemaVersion AND DatabaseName COLLATE DATABASE_DEFAULT = DB_NAME() COLLATE DATABASE_DEFAULT)
     THROW 51701, 'Existing lab object ownership fingerprints do not match finalized objects.', 1;
 INSERT WorkshopAdmin.dbo.LabObjectOwnership
     (MarkerId, SchemaVersion, DatabaseName, ObjectName, ObjectType, DefinitionHash, SchemaHash, RecordedAtUtc)
@@ -422,7 +438,8 @@ WHERE NOT EXISTS
 (
     SELECT 1 FROM WorkshopAdmin.dbo.LabObjectOwnership AS ownership
     WHERE ownership.MarkerId = @MarkerId AND ownership.SchemaVersion = @SchemaVersion
-      AND ownership.DatabaseName = DB_NAME() AND ownership.ObjectName = current_object.ObjectName
+      AND ownership.DatabaseName COLLATE DATABASE_DEFAULT = DB_NAME() COLLATE DATABASE_DEFAULT
+      AND ownership.ObjectName COLLATE DATABASE_DEFAULT = current_object.ObjectName COLLATE DATABASE_DEFAULT
 );
 '@
     Invoke-WorkshopSqlCommand -Connection $connection -CommandText $finalizeLabOwnershipCommand

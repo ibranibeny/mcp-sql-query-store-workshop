@@ -669,7 +669,7 @@ DECLARE @ExpectedForeignKeyColumns table
     constraint_name sysname NOT NULL, parent_table sysname NOT NULL, parent_column sysname NOT NULL,
     referenced_schema sysname NOT NULL, referenced_table sysname NOT NULL,
     referenced_column sysname NOT NULL, constraint_column_id int NOT NULL,
-    delete_referential_action_desc nvarchar(60) NOT NULL, update_referential_action_desc nvarchar(60) NOT NULL,
+    delete_referential_action_desc nvarchar(60) COLLATE Latin1_General_CI_AS_KS_WS NOT NULL, update_referential_action_desc nvarchar(60) COLLATE Latin1_General_CI_AS_KS_WS NOT NULL,
     is_disabled bit NOT NULL, is_not_trusted bit NOT NULL, is_not_for_replication bit NOT NULL
 );
 INSERT @ExpectedForeignKeyColumns VALUES
@@ -715,7 +715,7 @@ OR EXISTS
 
 DECLARE @ExpectedUniqueIndexColumns table
 (
-    index_name sysname NOT NULL, table_name sysname NOT NULL, type_desc nvarchar(60) NOT NULL,
+    index_name sysname NOT NULL, table_name sysname NOT NULL, type_desc nvarchar(60) COLLATE Latin1_General_CI_AS_KS_WS NOT NULL,
     is_primary_key bit NOT NULL, is_unique_constraint bit NOT NULL, column_name sysname NOT NULL,
     key_ordinal tinyint NOT NULL, is_descending_key bit NOT NULL, filter_definition nvarchar(4000) NULL,
     is_disabled bit NOT NULL, is_hypothetical bit NOT NULL
@@ -765,7 +765,7 @@ OR EXISTS
 
 DECLARE @ExpectedNonUniqueIndexColumns table
 (
-    index_name sysname NOT NULL, table_name sysname NOT NULL, type_desc nvarchar(60) NOT NULL,
+    index_name sysname NOT NULL, table_name sysname NOT NULL, type_desc nvarchar(60) COLLATE Latin1_General_CI_AS_KS_WS NOT NULL,
     column_name sysname NOT NULL, key_ordinal tinyint NOT NULL, is_descending_key bit NOT NULL,
     filter_definition nvarchar(4000) NULL, is_disabled bit NOT NULL, is_hypothetical bit NOT NULL
 );
@@ -806,7 +806,7 @@ OR EXISTS
 
 DECLARE @ExpectedWorkshopTrialIndexColumns table
 (
-    index_name sysname NOT NULL, type_desc nvarchar(60) NOT NULL,
+    index_name sysname NOT NULL, type_desc nvarchar(60) COLLATE Latin1_General_CI_AS_KS_WS NOT NULL,
     is_unique bit NOT NULL, is_primary_key bit NOT NULL, is_unique_constraint bit NOT NULL,
     column_name sysname NOT NULL, index_column_id int NOT NULL, key_ordinal tinyint NOT NULL,
     is_descending_key bit NOT NULL, is_included_column bit NOT NULL,
@@ -1915,7 +1915,7 @@ BEGIN
         THROW 51667, 'McpReaderPassword does not satisfy the workshop secret policy.', 1;
     END;
 
-    DECLARE @EscapedMcpReaderPasswordForRotation nvarchar(8000) =
+    DECLARE @EscapedMcpReaderPasswordForRotation nvarchar(4000) =
         REPLACE(@McpReaderPassword, N'''', N'''''' );
     DECLARE @ReaderLoginPasswordSql nvarchar(max) =
         N'ALTER LOGIN ' + QUOTENAME(@ReaderLoginName)
@@ -2061,7 +2061,7 @@ BEGIN
         THROW 51667, 'McpReaderPassword does not satisfy the workshop secret policy.', 1;
     END;
 
-    DECLARE @EscapedMcpReaderPassword nvarchar(8000) =
+    DECLARE @EscapedMcpReaderPassword nvarchar(4000) =
         REPLACE(@McpReaderPassword, N'''', N'''''' );
     DECLARE @CreateReaderLoginSql nvarchar(max) =
         N'CREATE LOGIN ' + QUOTENAME(@ReaderLoginName)
@@ -2111,8 +2111,9 @@ IF NOT EXISTS
    OR IS_SRVROLEMEMBER(N'sysadmin', N'mcp_workshop_reader') <> 0
     THROW 51668, 'The mcp_workshop_reader server login contract is invalid.', 1;
 
-GRANT VIEW SERVER PERFORMANCE STATE TO [mcp_workshop_diagnostics_certificate_login];
-REVOKE VIEW SERVER STATE FROM [mcp_workshop_diagnostics_certificate_login];
+EXEC master.sys.sp_executesql N'GRANT VIEW SERVER PERFORMANCE STATE TO [mcp_workshop_diagnostics_certificate_login];';
+EXEC master.sys.sp_executesql N'REVOKE VIEW SERVER STATE FROM [mcp_workshop_diagnostics_certificate_login];';
+EXEC master.sys.sp_executesql N'REVOKE CONNECT SQL FROM [mcp_workshop_diagnostics_certificate_login];';
 
 IF EXISTS
 (
@@ -2168,7 +2169,7 @@ ADD SIGNATURE TO OBJECT::lab.usp_GetActiveWorkshopGrants
 DECLARE @ExpectedSignedObjects table
 (
     object_id int NOT NULL, thumbprint varbinary(32) NOT NULL,
-    crypt_type_desc nvarchar(60) NOT NULL
+    crypt_type_desc nvarchar(60) COLLATE Latin1_General_CI_AS_KS_WS NOT NULL
 );
 INSERT @ExpectedSignedObjects VALUES
     (OBJECT_ID(N'lab.usp_GetMemorySnapshot', N'P'), @DatabaseCertificateThumbprint, N'SIGNATURE BY CERTIFICATE'),
@@ -2249,8 +2250,9 @@ IF EXISTS
     SELECT 1 FROM master.sys.server_permissions
     WHERE grantee_principal_id = SUSER_ID(N'mcp_workshop_reader')
       AND state IN (N'G', N'W')
+      AND permission_name <> N'CONNECT SQL'
 )
-    THROW 51681, 'The reader login must not hold any direct server grant.', 1;
+    THROW 51681, 'The reader login must not hold any server grant beyond CONNECT SQL.', 1;
 
 GRANT CONNECT TO [mcp_workshop_reader];
 GRANT EXECUTE ON OBJECT::lab.usp_GetMemorySnapshot TO [mcp_workshop_reader];
@@ -2291,19 +2293,17 @@ DENY VIEW DEFINITION ON SCHEMA::lab TO [mcp_workshop_reader];
 DENY ALTER ON DATABASE::[AdventureWorks2022] TO [mcp_workshop_reader];
 DENY TAKE OWNERSHIP ON DATABASE::[AdventureWorks2022] TO [mcp_workshop_reader];
 DENY VIEW DEFINITION ON DATABASE::[AdventureWorks2022] TO [mcp_workshop_reader];
-DENY IMPERSONATE ANY USER TO [mcp_workshop_reader];
 
 DECLARE @ExpectedReaderPermissions table
 (
     class tinyint NOT NULL, major_id int NOT NULL, minor_id int NOT NULL,
-    permission_name nvarchar(128) NOT NULL, state char(1) NOT NULL
+    permission_name nvarchar(128) COLLATE Latin1_General_CI_AS_KS_WS NOT NULL, state char(1) COLLATE Latin1_General_CI_AS_KS_WS NOT NULL
 );
 INSERT @ExpectedReaderPermissions VALUES
     (0, 0, 0, N'CONNECT', N'G'),
     (0, 0, 0, N'ALTER', N'D'),
     (0, 0, 0, N'TAKE OWNERSHIP', N'D'),
     (0, 0, 0, N'VIEW DEFINITION', N'D'),
-    (0, 0, 0, N'IMPERSONATE ANY USER', N'D'),
     (3, SCHEMA_ID(N'lab'), 0, N'TAKE OWNERSHIP', N'D'),
     (3, SCHEMA_ID(N'lab'), 0, N'VIEW DEFINITION', N'D'),
     (1, OBJECT_ID(N'lab.WorkshopRun'), 0, N'INSERT', N'D'),
@@ -2395,7 +2395,7 @@ IF EXISTS
       (
           (public_permission.class = 0
            AND public_permission.permission_name IN
-               (N'ALTER', N'CONTROL', N'TAKE OWNERSHIP', N'IMPERSONATE ANY USER', N'VIEW DEFINITION'))
+               (N'ALTER', N'CONTROL', N'TAKE OWNERSHIP', N'VIEW DEFINITION'))
           OR (public_permission.class = 3
               AND public_permission.major_id = SCHEMA_ID(N'lab')
               AND public_permission.permission_name IN
@@ -2480,7 +2480,7 @@ BEGIN TRY
         FROM @EffectiveReaderPermissions AS effective
         WHERE (effective.securable_class = N'DATABASE'
                AND effective.permission_name IN
-                   (N'ALTER', N'CONTROL', N'TAKE OWNERSHIP', N'IMPERSONATE ANY USER', N'VIEW DEFINITION'))
+                   (N'ALTER', N'CONTROL', N'TAKE OWNERSHIP', N'VIEW DEFINITION'))
            OR (effective.securable_class IN (N'SCHEMA', N'OBJECT')
                AND effective.permission_name IN
                    (N'ALTER', N'CONTROL', N'TAKE OWNERSHIP', N'VIEW DEFINITION', N'IMPERSONATE'))

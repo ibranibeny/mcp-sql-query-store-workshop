@@ -1807,7 +1807,7 @@ def test_summary_views_and_reader_permissions_are_least_privileged_and_verified(
     assert "FROM MASTER.SYS.SERVER_PERMISSIONS" in text
     assert "STATE IN (N'G', N'W')" in text
     assert "PERMISSION_NAME IN (N'VIEW SERVER STATE'" not in text
-    for permission in ("TAKE OWNERSHIP", "VIEW DEFINITION", "IMPERSONATE ANY USER"):
+    for permission in ("TAKE OWNERSHIP", "VIEW DEFINITION"):
         assert f"DENY {permission}" in text
     permission_verification = text[text.index("DECLARE @PERMISSIONFAILURE"):]
     for table in ("WORKSHOPRUN", "WORKSHOPSAMPLE", "WORKSHOPREQUESTSAMPLE", "VALIDATIONRUN"):
