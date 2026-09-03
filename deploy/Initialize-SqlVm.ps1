@@ -720,7 +720,7 @@ ORDER BY file_id;
     $databaseMarker = [string](Invoke-LocalSqlScalar "SELECT TOP (1) CONVERT(nvarchar(36), MarkerId) FROM AdventureWorks2022.lab.WorkshopMarker;")
     $queryStoreState = [string](Invoke-LocalSqlScalar "SELECT actual_state_desc FROM AdventureWorks2022.sys.database_query_store_options;")
     $resourceGovernorState = [string](Invoke-LocalSqlScalar "SELECT CASE WHEN is_enabled = 1 THEN 'Enabled' ELSE 'Disabled' END FROM sys.resource_governor_configuration;")
-    $procedureCount = [int](Invoke-LocalSqlScalar "SELECT COUNT(*) FROM AdventureWorks2022.sys.procedures WHERE schema_id = SCHEMA_ID(N'lab');")
+    $procedureCount = [int](Invoke-LocalSqlScalar "SELECT COUNT(*) FROM AdventureWorks2022.sys.procedures AS p INNER JOIN AdventureWorks2022.sys.schemas AS s ON s.schema_id = p.schema_id WHERE s.name = N'lab';")
     $priorMaxServerMemory = [int](Invoke-LocalSqlScalar "SELECT MaxServerMemoryMB FROM WorkshopAdmin.dbo.ConfigurationBackup WHERE MarkerId = '68A70D6E-62D8-4A77-8F0A-9DA7934DBA7C' AND SchemaVersion = 1;")
     $tdsEncryption = [string](Invoke-LocalSqlScalar 'SELECT encrypt_option FROM sys.dm_exec_connections WHERE session_id = @@SPID;')
     Assert-Condition ($databaseMarker -ceq '68A70D6E-62D8-4A77-8F0A-9DA7934DBA7C') 'Workshop database marker readback failed.'
