@@ -530,7 +530,7 @@ Describe 'Bootstrap orchestration and evidence contracts' {
                 Admin = [pscustomobject]@{
                     SchemaVersion = '1.0'; DeploymentId = $deploymentId; Completed = $true
                     Evidence = [pscustomobject]@{ Sanitized = $true }
-                    Vm = [pscustomobject]@{ Name = 'vm-mcpsql-admin'; Size = 'Standard_D4s_v5'; Location = 'indonesiacentral'; AdminPublicIpBoundaryObserved = $true; PublicIpCount = 1; SecureBoot = $true; Tpm = $true; Os = 'Microsoft Windows 11 Enterprise'; Build = '26100'; Activation = 'ObservedUnknown'; WindowsClientLicenseAttested = $true }
+                    Vm = [pscustomobject]@{ Name = 'vm-mcpsql-admin'; Size = 'Standard_D4s_v5'; Location = 'indonesiacentral'; AdminPublicIpBoundaryObserved = $true; PublicIpCount = 0; SecureBoot = $true; Tpm = $true; Os = 'Microsoft Windows 11 Enterprise'; Build = '26100'; Activation = 'ObservedUnknown'; WindowsClientLicenseAttested = $true }
                     Repository = [pscustomobject]@{ Commit = $commit }
                     Workspace = [pscustomobject]@{ User = 'VM-MCPSQL-ADMIN\workshop-admin'; WorkspaceUserModify = $true }
                     RootEnvAcl = [pscustomobject]@{ Path = 'C:\McpSqlWorkshop\workspace\.env'; Restricted = $true; EnvAclRestricted = $true }
@@ -836,7 +836,7 @@ Describe 'Bootstrap orchestration and evidence contracts' {
         @{ Path = 'Sql.Certificate.RegistryCertificate'; Value = $null },
         @{ Path = 'Sql.Certificate.TlsLoadFailures'; Value = 1 },
         @{ Path = 'Sql.Database.ProcedureCount'; Value = 8 },
-        @{ Path = 'Admin.Vm.PublicIpCount'; Value = 0 },
+        @{ Path = 'Admin.Vm.PublicIpCount'; Value = 2 },
         @{ Path = 'Admin.Workspace.WorkspaceUserModify'; Value = $false },
         @{ Path = 'Admin.RootEnvAcl.Restricted'; Value = $false },
         @{ Path = 'Admin.RootEnvAcl.EnvAclRestricted'; Value = $false },
