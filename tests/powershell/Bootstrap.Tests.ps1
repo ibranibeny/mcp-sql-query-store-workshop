@@ -541,7 +541,7 @@ Describe 'Bootstrap orchestration and evidence contracts' {
                         [pscustomobject]@{ Id = 'Microsoft.DotNet.SDK.9'; VersionReadback = '9.0.100' },
                         [pscustomobject]@{ Id = 'Git.Git'; VersionReadback = '2.49.0' },
                         [pscustomobject]@{ Id = 'GitHub.cli'; VersionReadback = '2.70.0' }
-                    ); Extensions = @('ms-mssql.mssql@1.30.0', 'GitHub.copilot@1.300.0', 'GitHub.copilot-chat@0.25.0', 'ms-vscode.powershell@2025.0.0') }
+                    ); Extensions = @('ms-mssql.mssql@1.30.0', 'ms-vscode.powershell@2025.0.0'); BuiltInExtensions = @('GitHub.copilot', 'GitHub.copilot-chat') }
                     Auth = [pscustomobject]@{ GitHubCliAuthStatus = 'Unavailable'; CopilotAuthStatus = 'InteractiveSignInRequired' }
                     Network = [pscustomobject]@{ DnsName = 'sql01.mcpworkshop.internal'; ResolvedAddress = '10.20.2.10'; Tcp1433 = $true }
                     SqlTls = [pscustomobject]@{ DnsName = 'sql01.mcpworkshop.internal'; Address = '10.20.2.10'; Tcp1433 = $true; CertificateThumbprint = $thumbprint; PublicCertificateSha256 = $publicHash; CertificateValidated = $true; ValidationMethod = 'SqlClientChainHostAndTransferredCertificate'; EncryptOption = 'TRUE'; TrustServerCertificate = $false; HostNameInCertificate = 'sql01.mcpworkshop.internal'; RemoteAdminTest = $true }

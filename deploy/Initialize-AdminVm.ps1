@@ -80,10 +80,13 @@ function Install-WorkshopVsCodeExtension {
         '--extensions-dir', $ExtensionDirectory, '--install-extension', $ExtensionId, '--force'
     )
     if ([int] $result.ExitCode -eq 0) { return 'Installed' }
-    # Newer VS Code ships Copilot Chat as a built-in that the marketplace copy cannot
-    # downgrade. That is a satisfied requirement, not an installation failure.
+    # A newer VS Code ships GitHub Copilot and Copilot Chat as built-in extensions. Installing the
+    # marketplace copy of such an extension - or any extension whose dependency is a newer built-in
+    # (installing GitHub.copilot pulls the built-in GitHub.copilot-chat) - exits nonzero with a
+    # "built-in extension ... cannot be downgraded" message. The bundled built-in already satisfies
+    # the requirement, so record a built-in outcome instead of failing the bootstrap.
     $text = @($result.Output) -join ' '
-    if ($text -match "(?i)'$([regex]::Escape($ExtensionId))'\s+is\s+a\s+built-in\s+extension") {
+    if ($text -match '(?i)is a built-in extension' -and $text -match '(?i)cannot be downgraded') {
         return 'BuiltIn'
     }
     throw "VS Code extension '$ExtensionId' could not be installed."
@@ -548,6 +551,7 @@ try {
         if ($extensionOutcomes[$extensionId] -ceq 'BuiltIn') { continue }
         Assert-Condition ($extensionVersions -match "^$([regex]::Escape($extensionId))@") "VS Code extension '$extensionId' version could not be read back."
     }
+    $builtInExtensions = @($extensionIds | Where-Object { $extensionOutcomes[$_] -ceq 'BuiltIn' })
 
     $env:NUGET_PACKAGES = if ([string]::IsNullOrWhiteSpace([string]$payload.NugetPackagesPath)) {
         Join-Path $repositoryRoot '.packages'
@@ -632,6 +636,7 @@ try {
         DAB = $dabVersion
         WingetPackages = @($packageIds | ForEach-Object { [ordered]@{ Id = $_; VersionReadback = $packageVersions[$_] } })
         Extensions = $extensionVersions
+        BuiltInExtensions = $builtInExtensions
     }
     $readiness = [ordered]@{
         Completed = $true
