@@ -137,8 +137,13 @@ function Set-WorkshopLoopbackHostName {
     # FQDN connection keeps the bootstrap process from caching a failed logon.
     $key = 'HKLM:\SYSTEM\CurrentControlSet\Control\Lsa\MSV1_0'
     if (-not (Test-Path -LiteralPath $key)) { $null = New-Item -Path $key -Force }
-    $existing = @((Get-ItemProperty -LiteralPath $key -Name 'BackConnectionHostNames' -ErrorAction SilentlyContinue).BackConnectionHostNames) |
-        Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+    # Read the current value defensively: the property is absent on a fresh image, and
+    # Set-StrictMode -Version Latest throws on a missing property rather than returning null.
+    $existing = @()
+    $item = Get-ItemProperty -LiteralPath $key -Name 'BackConnectionHostNames' -ErrorAction SilentlyContinue
+    if ($null -ne $item -and $null -ne $item.PSObject.Properties['BackConnectionHostNames']) {
+        $existing = @($item.BackConnectionHostNames | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    }
     if ($existing -notcontains $HostName -and $PSCmdlet.ShouldProcess($HostName, 'Allow NTLM loopback')) {
         $null = New-ItemProperty -LiteralPath $key -Name 'BackConnectionHostNames' -PropertyType MultiString `
             -Value (@($existing) + $HostName) -Force
