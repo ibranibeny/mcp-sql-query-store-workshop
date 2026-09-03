@@ -594,9 +594,14 @@ ORDER BY file_id;
     Assert-Condition ($forceEncryption -eq 1) 'SQL ForceEncryption readback failed.'
     $storeCertificate = Get-Item -LiteralPath "Cert:\LocalMachine\My\$certificateThumbprint" -ErrorAction Stop
     Assert-Condition (([string]$storeCertificate.Thumbprint -replace '\s', '').ToUpperInvariant() -ceq $certificateThumbprint -and $storeCertificate.HasPrivateKey) 'SQL certificate store readback failed.'
-    $errorLogDirectory = [string](Get-ItemPropertyValue -Path $instanceRoot -Name ErrorLogPath -ErrorAction Stop)
-    Assert-Condition (-not [string]::IsNullOrWhiteSpace($errorLogDirectory)) 'SQL instance ErrorLogPath registry readback is empty.'
-    $errorLogPath = Join-Path $errorLogDirectory 'ERRORLOG'
+    # The SQL 2022 image has no ErrorLogPath value; the log location is the -e startup
+    # parameter under the instance Parameters key, which is the full ERRORLOG file path.
+    $startupParameters = Get-ItemProperty -Path (Join-Path $instanceRoot 'Parameters') -ErrorAction Stop
+    $errorLogArgument = @($startupParameters.PSObject.Properties |
+        Where-Object { $_.Name -like 'SQLArg*' -and ([string] $_.Value).StartsWith('-e') } |
+        Select-Object -First 1).Value
+    Assert-Condition (-not [string]::IsNullOrWhiteSpace([string] $errorLogArgument)) 'SQL instance error log startup parameter (-e) was not found.'
+    $errorLogPath = ([string] $errorLogArgument).Substring(2)
     Assert-Condition (Test-Path -LiteralPath $errorLogPath -PathType Leaf) 'Exact SQL instance error log was not found after restart.'
     $errorLogText = Get-Content -LiteralPath $errorLogPath -Raw
     $tlsLoadFailures = @([regex]::Matches($errorLogText, '(?im)^.*(?:(?:failed|failure|could not|unable|not).*(?:load|initialize).*(?:certificate|TLS)|(?:certificate|TLS).*(?:failed|failure|could not|unable|not).*(?:load|initialize)).*$')).Count
