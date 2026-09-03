@@ -28,7 +28,17 @@ The facilitator runs these once from the repository root, signed in to Azure Pow
 
 Deployment proceeds through network and NAT, NSGs and ASGs, private DNS, the SQL VM, SQL bootstrap, the administration VM, and administration bootstrap. SQL bootstrap is the longest stage because it restores `AdventureWorks2022` and builds `lab.FactSales`.
 
-Between sessions, control cost with `deploy/Stop-WorkshopEnvironment.ps1` and `deploy/Resume-WorkshopEnvironment.ps1`. Remove everything with `deploy/Remove-WorkshopEnvironment.ps1`. Resume and removal each require their confirmation phrase typed in full.
+Between sessions, control cost with these scripts:
+
+| Script | Effect |
+|---|---|
+| `deploy/Stop-WorkshopEnvironment.ps1` | Deallocates both VMs; billing for compute stops |
+| `deploy/Start-WorkshopEnvironment.ps1` | Reads each VM power state and starts only the VMs that are not already running |
+| `deploy/Resume-WorkshopEnvironment.ps1` | Repairs a partially deployed environment; requires its confirmation phrase |
+| `deploy/Remove-WorkshopEnvironment.ps1` | Deletes everything; requires `DELETE rg-mcp-sql-workshop` |
+
+Start reports `already-running` for a VM it did not need to touch, and
+`started-and-verified` only after reading the power state back.
 
 ### Phase 2. Access path on workshop day
 
