@@ -2732,33 +2732,55 @@ function Test-WorkshopVmBoundary {
     param(
         [Parameter(Mandatory)][hashtable] $Config,
         [Parameter(Mandatory)][hashtable] $ResolvedImages,
-        [hashtable] $Operations
+        [hashtable] $Operations,
+        [int] $MaxReadAttempts = 5,
+        [int] $ReadRetryDelaySeconds = 15
     )
 
     if ($null -eq $Operations) { $Operations = Get-DefaultWorkshopVmOperationSet }
     Assert-WorkshopVmOperationSet -Operations $Operations -ReadOnly
+    if ($MaxReadAttempts -lt 1) { $MaxReadAttempts = 1 }
+
+    # This verification runs immediately after SQL IaaS registration and auto-shutdown
+    # configuration, which briefly leave the SQL VM in a transitional 'updating' provisioning
+    # state. Reading the VM or its disks during that window can throw a transient Azure Resource
+    # Manager error, which previously failed an otherwise-correct deployment at the 'VM boundary
+    # read' checkpoint. Retry only the read-side exception a bounded number of times; a persistent
+    # read failure still fails closed, and any exact-shape drift is surfaced immediately without
+    # retrying (a settled resource that does not match is a real defect, not a transient one).
     $checks = [System.Collections.Generic.List[object]]::new()
-    try {
-        $subscriptionId = [string] (& $Operations.GetSubscriptionId)
-        foreach ($role in @('Admin', 'Sql')) {
-            $version = [string] $ResolvedImages[$role].Version
-            $expectedVm = Get-WorkshopVmSpecification -Role $role -Config $Config -ImageVersion $version `
-                -SubscriptionId $subscriptionId
-            $actualVm = & $Operations.GetVm $expectedVm.Name $Config.ResourceGroupName
-            Add-WorkshopBoundaryCheck -Checks $checks -Name "$role VM exact shape" `
-                -Passed ($null -ne $actualVm -and (Test-WorkshopNetworkResourceMatch -Expected $expectedVm -Actual $actualVm)) `
-                -Detail 'VM identity, image, size, security, OS disk, NICs, and data disks must exactly match.'
-            foreach ($diskSpec in @(Get-WorkshopDiskSpecification -VmSpecification $expectedVm)) {
-                $actualDisk = & $Operations.GetDisk $diskSpec.Name $Config.ResourceGroupName $diskSpec
-                Add-WorkshopBoundaryCheck -Checks $checks -Name "Managed disk $($diskSpec.Name) exact shape" `
-                    -Passed ($null -ne $actualDisk -and (Test-WorkshopNetworkResourceMatch -Expected $diskSpec -Actual $actualDisk)) `
-                    -Detail 'Managed disk identity, size, SKU, LUN, and cache intent must exactly match.'
+    for ($attempt = 1; $attempt -le $MaxReadAttempts; $attempt++) {
+        $checks = [System.Collections.Generic.List[object]]::new()
+        $readException = $null
+        try {
+            $subscriptionId = [string] (& $Operations.GetSubscriptionId)
+            foreach ($role in @('Admin', 'Sql')) {
+                $version = [string] $ResolvedImages[$role].Version
+                $expectedVm = Get-WorkshopVmSpecification -Role $role -Config $Config -ImageVersion $version `
+                    -SubscriptionId $subscriptionId
+                $actualVm = & $Operations.GetVm $expectedVm.Name $Config.ResourceGroupName
+                Add-WorkshopBoundaryCheck -Checks $checks -Name "$role VM exact shape" `
+                    -Passed ($null -ne $actualVm -and (Test-WorkshopNetworkResourceMatch -Expected $expectedVm -Actual $actualVm)) `
+                    -Detail 'VM identity, image, size, security, OS disk, NICs, and data disks must exactly match.'
+                foreach ($diskSpec in @(Get-WorkshopDiskSpecification -VmSpecification $expectedVm)) {
+                    $actualDisk = & $Operations.GetDisk $diskSpec.Name $Config.ResourceGroupName $diskSpec
+                    Add-WorkshopBoundaryCheck -Checks $checks -Name "Managed disk $($diskSpec.Name) exact shape" `
+                        -Passed ($null -ne $actualDisk -and (Test-WorkshopNetworkResourceMatch -Expected $diskSpec -Actual $actualDisk)) `
+                        -Detail 'Managed disk identity, size, SKU, LUN, and cache intent must exactly match.'
+                }
             }
         }
-    }
-    catch {
-        Add-WorkshopBoundaryCheck -Checks $checks -Name 'VM boundary read' -Passed $false `
-            -Detail (ConvertTo-WorkshopSafeDetail -Value $_.Exception.Message)
+        catch {
+            $readException = $_
+        }
+        if ($null -eq $readException) { break }
+        if ($attempt -ge $MaxReadAttempts) {
+            Add-WorkshopBoundaryCheck -Checks $checks -Name 'VM boundary read' -Passed $false `
+                -Detail (ConvertTo-WorkshopSafeDetail -Value $readException.Exception.Message)
+        }
+        elseif ($ReadRetryDelaySeconds -gt 0) {
+            Start-Sleep -Seconds $ReadRetryDelaySeconds
+        }
     }
     [pscustomobject][ordered]@{
         Passed = @($checks | Where-Object Status -EQ 'Failed').Count -eq 0

@@ -1957,6 +1957,43 @@ Describe 'Exact workshop VM creation' {
         $result.Passed | Should -BeFalse
         ($result.Checks | Where-Object Name -EQ 'Sql VM exact shape').Status | Should -Be 'Failed'
     }
+
+    It 'retries a transient boundary read and passes once the resource settles' {
+        $null = New-WorkshopAdminVm -Config $script:Config -ImageVersion '26100.2033.1' `
+            -Credential $script:VmCredential -WindowsClientLicenseAttested $true -Operations $script:VmOperations
+        $null = New-WorkshopSqlVm -Config $script:Config -ImageVersion '16.0.1135.2' `
+            -Credential $script:VmCredential -Operations $script:VmOperations
+        $script:BoundaryReadAttempts = 0
+        $script:VmOperations.GetVm = {
+            param($Name, $ResourceGroupName)
+            $null = $ResourceGroupName
+            $script:BoundaryReadAttempts++
+            if ($script:BoundaryReadAttempts -eq 1) { throw 'The resource is updating and cannot be read.' }
+            if ($script:VmState.ContainsKey($Name)) { return $script:VmState[$Name] }
+            $null
+        }
+
+        $result = Test-WorkshopVmBoundary -Config $script:Config -ResolvedImages @{
+            Admin = [pscustomobject]@{ Version = '26100.2033.1' }
+            Sql = [pscustomobject]@{ Version = '16.0.1135.2' }
+        } -Operations $script:VmOperations -MaxReadAttempts 3 -ReadRetryDelaySeconds 0
+
+        $result.Passed | Should -BeTrue
+        @($result.Checks | Where-Object Name -EQ 'VM boundary read') | Should -HaveCount 0
+        $script:BoundaryReadAttempts | Should -BeGreaterThan 1
+    }
+
+    It 'fails closed with a VM boundary read checkpoint when the read never settles' {
+        $script:VmOperations.GetVm = { throw 'Persistent Azure Resource Manager read failure.' }
+
+        $result = Test-WorkshopVmBoundary -Config $script:Config -ResolvedImages @{
+            Admin = [pscustomobject]@{ Version = '26100.2033.1' }
+            Sql = [pscustomobject]@{ Version = '16.0.1135.2' }
+        } -Operations $script:VmOperations -MaxReadAttempts 2 -ReadRetryDelaySeconds 0
+
+        $result.Passed | Should -BeFalse
+        ($result.Checks | Where-Object Name -EQ 'VM boundary read').Status | Should -Be 'Failed'
+    }
 }
 
 Describe 'SQL IaaS and auto-shutdown exact resources' {
