@@ -57,7 +57,11 @@ function Invoke-NativeChecked {
     if ($LASTEXITCODE -ne 0) {
         throw "Required command failed: $FilePath. Corporate network policy may be blocking an official endpoint."
     }
-    @($output | ForEach-Object { [string] $_ })
+    # Return with the unary comma so a single-line result stays an array for the caller. Without
+    # it PowerShell unwraps a one-element array to a scalar string, and callers that index the
+    # result (for example (...)[-1].Trim() for 'git rev-parse HEAD' or (...)[0] for
+    # 'dotnet --version') would operate on a single character instead of the line.
+    , @($output | ForEach-Object { [string] $_ })
 }
 
 function Install-WorkshopVsCodeExtension {
