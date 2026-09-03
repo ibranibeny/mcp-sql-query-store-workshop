@@ -110,6 +110,13 @@ function Split-WorkshopSqlBatch {
             continue
         }
 
+        # Skip sqlcmd directives (for example ':on error exit'): they are not valid T-SQL,
+        # and the runner already fails fast on any ADO.NET error. Scripts keep them so they
+        # can also be run manually through sqlcmd.
+        if (-not $insideString -and -not $insideBlockComment -and $line -match '^\s*:[A-Za-z!]') {
+            continue
+        }
+
         $null = $current.Append($lineWithEnding)
         for ($index = 0; $index -lt $line.Length; $index++) {
             $character = $line[$index]
