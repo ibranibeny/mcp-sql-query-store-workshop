@@ -3857,10 +3857,26 @@ if ((Get-FileHash -LiteralPath `$launcherPath -Algorithm SHA256).Hash -cne '$lau
         }
         ReadReadiness = {
             param($VmName, $ResourceGroupName, $Path)
-            $command = "`$ErrorActionPreference='Stop'; Get-Content -LiteralPath '$($Path.Replace("'", "''"))' -Raw"
+            # RunCommand truncates StdOut to roughly the last 4096 characters; the readiness
+            # JSON exceeds that, so compress on the VM and decompress here to avoid losing the
+            # front of the document.
+            $literal = $Path.Replace("'", "''")
+            $command = @"
+`$ErrorActionPreference='Stop'
+`$bytes = [IO.File]::ReadAllBytes('$literal')
+`$stream = [IO.MemoryStream]::new()
+`$gzip = [IO.Compression.GZipStream]::new(`$stream, [IO.Compression.CompressionMode]::Compress)
+`$gzip.Write(`$bytes, 0, `$bytes.Length); `$gzip.Dispose()
+[Convert]::ToBase64String(`$stream.ToArray())
+"@
             $result = Invoke-AzVMRunCommand -ResourceGroupName $ResourceGroupName -VMName $VmName `
                 -CommandId RunPowerShellScript -ScriptString $command -ErrorAction Stop
-            $text = @($result.Value | ForEach-Object Message) -join [Environment]::NewLine
+            $encoded = (@($result.Value | ForEach-Object Message) -join '').Trim()
+            $compressed = [Convert]::FromBase64String($encoded)
+            $inputStream = [IO.MemoryStream]::new($compressed)
+            $gzipStream = [IO.Compression.GZipStream]::new($inputStream, [IO.Compression.CompressionMode]::Decompress)
+            $reader = [IO.StreamReader]::new($gzipStream)
+            try { $text = $reader.ReadToEnd() } finally { $reader.Dispose() }
             $text | ConvertFrom-Json
         }
         ReadPublicCertificate = {
