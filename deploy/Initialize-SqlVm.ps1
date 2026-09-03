@@ -127,6 +127,62 @@ function Invoke-LocalSqlQuery {
     }
 }
 
+function Set-WorkshopLoopbackHostName {
+    [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'Low')]
+    param([Parameter(Mandatory)][string] $HostName)
+
+    # A standalone (non-domain) VM has no Kerberos, so an Integrated Security connection to
+    # the machine's own FQDN uses NTLM, which the loopback check rejects as ANONYMOUS LOGON.
+    # BackConnectionHostNames allow-lists this exact name (KB896861). Setting it before any
+    # FQDN connection keeps the bootstrap process from caching a failed logon.
+    $key = 'HKLM:\SYSTEM\CurrentControlSet\Control\Lsa\MSV1_0'
+    if (-not (Test-Path -LiteralPath $key)) { $null = New-Item -Path $key -Force }
+    $existing = @((Get-ItemProperty -LiteralPath $key -Name 'BackConnectionHostNames' -ErrorAction SilentlyContinue).BackConnectionHostNames) |
+        Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+    if ($existing -notcontains $HostName -and $PSCmdlet.ShouldProcess($HostName, 'Allow NTLM loopback')) {
+        $null = New-ItemProperty -LiteralPath $key -Name 'BackConnectionHostNames' -PropertyType MultiString `
+            -Value (@($existing) + $HostName) -Force
+    }
+}
+
+function Wait-WorkshopFqdnAuthentication {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string] $HostName,
+        [int] $TimeoutSeconds = 120,
+        [int] $DelaySeconds = 8
+    )
+
+    # The BackConnectionHostNames change can take a short time to propagate in LSA, so retry
+    # the private-DNS connection until it authenticates or the bounded budget is exhausted.
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    $lastError = $null
+    do {
+        $builder = [System.Data.SqlClient.SqlConnectionStringBuilder]::new()
+        $builder['Data Source'] = $HostName
+        $builder['Initial Catalog'] = 'master'
+        $builder['Integrated Security'] = $true
+        $builder['Encrypt'] = $true
+        $builder['TrustServerCertificate'] = $false
+        $builder['Application Name'] = 'MCP-SQL-Workshop-Bootstrap'
+        $builder['Connect Timeout'] = 15
+        $connection = [System.Data.SqlClient.SqlConnection]::new($builder.ConnectionString)
+        try {
+            $connection.Open()
+            return
+        }
+        catch {
+            $lastError = $_
+            Start-Sleep -Seconds $DelaySeconds
+        }
+        finally {
+            $connection.Dispose()
+            $builder.Clear()
+        }
+    } while ([DateTime]::UtcNow -lt $deadline)
+    throw "SQL private-DNS authentication did not become ready within $TimeoutSeconds seconds: $($lastError.Exception.Message)"
+}
+
 function Get-SqlService {
     $services = @(Get-CimInstance Win32_Service -Filter "Name LIKE 'MSSQL%'" |
         Where-Object { $_.PathName -match '(?i)\\sqlservr\.exe(?:"|\s)' })
@@ -418,6 +474,10 @@ Assert-Condition (
 # administrator password is used on this path.
 $null = Set-WorkshopCurrentPrincipalSysadmin -InstanceName 'MSSQLSERVER' -Confirm:$false
 
+# Allow-list the private DNS name for NTLM loopback before any FQDN connection, so the
+# later private-DNS TLS validation does not fail as ANONYMOUS LOGON on this non-domain VM.
+Set-WorkshopLoopbackHostName -HostName $privateDnsName
+
 try {
     $metadata = Invoke-RestMethod -Headers @{ Metadata = 'true' } -Method Get -Uri $metadataUri -TimeoutSec 10
     Assert-Condition ($metadata.compute.name -ceq $payload.ExpectedVmName) 'IMDS VM identity does not match.'
@@ -618,6 +678,9 @@ ORDER BY file_id;
     $normalizedErrorLog = $errorLogText -replace '\s', ''
     $startupBindingEvidence = if ($normalizedErrorLog -match [regex]::Escape($certificateThumbprint) -and
         $errorLogText -match '(?i)certificate.*(?:successfully loaded|loaded successfully)') { 'ExactThumbprint' } else { 'DeferredRemoteValidation' }
+    # The first private-DNS (FQDN) connection of the bootstrap. Wait for NTLM loopback
+    # allow-listing to take effect before relying on it for the database restore.
+    Wait-WorkshopFqdnAuthentication -HostName $privateDnsName
     $tempDbFilesAfter = @(Invoke-LocalSqlQuery -Database tempdb -Query @'
 SELECT file_id AS FileId, name AS LogicalName, type_desc AS Type, physical_name AS PhysicalName
 FROM tempdb.sys.database_files
