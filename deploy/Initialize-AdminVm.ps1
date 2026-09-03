@@ -582,7 +582,17 @@ try {
         $extensionOutcomes[$extensionId] = Install-WorkshopVsCodeExtension -CodePath $codePath `
             -ExtensionDirectory $extensionDirectory -ExtensionId $extensionId
     }
-    $extensionVersions = @(Invoke-NativeChecked -FilePath $codePath -ArgumentList @('--extensions-dir', $extensionDirectory, '--list-extensions', '--show-versions'))
+    # 'code --list-extensions --show-versions' prints one 'publisher.name@version' per line. The native
+    # helper can return that output as a nested array, which would persist to the readiness evidence as a
+    # single $OFS-joined string. Collapse the result to text and re-split on whitespace so each element is
+    # exactly one identifier@version token regardless of the intermediate array shape.
+    $extensionListingText = (Invoke-NativeChecked -FilePath $codePath -ArgumentList @('--extensions-dir', $extensionDirectory, '--list-extensions', '--show-versions')) | Out-String -Width 4096
+    $extensionVersions = @(
+        $extensionListingText -split '\s+' |
+            ForEach-Object { $_.Trim() } |
+            Where-Object { $_ -match '^\S+@\S+$' } |
+            Sort-Object -Unique
+    )
     foreach ($extensionId in $extensionIds) {
         if ($extensionOutcomes[$extensionId] -ceq 'BuiltIn') { continue }
         # -match against an array returns the matching elements, not a Boolean, so count explicitly.
@@ -692,7 +702,7 @@ try {
         SchemaVersion = '1.0'
         DeploymentId = [string]$payload.DeploymentId
         Evidence = [ordered]@{ Sanitized = $true }
-        Vm = [ordered]@{ Name = $metadata.compute.name; Size = $metadata.compute.vmSize; Location = $metadata.compute.location; AdminPublicIpBoundaryObserved = $true; PublicIpCount = $imdsPublicIps.Count; SecureBoot = $true; Tpm = $true; Os = $os.Caption; Build = $os.BuildNumber; Activation = $activationStatus; WindowsClientLicenseAttested = [bool]$payload.WindowsClientLicenseAttested }
+        Vm = [ordered]@{ Name = $metadata.compute.name; Size = $metadata.compute.vmSize; Location = ([string]$metadata.compute.location).ToLowerInvariant(); AdminPublicIpBoundaryObserved = $true; PublicIpCount = $imdsPublicIps.Count; SecureBoot = $true; Tpm = $true; Os = $os.Caption; Build = $os.BuildNumber; Activation = $activationStatus; WindowsClientLicenseAttested = [bool]$payload.WindowsClientLicenseAttested }
         Repository = [ordered]@{ Commit = $head }
         Workspace = [ordered]@{ User = $interactiveUser.Account; WorkspaceUserModify = $workspaceUserModify }
         Tools = $toolVersions

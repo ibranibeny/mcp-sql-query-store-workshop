@@ -541,7 +541,7 @@ Describe 'Bootstrap orchestration and evidence contracts' {
                         [pscustomobject]@{ Id = 'Microsoft.DotNet.SDK.9'; VersionReadback = '9.0.100' },
                         [pscustomobject]@{ Id = 'Git.Git'; VersionReadback = '2.49.0' },
                         [pscustomobject]@{ Id = 'GitHub.cli'; VersionReadback = '2.70.0' }
-                    ); Extensions = @('ms-mssql.mssql@1.30.0', 'ms-vscode.powershell@2025.0.0'); BuiltInExtensions = @('GitHub.copilot', 'GitHub.copilot-chat') }
+                    ); Extensions = @('ms-dotnettools.vscode-dotnet-runtime@3.1.0', 'ms-mssql.data-workspace-vscode@0.6.3', 'ms-mssql.mssql@1.30.0', 'ms-mssql.sql-bindings-vscode@0.4.1', 'ms-mssql.sql-database-projects-vscode@1.7.0', 'ms-vscode.powershell@2025.0.0'); BuiltInExtensions = @('GitHub.copilot', 'GitHub.copilot-chat') }
                     Auth = [pscustomobject]@{ GitHubCliAuthStatus = 'Unavailable'; CopilotAuthStatus = 'InteractiveSignInRequired' }
                     Network = [pscustomobject]@{ DnsName = 'sql01.mcpworkshop.internal'; ResolvedAddress = '10.20.2.10'; Tcp1433 = $true }
                     SqlTls = [pscustomobject]@{ DnsName = 'sql01.mcpworkshop.internal'; Address = '10.20.2.10'; Tcp1433 = $true; CertificateThumbprint = $thumbprint; PublicCertificateSha256 = $publicHash; CertificateValidated = $true; ValidationMethod = 'SqlClientChainHostAndTransferredCertificate'; EncryptOption = 'TRUE'; TrustServerCertificate = $false; HostNameInCertificate = 'sql01.mcpworkshop.internal'; RemoteAdminTest = $true }
@@ -829,6 +829,19 @@ Describe 'Bootstrap orchestration and evidence contracts' {
         @($result.Checks | Where-Object Status -EQ 'Warning').Name | Should -Contain 'Administration activation observation'
     }
 
+    It 'passes when Azure reports the VM location in non-canonical casing' {
+        $pair = Get-CompleteReadinessPair
+        $pair.Sql.Vm.Location = 'IndonesiaCentral'
+        $pair.Admin.Vm.Location = 'IndonesiaCentral'
+        (Test-WorkshopReadiness -SqlReadiness $pair.Sql -AdminReadiness $pair.Admin).Passed | Should -BeTrue
+    }
+
+    It 'tolerates a legacy whitespace-joined extension evidence record' {
+        $pair = Get-CompleteReadinessPair
+        $pair.Admin.Tools.Extensions = @('ms-mssql.mssql@1.45.1 ms-vscode.powershell@2025.4.0')
+        (Test-WorkshopReadiness -SqlReadiness $pair.Sql -AdminReadiness $pair.Admin).Passed | Should -BeTrue
+    }
+
     It 'fails closed for every missing or wrong required security fact' -ForEach @(
         @{ Path = 'Sql.Vm.Name'; Value = 'wrong' },
         @{ Path = 'Sql.Disks'; Value = @() },
@@ -845,7 +858,9 @@ Describe 'Bootstrap orchestration and evidence contracts' {
         @{ Path = 'Admin.SqlTls.ValidationMethod'; Value = 'generic' },
         @{ Path = 'Admin.Mcp.ForbiddenMutationTools'; Value = $true },
         @{ Path = 'Admin.DeploymentId'; Value = '99999999-2222-3333-4444-555555555555' },
-        @{ Path = 'Admin.Repository.Commit'; Value = 'ffffffffffffffffffffffffffffffffffffffff' }
+        @{ Path = 'Admin.Repository.Commit'; Value = 'ffffffffffffffffffffffffffffffffffffffff' },
+        @{ Path = 'Sql.Vm.Location'; Value = 'southeastasia' },
+        @{ Path = 'Admin.Tools.Extensions'; Value = @('ms-mssql.mssql@1.30.0') }
     ) {
         $pair = Get-CompleteReadinessPair
         $segments = $Path -split '\.'

@@ -752,7 +752,7 @@ ORDER BY file_id;
         DeploymentId = [string]$payload.DeploymentId
         Evidence = [ordered]@{ Sanitized = $true }
         Repository = [ordered]@{ Commit = [string]$payload.RepositoryCommit }
-        Vm = [ordered]@{ Name = $metadata.compute.name; Size = $metadata.compute.vmSize; Location = $metadata.compute.location; PublicIp = $false; SecureBoot = $true; Tpm = $true }
+        Vm = [ordered]@{ Name = $metadata.compute.name; Size = $metadata.compute.vmSize; Location = ([string]$metadata.compute.location).ToLowerInvariant(); PublicIp = $false; SecureBoot = $true; Tpm = $true }
         Sql = [ordered]@{ Version = 16; Edition = $edition; Service = $service.Name; State = [string]$restarted.Status; Port = 1433; BrowserStartupType = [string]$browserService.StartMode; Encryption = 'Forced'; EncryptOption = $tdsEncryption }
         Disks = @($dataDisk, $logDisk)
         TempDb = [ordered]@{ ApprovedRoot = $tempDbPath; Storage = $tempDbStorage; PersistentDataOnTemporaryDisk = $false; Deviation = $tempDbDeviation; EnoughSpace = $true; FileCount = $tempDbFilesAfter.Count; AllFilesUnderApprovedRoot = $true; OldPathCount = $oldTempDbPaths.Count; Files = $tempDbFilesAfter }
