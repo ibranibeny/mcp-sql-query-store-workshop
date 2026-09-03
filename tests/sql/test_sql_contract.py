@@ -2099,7 +2099,7 @@ def test_optional_hint_discovers_exact_baseline_query_without_fixed_id() -> None
     assert "SYS.QUERY_STORE_QUERY AS Q" in text
     assert "SYS.QUERY_STORE_QUERY_TEXT AS QT" in text
     assert "Q.OBJECT_ID = OBJECT_ID(N'LAB.USP_MONTHENDSALESBASELINE', N'P')" in text
-    assert "Q.QUERY_CONTEXT_SETTINGS_ID" in text
+    assert "Q.CONTEXT_SETTINGS_ID" in text
     assert "SESSION_CONTEXT(N'OPTIONALHINTQUERYCONTEXTSETTINGSID')" in text
     assert "Q.QUERY_HASH" in text
     assert "HASHBYTES('SHA2_256'" in text

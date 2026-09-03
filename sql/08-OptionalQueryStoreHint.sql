@@ -143,14 +143,14 @@ BEGIN TRY
        explicitly reject text that inspects Query Store hint metadata. */
     INSERT @Candidates (QueryId, QueryContextSettingsId, QueryHash, QueryTextHash)
     SELECT q.query_id,
-           q.query_context_settings_id,
+           q.context_settings_id,
            q.query_hash,
            HASHBYTES('SHA2_256', CONVERT(varbinary(max),
                UPPER(REPLACE(REPLACE(REPLACE(qt.query_sql_text, NCHAR(13), N''), NCHAR(10), N''), NCHAR(9), N''))))
     FROM sys.query_store_query AS q
     INNER JOIN sys.query_store_query_text AS qt ON qt.query_text_id = q.query_text_id
     WHERE q.object_id = OBJECT_ID(N'lab.usp_MonthEndSalesBaseline', N'P')
-      AND (@RequestedContextSettingsId IS NULL OR q.query_context_settings_id = @RequestedContextSettingsId)
+      AND (@RequestedContextSettingsId IS NULL OR q.context_settings_id = @RequestedContextSettingsId)
       AND UPPER(qt.query_sql_text) LIKE N'%INSERT @WIDEWORK%'
       AND UPPER(qt.query_sql_text) LIKE N'%FROM LAB.FACTSALES AS FS%'
       AND UPPER(qt.query_sql_text) LIKE N'%CONVERT(DATE, FS.ORDERDATE)%'
@@ -178,10 +178,10 @@ BEGIN TRY
             COALESCE(SUM(CONVERT(decimal(38,4), runtime.avg_duration) * runtime.count_executions), 0),
             COALESCE(SUM(CONVERT(decimal(38,4), runtime.avg_cpu_time) * runtime.count_executions), 0),
             COALESCE(SUM(CONVERT(decimal(38,4), runtime.avg_logical_io_reads) * runtime.count_executions), 0),
-            MAX(plan.last_execution_time)
-        FROM sys.query_store_plan AS plan
-        LEFT JOIN sys.query_store_runtime_stats AS runtime ON runtime.plan_id = plan.plan_id
-        WHERE plan.query_id = @QueryId;
+            MAX(plan_entry.last_execution_time)
+        FROM sys.query_store_plan AS plan_entry
+        LEFT JOIN sys.query_store_runtime_stats AS runtime ON runtime.plan_id = plan_entry.plan_id
+        WHERE plan_entry.query_id = @QueryId;
 
     IF EXISTS (SELECT 1 FROM sys.query_store_query_hints WHERE query_id = @QueryId)
     BEGIN
@@ -301,10 +301,10 @@ BEGIN TRY
             COALESCE(SUM(CONVERT(decimal(38,4), runtime.avg_duration) * runtime.count_executions), 0),
             COALESCE(SUM(CONVERT(decimal(38,4), runtime.avg_cpu_time) * runtime.count_executions), 0),
             COALESCE(SUM(CONVERT(decimal(38,4), runtime.avg_logical_io_reads) * runtime.count_executions), 0),
-            MAX(plan.last_execution_time)
-        FROM sys.query_store_plan AS plan
-        LEFT JOIN sys.query_store_runtime_stats AS runtime ON runtime.plan_id = plan.plan_id
-        WHERE plan.query_id = @QueryId;
+            MAX(plan_entry.last_execution_time)
+        FROM sys.query_store_plan AS plan_entry
+        LEFT JOIN sys.query_store_runtime_stats AS runtime ON runtime.plan_id = plan_entry.plan_id
+        WHERE plan_entry.query_id = @QueryId;
 
         SELECT after_stats.ExecutionCount - before_stats.ExecutionCount AS ExerciseExecutionCount,
             after_stats.TotalDurationMicroseconds - before_stats.TotalDurationMicroseconds AS ExerciseDurationMicroseconds,

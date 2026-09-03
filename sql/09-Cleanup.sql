@@ -329,7 +329,7 @@ WHERE MarkerId = @WorkshopMarker AND SchemaVersion = @WorkshopSchemaVersion
                   AND ownership.SchemaVersion = @WorkshopSchemaVersion
                   AND ownership.DatabaseName = DB_NAME()
                   AND ownership.OwnershipState IN ('Pending', 'Active')
-                  AND ownership.QueryContextSettingsId = stored_query.query_context_settings_id
+                  AND ownership.QueryContextSettingsId = stored_query.context_settings_id
                   AND ownership.QueryHash = stored_query.query_hash
                   AND ownership.QueryTextHash = HASHBYTES('SHA2_256', CONVERT(varbinary(max),
                       UPPER(REPLACE(REPLACE(REPLACE(stored_text.query_sql_text, NCHAR(13), N''), NCHAR(10), N''), NCHAR(9), N''))))
@@ -655,6 +655,16 @@ END;';
                 WHERE MarkerId = @WorkshopMarker AND SchemaVersion = @WorkshopSchemaVersion
                     AND PrincipalType = 'CERTIFICATE_MASTER' AND PrincipalName = N'mcp_workshop_diagnostics_certificate'
                     AND CreatedByWorkshop = 1;
+    /* Remove the workshop's module signatures before dropping the database signing
+       certificate; DROP CERTIFICATE fails while any signed module references it (error 15352). */
+    IF EXISTS (SELECT 1 FROM sys.crypt_properties
+               WHERE class = 1 AND major_id = OBJECT_ID(N'lab.usp_GetMemorySnapshot', N'P')
+                 AND thumbprint = @DatabaseCertificateThumbprint)
+        DROP SIGNATURE FROM OBJECT::lab.usp_GetMemorySnapshot BY CERTIFICATE [mcp_workshop_diagnostics_certificate];
+    IF EXISTS (SELECT 1 FROM sys.crypt_properties
+               WHERE class = 1 AND major_id = OBJECT_ID(N'lab.usp_GetActiveWorkshopGrants', N'P')
+                 AND thumbprint = @DatabaseCertificateThumbprint)
+        DROP SIGNATURE FROM OBJECT::lab.usp_GetActiveWorkshopGrants BY CERTIFICATE [mcp_workshop_diagnostics_certificate];
     IF EXISTS (SELECT 1 FROM sys.certificates
                WHERE name = N'mcp_workshop_diagnostics_certificate'
                  AND thumbprint = @DatabaseCertificateThumbprint
@@ -736,7 +746,7 @@ END;';
         DECLARE @ExpectedLabObjects table
         (
             ObjectName sysname NOT NULL PRIMARY KEY,
-            ObjectType char(2) NOT NULL
+            ObjectType char(2) COLLATE Latin1_General_CI_AS_KS_WS NOT NULL
         );
         INSERT @ExpectedLabObjects (ObjectName, ObjectType) VALUES
             (N'vw_WorkshopSampleSummary', 'V'), (N'vw_WorkshopRunSummary', 'V'),
@@ -891,7 +901,7 @@ END;';
         (
             TableName sysname NOT NULL,
             ConstraintName sysname NOT NULL PRIMARY KEY,
-            ConstraintType char(2) NOT NULL
+            ConstraintType char(2) COLLATE Latin1_General_CI_AS_KS_WS NOT NULL
         );
         INSERT @ExpectedLabConstraints (TableName, ConstraintName, ConstraintType) VALUES
             (N'WorkshopMarker', N'PK_WorkshopMarker', 'PK'),
@@ -1004,7 +1014,7 @@ END;';
         (
             TableName sysname NOT NULL,
             IndexName sysname NOT NULL PRIMARY KEY,
-            TypeDesc nvarchar(60) NOT NULL,
+            TypeDesc nvarchar(60) COLLATE Latin1_General_CI_AS_KS_WS NOT NULL,
             IsUnique bit NOT NULL,
             IsPrimaryKey bit NOT NULL,
             IsUniqueConstraint bit NOT NULL

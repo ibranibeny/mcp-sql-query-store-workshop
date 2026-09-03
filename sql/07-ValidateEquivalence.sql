@@ -144,7 +144,7 @@ BEGIN
     (
         SELECT COUNT_BIG(*) FROM
         (
-            SELECT column_id, name, TYPE_NAME(system_type_id), max_length, precision, scale, is_nullable, is_identity
+            SELECT column_id, name, TYPE_NAME(system_type_id) AS type_name, max_length, precision, scale, is_nullable, is_identity
             FROM sys.columns WHERE object_id = OBJECT_ID(N'lab.ValidationRun')
             EXCEPT
             SELECT column_id, name, type_name, max_length, precision, scale, is_nullable, is_identity
@@ -184,7 +184,7 @@ DECLARE @BaselineMetadata table
     system_type_name nvarchar(256) NULL,
     is_nullable bit NULL,
     error_number int NULL,
-    error_message nvarchar(4096) NULL
+    error_message nvarchar(max) NULL
 );
 DECLARE @OptimizedMetadata table
 (
@@ -193,7 +193,7 @@ DECLARE @OptimizedMetadata table
     system_type_name nvarchar(256) NULL,
     is_nullable bit NULL,
     error_number int NULL,
-    error_message nvarchar(4096) NULL
+    error_message nvarchar(max) NULL
 );
 
 INSERT @BaselineMetadata (column_ordinal, name, system_type_name, is_nullable, error_number, error_message)
@@ -524,7 +524,7 @@ DECLARE @CaseCount int = (SELECT COUNT(*) FROM @Cases);
                 CONVERT(nvarchar(30), OrderCount), CONVERT(nvarchar(30), TotalQuantity),
                 CONVERT(nvarchar(50), TotalSales), CONVERT(nvarchar(50), AverageUnitPrice),
                 CONVERT(nvarchar(30), SalesRank))), NCHAR(30))
-            WITHIN GROUP (ORDER BY SalesRank, CASE WHEN TerritoryID IS NULL THEN 0 ELSE 1 END, TerritoryID, CustomerID, ProductID), N'')))
+            WITHIN GROUP (ORDER BY SalesRank, TerritoryID, CustomerID, ProductID), N'')))
         FROM #Baseline;
         SELECT @OptimizedHash = HASHBYTES('SHA2_256', CONVERT(varbinary(max), COALESCE(
             STRING_AGG(CONVERT(nvarchar(max), CONCAT_WS(NCHAR(31),
@@ -533,7 +533,7 @@ DECLARE @CaseCount int = (SELECT COUNT(*) FROM @Cases);
                 CONVERT(nvarchar(30), OrderCount), CONVERT(nvarchar(30), TotalQuantity),
                 CONVERT(nvarchar(50), TotalSales), CONVERT(nvarchar(50), AverageUnitPrice),
                 CONVERT(nvarchar(30), SalesRank))), NCHAR(30))
-            WITHIN GROUP (ORDER BY SalesRank, CASE WHEN TerritoryID IS NULL THEN 0 ELSE 1 END, TerritoryID, CustomerID, ProductID), N'')))
+            WITHIN GROUP (ORDER BY SalesRank, TerritoryID, CustomerID, ProductID), N'')))
         FROM #Optimized;
         IF @BaselineHash <> @OptimizedHash
         BEGIN
