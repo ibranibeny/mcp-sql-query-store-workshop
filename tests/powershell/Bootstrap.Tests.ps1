@@ -381,8 +381,8 @@ Describe 'Administration VM bootstrap static contract' {
         $text | Should -Match 'Resolve-DnsName'
         $text | Should -Match 'Test-NetConnection'
         $text | Should -Match "-HostNameInCertificate\s+'sql01\.mcpworkshop\.internal'"
-        $text | Should -Match 'Encrypt\s*=\s*\$true'
-        $text | Should -Match 'TrustServerCertificate\s*=\s*\$false'
+        $text | Should -Match "'Encrypt'\]\s*=\s*\`$true"
+        $text | Should -Match "'TrustServerCertificate'\]\s*=\s*\`$false"
         $text | Should -Match 'ApplicationName'
         $text | Should -Match 'Microsoft\.Data\.SqlClient\.SqlConnectionStringBuilder'
         $text | Should -Match 'UTF8Encoding\]\:\:new\(\$false\)'

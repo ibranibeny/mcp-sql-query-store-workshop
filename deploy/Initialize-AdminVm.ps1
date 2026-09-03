@@ -292,24 +292,28 @@ function ConvertTo-DabMssqlConnectionString {
     )
 
     $builder = [Activator]::CreateInstance($BuilderType)
-    $builder.DataSource = $DataSource
-    $builder.InitialCatalog = $Database
-    $builder.UserID = $UserId
+    # Microsoft.Data.SqlClient.SqlConnectionStringBuilder implements ICustomTypeDescriptor, so
+    # PowerShell routes a .Property assignment through the string-keyword indexer using the CLR
+    # property name (for example 'DataSource'), which is not a valid connection-string keyword and
+    # throws "Keyword not supported". Assign the canonical connection-string keywords via the indexer.
+    $builder['Data Source'] = $DataSource
+    $builder['Initial Catalog'] = $Database
+    $builder['User ID'] = $UserId
     $secretPointer = [IntPtr]::Zero
     try {
         $secretPointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($ReaderSecret)
-        $builder.Password = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($secretPointer)
+        $builder['Password'] = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($secretPointer)
     }
     finally {
         if ($secretPointer -ne [IntPtr]::Zero) {
             [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($secretPointer)
         }
     }
-    $builder.Encrypt = $true
-    $builder.TrustServerCertificate = $false
-    $builder.ApplicationName = $ApplicationName
+    $builder['Encrypt'] = $true
+    $builder['TrustServerCertificate'] = $false
+    $builder['Application Name'] = $ApplicationName
     if ($null -ne $BuilderType.GetProperty('HostNameInCertificate')) {
-        $builder.HostNameInCertificate = $HostNameInCertificate
+        $builder['Host Name In Certificate'] = $HostNameInCertificate
         return $builder.ConnectionString
     }
 
@@ -340,22 +344,22 @@ function Read-DabMssqlEnvironment {
     )
     $encryptEnabled = [string]$builder['Encrypt'] -match '^(?i:true|mandatory)$'
     $trustServerCertificate = [Convert]::ToBoolean([string]$builder['TrustServerCertificate'])
-    if ([string]$builder.DataSource -cne $ExpectedDataSource) { throw 'DAB SQL data source readback is incorrect.' }
+    if ([string]$builder['Data Source'] -cne $ExpectedDataSource) { throw 'DAB SQL data source readback is incorrect.' }
     if (-not $encryptEnabled) { throw 'DAB SQL encryption readback is not enabled.' }
     if ($trustServerCertificate) { throw 'DAB SQL certificate validation readback is disabled.' }
-    if ([string]$builder.HostNameInCertificate -cne $ExpectedHostNameInCertificate) { throw 'DAB SQL certificate hostname readback is incorrect.' }
-    if ([string]$builder.UserID -cne $ExpectedUserId) { throw 'DAB SQL user readback is incorrect.' }
-    if ([string]::IsNullOrEmpty([string]$builder.Password)) { throw 'DAB SQL password readback is empty.' }
-    if ([string]$builder.ApplicationName -cne $ExpectedApplicationName) { throw 'DAB SQL application name readback is incorrect.' }
+    if ([string]$builder['Host Name In Certificate'] -cne $ExpectedHostNameInCertificate) { throw 'DAB SQL certificate hostname readback is incorrect.' }
+    if ([string]$builder['User ID'] -cne $ExpectedUserId) { throw 'DAB SQL user readback is incorrect.' }
+    if ([string]::IsNullOrEmpty([string]$builder['Password'])) { throw 'DAB SQL password readback is empty.' }
+    if ([string]$builder['Application Name'] -cne $ExpectedApplicationName) { throw 'DAB SQL application name readback is incorrect.' }
 
     [pscustomobject]@{
-        DataSource = [string]$builder.DataSource
+        DataSource = [string]$builder['Data Source']
         Encrypt = $encryptEnabled
         TrustServerCertificate = $trustServerCertificate
-        HostNameInCertificate = [string]$builder.HostNameInCertificate
-        UserId = [string]$builder.UserID
-        PasswordPresent = -not [string]::IsNullOrEmpty([string]$builder.Password)
-        ApplicationName = [string]$builder.ApplicationName
+        HostNameInCertificate = [string]$builder['Host Name In Certificate']
+        UserId = [string]$builder['User ID']
+        PasswordPresent = -not [string]::IsNullOrEmpty([string]$builder['Password'])
+        ApplicationName = [string]$builder['Application Name']
         Builder = $builder
     }
 }
