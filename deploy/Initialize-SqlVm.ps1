@@ -513,10 +513,19 @@ ORDER BY file_id;
     Assert-Condition ($firewallRemoteNetworks.Count -eq 1 -and $firewallRemoteNetworks[0] -ceq $expectedAdminNetwork) 'Workshop SQL firewall source readback is not the exact administration subnet.'
     $broadSqlRules = @(Get-NetFirewallRule -Direction Inbound -Action Allow -Enabled True | ForEach-Object {
         $rule = $_
-        $port = $rule | Get-NetFirewallPortFilter
-        $address = $rule | Get-NetFirewallAddressFilter
-        $application = $rule | Get-NetFirewallApplicationFilter
-        $serviceFilter = $rule | Get-NetFirewallServiceFilter
+        # A concurrent installer (Defender for SQL, Azure Policy) can delete a firewall rule
+        # between enumeration and filter lookup, which throws "the requested object could not
+        # be found". A rule that vanishes mid-scan cannot be a persistent broad SQL rule, so
+        # skip it rather than aborting the bootstrap. The NSG remains the primary control.
+        try {
+            $port = $rule | Get-NetFirewallPortFilter -ErrorAction Stop
+            $address = $rule | Get-NetFirewallAddressFilter -ErrorAction Stop
+            $application = $rule | Get-NetFirewallApplicationFilter -ErrorAction Stop
+            $serviceFilter = $rule | Get-NetFirewallServiceFilter -ErrorAction Stop
+        }
+        catch {
+            return
+        }
         $coversSql = ($port.Protocol -in @('TCP', 'Any') -and (Test-FirewallPortCoverage -Ranges @($port.LocalPort) -Port 1433)) -or
             ($port.Protocol -in @('UDP', 'Any') -and (Test-FirewallPortCoverage -Ranges @($port.LocalPort) -Port 1434))
         $isBroad = @($address.RemoteAddress) | Where-Object { $_ -in @('Any', '*', '0.0.0.0/0', 'Internet') }
