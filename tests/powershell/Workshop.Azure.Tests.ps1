@@ -1797,6 +1797,7 @@ Describe 'Exact workshop VM creation' {
         $script:VmCreates | Should -HaveCount 1
         $vm = $script:VmCreates[0]
         $vm.Name | Should -Be 'vm-mcpsql-admin'
+        $vm.ComputerName | Should -Be 'vm-mcpsql-admin'
         $vm.VmSize | Should -Be 'Standard_D4s_v5'
         $vm.Image.Publisher | Should -Be 'MicrosoftWindowsDesktop'
         $vm.Image.Offer | Should -Be 'windows-11'
@@ -1838,6 +1839,7 @@ Describe 'Exact workshop VM creation' {
         @($script:DiskCreates.Sku | Select-Object -Unique) | Should -Be @('Premium_LRS')
         $vm = $script:VmCreates[0]
         $vm.Name | Should -Be 'vm-mcpsql-sql'
+        $vm.ComputerName | Should -Be 'sql01'
         $vm.VmSize | Should -Be 'Standard_E8s_v5'
         $vm.OsType | Should -Be 'Windows'
         $vm.Image.Publisher | Should -Be 'MicrosoftSQLServer'

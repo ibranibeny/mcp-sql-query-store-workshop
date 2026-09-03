@@ -2444,8 +2444,13 @@ function Get-WorkshopVmSpecification {
             }
         )
     }
+    # The SQL VM's OS computer name must equal the private DNS host label ('sql01') so the
+    # TLS certificate CN, the DNS A record, and the sql/00 preflight host check all agree.
+    # Using the Azure resource name (vm-mcpsql-sql) instead makes sql/00 THROW 51009.
+    $computerName = if ($Role -eq 'Sql') { 'sql01' } else { [string] $vmConfig.Name }
     [pscustomobject][ordered]@{
         Name = [string] $vmConfig.Name
+        ComputerName = $computerName
         Id = $vmId
         Location = [string] $Config.Location
         VmSize = [string] $vmConfig.Size
@@ -2491,6 +2496,7 @@ function ConvertFrom-WorkshopAzVm {
 
     [pscustomobject][ordered]@{
         Name = [string] $Vm.Name
+        ComputerName = if ($null -ne $Vm.OSProfile) { [string] $Vm.OSProfile.ComputerName } else { $null }
         Id = [string] $Vm.Id
         Location = [string] $Vm.Location
         VmSize = [string] $Vm.HardwareProfile.VmSize
@@ -2586,7 +2592,7 @@ function Get-DefaultWorkshopVmOperationSet {
             }
             $vm = New-AzVMConfig @vmConfigParameters
             $osParameters = @{
-                VM = $vm; Windows = $true; ComputerName = $Spec.Name; Credential = $Credential
+                VM = $vm; Windows = $true; ComputerName = $Spec.ComputerName; Credential = $Credential
                 ProvisionVMAgent = $true; EnableAutoUpdate = $true; ErrorAction = 'Stop'
             }
             $vm = Set-AzVMOperatingSystem @osParameters
