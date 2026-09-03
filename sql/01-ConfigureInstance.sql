@@ -575,12 +575,16 @@ RECONFIGURE;
 EXEC sys.sp_configure N'max server memory (MB)', 49152;
 RECONFIGURE;
 
+-- The max cap must be effective (value_in_use) to create the workshop memory pressure.
+-- SQL Server floors the min server memory run value (16 MB on the SQL 2022 image) and
+-- RECONFIGURE will not lower value_in_use below it, so verify the configured value is 0
+-- (no forced reservation) instead of the run value.
 IF EXISTS
 (
     SELECT 1
     FROM sys.configurations
     WHERE (name = N'max server memory (MB)' AND value_in_use <> 49152)
-       OR (name = N'min server memory (MB)' AND value_in_use <> 0)
+       OR (name = N'min server memory (MB)' AND value <> 0)
 )
     THROW 51109, 'Effective max/min server memory values do not match the workshop contract.', 1;
 
