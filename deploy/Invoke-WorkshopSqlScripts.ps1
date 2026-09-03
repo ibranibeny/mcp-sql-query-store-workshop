@@ -262,22 +262,22 @@ try {
         }
         $builderType = "$clientNamespace.SqlConnectionStringBuilder"
         $builder = New-Object -TypeName $builderType
-        $builder.DataSource = $ServerInstance
-        $builder.InitialCatalog = 'master'
-        $builder.UserID = $Credential.UserName
-        $builder.IntegratedSecurity = $false
-        $builder.Encrypt = $true
-        $builder.TrustServerCertificate = $false
+        $builder['Data Source'] = $ServerInstance
+        $builder['Initial Catalog'] = 'master'
+        $builder['User ID'] = $Credential.UserName
+        $builder['Integrated Security'] = $false
+        $builder['Encrypt'] = $true
+        $builder['TrustServerCertificate'] = $false
         if ($clientNamespace -eq 'Microsoft.Data.SqlClient') {
-            $builder.HostNameInCertificate = $ExpectedServerName
+            $builder['Host Name In Certificate'] = $ExpectedServerName
         }
-        $builder.ApplicationName = 'MCP-SQL-Workshop-Setup'
+        $builder['Application Name'] = 'MCP-SQL-Workshop-Setup'
         $passwordPointer = [IntPtr]::Zero
         $plainPassword = $null
         try {
             $passwordPointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($Credential.Password)
             $plainPassword = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($passwordPointer)
-            $builder.Password = $plainPassword
+            $builder['Password'] = $plainPassword
             $plainPassword = $null
         }
         finally {
@@ -288,24 +288,24 @@ try {
         }
     }
 
-    if (-not $builder.Encrypt -or $builder.TrustServerCertificate) {
+    if (-not $builder['Encrypt'] -or $builder['TrustServerCertificate']) {
         throw 'The SQL connection must specify Encrypt=True and TrustServerCertificate=False.'
     }
     if ($clientNamespace -eq 'Microsoft.Data.SqlClient') {
-        if ([string]::IsNullOrWhiteSpace($builder.HostNameInCertificate)) {
-            $builder.HostNameInCertificate = $ExpectedServerName
+        if ([string]::IsNullOrWhiteSpace($builder['Host Name In Certificate'])) {
+            $builder['Host Name In Certificate'] = $ExpectedServerName
         }
-        if ($builder.HostNameInCertificate -cne $ExpectedServerName) {
+        if ($builder['Host Name In Certificate'] -cne $ExpectedServerName) {
             throw 'HostNameInCertificate must exactly match ExpectedServerName.'
         }
     }
     else {
-        $serverName = ([string]$builder.DataSource -split ',')[0].Trim()
+        $serverName = ([string]$builder['Data Source'] -split ',')[0].Trim()
         if ($serverName -cne $ExpectedServerName) {
             throw 'System.Data.SqlClient fallback requires DataSource to exactly match ExpectedServerName for certificate DNS validation.'
         }
     }
-    $builder.InitialCatalog = 'master'
+    $builder['Initial Catalog'] = 'master'
 
     $connectionType = "$clientNamespace.SqlConnection"
     $connection = New-Object -TypeName $connectionType -ArgumentList $builder.ConnectionString
