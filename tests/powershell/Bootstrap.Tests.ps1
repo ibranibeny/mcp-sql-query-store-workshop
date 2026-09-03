@@ -295,9 +295,9 @@ Describe 'Administration VM bootstrap static contract' {
     It 'requires PowerShell 7.4 before any DAB SqlClient assembly load' {
         $text = $script:AdminContract.Text
         $versionGate = $text.IndexOf("[version]'7.4'")
-        $addType = $text.IndexOf('Add-Type')
+        $sqlClientLoad = $text.IndexOf('LoadFromAssemblyPath')
         $versionGate | Should -BeGreaterThan -1
-        $addType | Should -BeGreaterThan $versionGate
+        $sqlClientLoad | Should -BeGreaterThan $versionGate
         $text | Should -Match 'MCP_SQL_ADMIN_BOOTSTRAP_PWSH'
     }
 
@@ -386,7 +386,7 @@ Describe 'Administration VM bootstrap static contract' {
         $text | Should -Match 'ApplicationName'
         $text | Should -Match 'Microsoft\.Data\.SqlClient\.SqlConnectionStringBuilder'
         $text | Should -Match 'UTF8Encoding\]\:\:new\(\$false\)'
-        $text | Should -Match 'encrypt_option'
+        $text | Should -Match 'ConnectionState\]::Open'
         $text | Should -Match 'initialize'
         $text | Should -Match 'tools/list'
         foreach ($tool in @('get_memory_snapshot', 'get_active_workshop_grants', 'get_query_store_top_queries', 'get_query_store_waits', 'get_procedure_plan_summary', 'compare_workshop_runs')) {

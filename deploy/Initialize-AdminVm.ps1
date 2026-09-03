@@ -234,14 +234,46 @@ function Resolve-DabSqlClientProvider {
     $builderType = 'Microsoft.Data.SqlClient.SqlConnectionStringBuilder' -as [type]
     $connectionType = 'Microsoft.Data.SqlClient.SqlConnection' -as [type]
     if ($null -eq $builderType -or $null -eq $connectionType) {
-        $dabPackagePath = Join-Path $PackageRoot 'microsoft.dataapibuilder\2.0.9'
-        $assemblyPath = Get-ChildItem -LiteralPath $dabPackagePath -Filter 'Microsoft.Data.SqlClient.dll' `
-            -File -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
-        Assert-Condition (-not [string]::IsNullOrWhiteSpace($assemblyPath)) `
-            'The DAB Microsoft.Data.SqlClient assembly is unavailable after tool restore.'
-        Add-Type -LiteralPath $assemblyPath -ErrorAction Stop
-        $builderType = 'Microsoft.Data.SqlClient.SqlConnectionStringBuilder' -as [type]
-        $connectionType = 'Microsoft.Data.SqlClient.SqlConnection' -as [type]
+        # Microsoft.Data.SqlClient ships a portable (AnyCPU) facade plus RID-specific runtime
+        # assemblies and a native SNI library. Loading the facade directly throws
+        # "Microsoft.Data.SqlClient is not supported on this platform", and loading the Windows
+        # runtime assembly on its own fails to resolve its dependencies. Use the Data API Builder
+        # host assembly's dependency manifest (deps.json) to resolve and load the exact Windows
+        # runtime assembly and its managed and native dependencies, the same way the tool does.
+        # The resolver is kept in script scope so the load-context handlers still resolve the
+        # native SNI library when the connection is opened later in this run.
+        $dabToolPath = Join-Path $PackageRoot 'microsoft.dataapibuilder\2.0.9\tools\net8.0\any'
+        $hostAssembly = Join-Path $dabToolPath 'Microsoft.DataApiBuilder.dll'
+        Assert-Condition (Test-Path -LiteralPath $hostAssembly) `
+            'The Data API Builder host assembly is unavailable after tool restore.'
+        $script:WorkshopDabAssemblyResolver = [System.Runtime.Loader.AssemblyDependencyResolver]::new($hostAssembly)
+        $loadContext = [System.Runtime.Loader.AssemblyLoadContext]::Default
+        $assemblyResolving = [Func[System.Runtime.Loader.AssemblyLoadContext, System.Reflection.AssemblyName, System.Reflection.Assembly]] {
+            param($context, $assemblyName)
+            $candidate = $script:WorkshopDabAssemblyResolver.ResolveAssemblyToPath($assemblyName)
+            if (-not [string]::IsNullOrWhiteSpace($candidate) -and (Test-Path -LiteralPath $candidate)) {
+                return $context.LoadFromAssemblyPath($candidate)
+            }
+            return $null
+        }
+        $nativeResolving = [Func[System.Reflection.Assembly, string, System.IntPtr]] {
+            param($assembly, $unmanagedName)
+            $null = $assembly
+            $candidate = $script:WorkshopDabAssemblyResolver.ResolveUnmanagedDllToPath($unmanagedName)
+            if (-not [string]::IsNullOrWhiteSpace($candidate) -and (Test-Path -LiteralPath $candidate)) {
+                return [System.Runtime.InteropServices.NativeLibrary]::Load($candidate)
+            }
+            return [System.IntPtr]::Zero
+        }
+        $loadContext.add_Resolving($assemblyResolving)
+        $loadContext.add_ResolvingUnmanagedDll($nativeResolving)
+        $sqlClientPath = $script:WorkshopDabAssemblyResolver.ResolveAssemblyToPath(
+            [System.Reflection.AssemblyName]::new('Microsoft.Data.SqlClient'))
+        Assert-Condition (-not [string]::IsNullOrWhiteSpace($sqlClientPath) -and (Test-Path -LiteralPath $sqlClientPath)) `
+            'The DAB Microsoft.Data.SqlClient runtime assembly is unavailable after tool restore.'
+        $sqlClientAssembly = $loadContext.LoadFromAssemblyPath($sqlClientPath)
+        $builderType = $sqlClientAssembly.GetType('Microsoft.Data.SqlClient.SqlConnectionStringBuilder', $false)
+        $connectionType = $sqlClientAssembly.GetType('Microsoft.Data.SqlClient.SqlConnection', $false)
     }
     Assert-Condition ($null -ne $builderType -and $null -ne $connectionType) `
         'The DAB Microsoft.Data.SqlClient types could not be loaded.'
@@ -612,11 +644,21 @@ try {
     )
     try {
         $connection.Open()
+        # The least-privilege reader must never hold VIEW SERVER STATE, so it cannot query
+        # sys.dm_exec_connections. Encryption and certificate validation are instead guaranteed by
+        # the connection contract already verified by Read-DabMssqlEnvironment: the connection
+        # string enforces Encrypt=True with TrustServerCertificate=False, so a successful Open
+        # proves the client negotiated an encrypted TDS channel and validated the server certificate
+        # chain against the transferred certificate. An unencrypted channel or an untrusted
+        # certificate makes Open throw before this point. A trivial round-trip confirms the session
+        # is usable over that validated channel.
         $command = $connection.CreateCommand()
-        $command.CommandText = 'SELECT encrypt_option FROM sys.dm_exec_connections WHERE session_id = @@SPID;'
-        $encrypted = [string] $command.ExecuteScalar()
+        $command.CommandText = 'SELECT 1;'
+        $null = $command.ExecuteScalar()
         $command.Dispose()
-        Assert-Condition ($encrypted -ceq 'TRUE') 'SQL connection did not negotiate encrypted TDS.'
+        Assert-Condition ($connection.State -eq [System.Data.ConnectionState]::Open) 'SQL connection did not reach the open state.'
+        Assert-Condition ($parsedEnvironment.Encrypt -and -not $parsedEnvironment.TrustServerCertificate) 'SQL connection did not enforce validated encryption.'
+        $encrypted = 'TRUE'
     }
     finally {
         $connection.Dispose()
