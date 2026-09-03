@@ -560,6 +560,14 @@ ORDER BY file_id;
     Set-ItemProperty -Path $ipAll -Name TcpPort -Value '1433'
     Set-ItemProperty -Path $instanceRoot -Name DefaultData -Value $dataPath
     Set-ItemProperty -Path $instanceRoot -Name DefaultLog -Value $logPath
+    # Enable Mixed Mode authentication (LoginMode = 2). The MCP reader
+    # (mcp_workshop_reader) is a SQL login and Data API Builder authenticates with a
+    # User ID/Password, so the instance must accept SQL authentication alongside the
+    # Windows authentication used by the SYSTEM bootstrap and the facilitator. With the
+    # default LoginMode = 1 (Windows only) the reader is rejected with error 18456,
+    # "Server is configured for Integrated authentication only", and the MCP server
+    # cannot connect. This takes effect on the instance restart below.
+    Set-ItemProperty -Path $instanceRoot -Name LoginMode -Value 2 -Type DWord
     Set-Service -Name SQLBrowser -StartupType Disabled
     Stop-Service -Name SQLBrowser -Force -ErrorAction SilentlyContinue
     Get-NetFirewallRule -DisplayName 'MCP SQL Workshop 1433' -ErrorAction SilentlyContinue | Remove-NetFirewallRule
@@ -662,6 +670,7 @@ ORDER BY file_id;
     $browserService = Get-CimInstance Win32_Service -Filter "Name='SQLBrowser'"
     Assert-Condition ($null -ne $browserService -and $browserService.StartMode -eq 'Disabled' -and $browserService.State -ne 'Running') 'SQL Browser readback is not disabled and stopped.'
     Assert-Condition ((Get-ItemPropertyValue -Path $ipAll -Name TcpPort) -ceq '1433') 'SQL TCP 1433 readback failed.'
+    Assert-Condition ([int](Get-ItemPropertyValue -Path $instanceRoot -Name LoginMode) -eq 2) 'SQL Mixed Mode (LoginMode = 2) registry readback failed.'
     $registryCertificate = ([string](Get-ItemPropertyValue -Path $tcpRoot -Name Certificate) -replace '\s', '').ToUpperInvariant()
     $forceEncryption = [int](Get-ItemPropertyValue -Path $tcpRoot -Name ForceEncryption)
     Assert-Condition ($registryCertificate -ceq $certificateThumbprint) 'SQL certificate registry readback does not match the generated certificate thumbprint.'
@@ -696,6 +705,12 @@ ORDER BY file_id;
     Assert-Condition ($tempDbFilesAfter.Count -ge 2) 'TempDB exposes fewer than two files after restart.'
     Assert-Condition ($tempDbFilesAfter.Count -eq $tempDbFilesBefore.Count) 'TempDB file count changed during relocation.'
     Assert-Condition ($oldTempDbPaths.Count -eq 0) 'One or more TempDB files remain outside the approved root.'
+
+    # Confirm the restarted engine actually accepts SQL authentication (Mixed Mode). This
+    # is the runtime companion to the LoginMode registry readback and guarantees the MCP
+    # reader login will not be rejected with error 18456 before the scripts even create it.
+    $integratedSecurityOnly = [int](Invoke-LocalSqlScalar "SELECT CONVERT(int, SERVERPROPERTY('IsIntegratedSecurityOnly'));")
+    Assert-Condition ($integratedSecurityOnly -eq 0) 'SQL instance is still Windows-authentication only after enabling Mixed Mode; the MCP reader login would be rejected.'
 
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
     Assert-Condition ([string]$payload.AdventureWorksBackupUri -ceq $backupUri) 'Protected payload backup URI is not approved.'

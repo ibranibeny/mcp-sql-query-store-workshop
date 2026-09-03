@@ -2289,10 +2289,18 @@ DENY DELETE ON OBJECT::lab.ValidationRun TO [mcp_workshop_reader];
 DENY ALTER ON OBJECT::lab.ValidationRun TO [mcp_workshop_reader];
 DENY CONTROL ON OBJECT::lab.ValidationRun TO [mcp_workshop_reader];
 DENY TAKE OWNERSHIP ON SCHEMA::lab TO [mcp_workshop_reader];
-DENY VIEW DEFINITION ON SCHEMA::lab TO [mcp_workshop_reader];
+-- VIEW DEFINITION is intentionally NOT denied at the schema or database scope.
+-- The MCP data API (Data API Builder) must introspect the eight reader entities
+-- (six procedures + two views) from catalog metadata to expose them as MCP tools.
+-- A covering VIEW DEFINITION DENY overrides object-level metadata visibility, so
+-- OBJECT_ID and sys.procedures resolve to NULL for the reader and MCP startup
+-- fails with "No stored procedure definition found". Omitting the deny grants the
+-- reader no definition TEXT (OBJECT_DEFINITION still returns NULL because no
+-- VIEW DEFINITION permission is granted); metadata visibility is limited to the
+-- objects it already holds EXECUTE or SELECT on. The effective-permission
+-- contract below asserts the reader never gains VIEW DEFINITION on any securable.
 DENY ALTER ON DATABASE::[AdventureWorks2022] TO [mcp_workshop_reader];
 DENY TAKE OWNERSHIP ON DATABASE::[AdventureWorks2022] TO [mcp_workshop_reader];
-DENY VIEW DEFINITION ON DATABASE::[AdventureWorks2022] TO [mcp_workshop_reader];
 
 DECLARE @ExpectedReaderPermissions table
 (
@@ -2303,9 +2311,7 @@ INSERT @ExpectedReaderPermissions VALUES
     (0, 0, 0, N'CONNECT', N'G'),
     (0, 0, 0, N'ALTER', N'D'),
     (0, 0, 0, N'TAKE OWNERSHIP', N'D'),
-    (0, 0, 0, N'VIEW DEFINITION', N'D'),
     (3, SCHEMA_ID(N'lab'), 0, N'TAKE OWNERSHIP', N'D'),
-    (3, SCHEMA_ID(N'lab'), 0, N'VIEW DEFINITION', N'D'),
     (1, OBJECT_ID(N'lab.WorkshopRun'), 0, N'INSERT', N'D'),
     (1, OBJECT_ID(N'lab.WorkshopRun'), 0, N'UPDATE', N'D'),
     (1, OBJECT_ID(N'lab.WorkshopRun'), 0, N'DELETE', N'D'),

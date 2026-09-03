@@ -1807,8 +1807,16 @@ def test_summary_views_and_reader_permissions_are_least_privileged_and_verified(
     assert "FROM MASTER.SYS.SERVER_PERMISSIONS" in text
     assert "STATE IN (N'G', N'W')" in text
     assert "PERMISSION_NAME IN (N'VIEW SERVER STATE'" not in text
-    for permission in ("TAKE OWNERSHIP", "VIEW DEFINITION"):
-        assert f"DENY {permission}" in text
+    assert "DENY TAKE OWNERSHIP" in text
+    # VIEW DEFINITION is intentionally NOT denied for the reader. A covering deny hides
+    # catalog metadata from the login and breaks Data API Builder / MCP stored-procedure
+    # introspection ("No stored procedure definition found"). The reader still gains no
+    # definition text because no VIEW DEFINITION is granted, and the effective-permission
+    # contract below fails closed if the reader ever holds VIEW DEFINITION on any securable.
+    assert "DENY VIEW DEFINITION ON SCHEMA::LAB TO [MCP_WORKSHOP_READER]" not in text
+    assert "DENY VIEW DEFINITION ON DATABASE::[ADVENTUREWORKS2022] TO [MCP_WORKSHOP_READER]" not in text
+    assert "N'SCHEMA', N'VIEW DEFINITION'" in text
+    assert "N'VIEW DEFINITION', N'IMPERSONATE'" in text
     permission_verification = text[text.index("DECLARE @PERMISSIONFAILURE"):]
     for table in ("WORKSHOPRUN", "WORKSHOPSAMPLE", "WORKSHOPREQUESTSAMPLE", "VALIDATIONRUN"):
         for permission in ("INSERT", "UPDATE", "DELETE"):

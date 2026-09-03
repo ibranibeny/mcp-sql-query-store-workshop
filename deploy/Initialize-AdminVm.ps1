@@ -493,6 +493,21 @@ try {
         $packageVersions[$id] = $installedVersion.ToString()
     }
 
+    # Data API Builder 2.0.9 targets net8.0 (ASP.NET Core); the SDK 9 install does not provide
+    # that shared runtime, so install it explicitly or dab cannot launch.
+    $aspNetCore8Present = @(Get-ChildItem 'C:\Program Files\dotnet\shared\Microsoft.AspNetCore.App' -Directory -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -like '8.*' }).Count -ge 1
+    if (-not $aspNetCore8Present) {
+        $dotnetInstallScript = Join-Path $installerRoot 'dotnet-install.ps1'
+        if (-not (Test-Path -LiteralPath $dotnetInstallScript)) {
+            Invoke-WebRequest -Uri 'https://dot.net/v1/dotnet-install.ps1' -OutFile $dotnetInstallScript -UseBasicParsing
+        }
+        & $dotnetInstallScript -Runtime aspnetcore -Channel 8.0 -InstallDir 'C:\Program Files\dotnet' -NoPath *> $null
+        $aspNetCore8Present = @(Get-ChildItem 'C:\Program Files\dotnet\shared\Microsoft.AspNetCore.App' -Directory -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -like '8.*' }).Count -ge 1
+    }
+    Assert-Condition $aspNetCore8Present 'The ASP.NET Core 8 runtime required by Data API Builder was not installed.'
+
     $repositoryRoot = [string] $payload.RepositoryRoot
     $gitPath = Resolve-WorkshopExecutable -Name 'git.exe' -Candidates @('C:\Program Files\Git\cmd\git.exe')
     $dotnetPath = Resolve-WorkshopExecutable -Name 'dotnet.exe' -Candidates @('C:\Program Files\dotnet\dotnet.exe')

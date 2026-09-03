@@ -138,6 +138,11 @@ Describe 'SQL VM bootstrap static contract' {
         $text | Should -Match 'Disabled'
         $text | Should -Match 'Restart-Service'
         $text | Should -Match 'Running'
+        # Mixed Mode authentication (#45): the SQL-login MCP reader needs LoginMode = 2, and
+        # the engine must report IsIntegratedSecurityOnly = 0 after the restart.
+        $text | Should -Match 'Set-ItemProperty\s+-Path\s+\$instanceRoot\s+-Name\s+LoginMode\s+-Value\s+2'
+        $text | Should -Match 'IsIntegratedSecurityOnly'
+        $text | Should -Match 'integratedSecurityOnly\s+-eq\s+0'
         $text | Should -Not -Match '(?i)RemoteAddress\s+[''\"]?(Any|\*|0\.0\.0\.0/0)'
         $text | Should -Match "Win32_Service\s+-Filter\s+`"Name='SQLBrowser'`""
         $text | Should -Match 'browserService\.StartMode'
@@ -338,6 +343,10 @@ Describe 'Administration VM bootstrap static contract' {
         $text | Should -Match 'msiexec'
         $text | Should -Match '/VERYSILENT'
         $text | Should -Match 'dotnet-install\.ps1'
+        # ASP.NET Core 8 shared runtime (#42): DAB 2.0.9 targets net8.0 and the SDK 9 install
+        # does not provide it, so the bootstrap installs the runtime explicitly and asserts it.
+        $text | Should -Match '-Runtime\s+aspnetcore\s+-Channel\s+8\.0'
+        $text | Should -Match 'Microsoft\.AspNetCore\.App'
         $text | Should -Match 'aka\.ms/ssms/22'
         $text | Should -Match '--install-extension'
         $text | Should -Match '--version|--list-extensions'
