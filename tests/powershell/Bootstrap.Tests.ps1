@@ -274,12 +274,12 @@ Describe 'Administration VM bootstrap static contract' {
         @($script:AdminWrapperContract.Ast.ParamBlock.Parameters.Name.VariablePath.UserPath) |
             Should -Be @('ProtectedPayloadPath')
         $wrapper = $script:AdminWrapperContract.Text
-        $wrapper | Should -Match 'Microsoft\.PowerShell'
-        $wrapper | Should -Match 'winget\.exe'
+        $wrapper | Should -Match 'PowerShell-7\.4\.6-win-x64\.msi'
+        $wrapper | Should -Match 'msiexec'
         $wrapper | Should -Match 'MCP_SQL_ADMIN_BOOTSTRAP_PWSH'
         $wrapper | Should -Match 'pwsh\.exe'
         $wrapper | Should -Match 'Initialize-AdminVm\.ps1'
-        $wrapper.IndexOf('Microsoft.PowerShell') | Should -BeLessThan $wrapper.IndexOf('pwsh.exe')
+        $wrapper.IndexOf('msiexec') | Should -BeLessThan $wrapper.IndexOf('pwsh.exe')
         [regex]::Matches($wrapper, '(?im)^\s*&\s+\$pwshPath\s+').Count | Should -Be 1
         $wrapper | Should -Match 'exit\s+\$exitCode'
         $wrapper | Should -Match 'Remove-Item\s+-LiteralPath\s+\$ProtectedPayloadPath'
@@ -327,7 +327,7 @@ Describe 'Administration VM bootstrap static contract' {
         $text | Should -Match 'compute\.vmSize\s+-ceq\s+\$payload\.ExpectedVmSize'
     }
 
-    It 'installs exact official winget packages and VS Code extensions noninteractively and reads versions back' {
+    It 'installs the exact official tool packages and VS Code extensions noninteractively and reads versions back' {
         $text = $script:AdminContract.Text
         foreach ($id in @('Microsoft.PowerShell', 'Microsoft.VisualStudioCode', 'Microsoft.SQLServerManagementStudio', 'Microsoft.DotNet.SDK.9', 'Git.Git', 'GitHub.cli')) {
             $text | Should -Match ([regex]::Escape($id))
@@ -335,8 +335,10 @@ Describe 'Administration VM bootstrap static contract' {
         foreach ($id in @('ms-mssql.mssql', 'GitHub.copilot', 'GitHub.copilot-chat', 'ms-vscode.powershell')) {
             $text | Should -Match ([regex]::Escape($id))
         }
-        $text | Should -Match '--accept-package-agreements'
-        $text | Should -Match '--accept-source-agreements'
+        $text | Should -Match 'msiexec'
+        $text | Should -Match '/VERYSILENT'
+        $text | Should -Match 'dotnet-install\.ps1'
+        $text | Should -Match 'aka\.ms/ssms/22'
         $text | Should -Match '--install-extension'
         $text | Should -Match '--version|--list-extensions'
     }

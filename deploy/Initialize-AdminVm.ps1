@@ -415,18 +415,78 @@ try {
     if ($activationStatus -ne 'Licensed') { $activationStatus = 'ObservedUnknown' }
 
     $packageVersions = [ordered]@{}
-    $wingetPath = Resolve-WorkshopExecutable -Name 'winget.exe' -Candidates @(
-        Get-ChildItem 'C:\Program Files\WindowsApps\Microsoft.DesktopAppInstaller_*\winget.exe' -ErrorAction SilentlyContinue |
-            Sort-Object FullName -Descending | ForEach-Object FullName
-    )
+    $installerRoot = Join-Path $env:TEMP 'mcp-admin-installers'
+    $null = New-Item -ItemType Directory -Path $installerRoot -Force
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    # winget cannot run as SYSTEM in a Custom Script Extension, so each tool is installed from
+    # its official installer. The package IDs are retained only as stable readiness identifiers.
+    $packageInstallers = @{
+        'Microsoft.PowerShell' = @{
+            Uri = 'https://github.com/PowerShell/PowerShell/releases/download/v7.4.6/PowerShell-7.4.6-win-x64.msi'
+            FileName = 'powershell-7.msi'; Installer = 'Msi'
+            Probe = 'C:\Program Files\PowerShell\7\pwsh.exe'
+            Version = { param($p) & $p -NoProfile -NonInteractive -Command '$PSVersionTable.PSVersion.ToString()' }
+        }
+        'Microsoft.VisualStudioCode' = @{
+            Uri = 'https://update.code.visualstudio.com/latest/win32-x64/stable'
+            FileName = 'vscode-system-x64.exe'; Installer = 'Executable'
+            Arguments = @('/VERYSILENT', '/NORESTART', '/MERGETASKS=!runcode')
+            Probe = 'C:\Program Files\Microsoft VS Code\bin\code.cmd'
+            Version = { param($p) & $p --version }
+        }
+        'Microsoft.SQLServerManagementStudio' = @{
+            Uri = 'https://aka.ms/ssms/22/release/vs_SSMS.exe'
+            FileName = 'vs_SSMS.exe'; Installer = 'Executable'
+            Arguments = @('--quiet', '--norestart', '--wait')
+            Probe = 'C:\Program Files\Microsoft SQL Server Management Studio 22\Release\Common7\IDE\SSMS.exe'
+            Version = { param($p) (Get-Item -LiteralPath $p).VersionInfo.ProductVersion }
+        }
+        'Microsoft.DotNet.SDK.9' = @{
+            Uri = 'https://dot.net/v1/dotnet-install.ps1'
+            FileName = 'dotnet-install.ps1'; Installer = 'DotNetScript'
+            InstallDir = 'C:\Program Files\dotnet'; Channel = '9.0'
+            Probe = 'C:\Program Files\dotnet\dotnet.exe'
+            Version = { param($p) & $p --version }
+        }
+        'Git.Git' = @{
+            Uri = 'https://github.com/git-for-windows/git/releases/download/v2.47.1.windows.1/Git-2.47.1-64-bit.exe'
+            FileName = 'git-setup.exe'; Installer = 'Executable'
+            Arguments = @('/VERYSILENT', '/NORESTART', '/NOCANCEL', '/SP-')
+            Probe = 'C:\Program Files\Git\cmd\git.exe'
+            Version = { param($p) & $p --version }
+        }
+        'GitHub.cli' = @{
+            Uri = 'https://github.com/cli/cli/releases/download/v2.63.2/gh_2.63.2_windows_amd64.msi'
+            FileName = 'gh.msi'; Installer = 'Msi'
+            Probe = 'C:\Program Files\GitHub CLI\gh.exe'
+            Version = { param($p) & $p --version }
+        }
+    }
     foreach ($id in $packageIds) {
-        $null = Invoke-NativeChecked -FilePath $wingetPath -ArgumentList @(
-            'install', '--id', $id, '--exact', '--silent', '--disable-interactivity',
-            '--accept-package-agreements', '--accept-source-agreements', '--source', 'winget'
-        )
-        $listOutput = (Invoke-NativeChecked -FilePath $wingetPath -ArgumentList @('list', '--id', $id, '--exact', '--source', 'winget')) -join ' '
-        $packageLine = @($listOutput -split "`r?`n" | Where-Object { $_ -match [regex]::Escape($id) } | Select-Object -Last 1)[0]
-        $versionMatches = [regex]::Matches([string]$packageLine, '(?<!\d)(\d+\.\d+(?:\.\d+){0,2})(?!\d)')
+        $spec = $packageInstallers[$id]
+        Assert-Condition ($null -ne $spec) "No installer specification exists for package '$id'."
+        if (-not (Test-Path -LiteralPath $spec.Probe)) {
+            $installerPath = Join-Path $installerRoot $spec.FileName
+            Invoke-WebRequest -Uri $spec.Uri -OutFile $installerPath -UseBasicParsing
+            switch ($spec.Installer) {
+                'Msi' {
+                    $process = Start-Process -FilePath 'msiexec.exe' -ArgumentList @('/i', "`"$installerPath`"", '/qn', '/norestart') -Wait -PassThru
+                    Assert-Condition ($process.ExitCode -eq 0) "The installer for '$id' failed with exit code $($process.ExitCode)."
+                }
+                'Executable' {
+                    $process = Start-Process -FilePath $installerPath -ArgumentList $spec.Arguments -Wait -PassThru
+                    Assert-Condition ($process.ExitCode -eq 0) "The installer for '$id' failed with exit code $($process.ExitCode)."
+                }
+                'DotNetScript' {
+                    # dotnet-install.ps1 does not return a reliable exit code; the probe below verifies success.
+                    & $installerPath -Channel $spec.Channel -InstallDir $spec.InstallDir -NoPath *> $null
+                }
+            }
+            Remove-Item -LiteralPath $installerPath -Force -ErrorAction SilentlyContinue
+        }
+        Assert-Condition (Test-Path -LiteralPath $spec.Probe) "The installed executable for '$id' was not found after installation."
+        $versionOutput = @(& $spec.Version $spec.Probe) -join ' '
+        $versionMatches = [regex]::Matches([string]$versionOutput, '(?<!\d)(\d+\.\d+(?:\.\d+){0,2})(?!\d)')
         Assert-Condition ($versionMatches.Count -ge 1) "Installed version for '$id' could not be read back."
         $installedVersion = [version]$versionMatches[0].Groups[1].Value
         Assert-Condition ($installedVersion -ge $minimumPackageVersions[$id]) "Installed version for '$id' is below the approved minimum."

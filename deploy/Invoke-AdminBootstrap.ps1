@@ -17,19 +17,21 @@ try {
         throw 'Protected bootstrap payload is unavailable.'
     }
 
-    $wingetPath = Get-Command winget.exe -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty Source
-    if ([string]::IsNullOrWhiteSpace($wingetPath)) {
-        $wingetPath = Get-ChildItem 'C:\Program Files\WindowsApps\Microsoft.DesktopAppInstaller_*\winget.exe' `
-            -ErrorAction SilentlyContinue | Sort-Object FullName -Descending |
-            Select-Object -First 1 -ExpandProperty FullName
+    # winget cannot run as SYSTEM in a Custom Script Extension (MSIX activation fails with
+    # STATUS_DLL_NOT_FOUND), so install the official PowerShell 7 MSI directly with msiexec.
+    $powerShellMsiUri = 'https://github.com/PowerShell/PowerShell/releases/download/v7.4.6/PowerShell-7.4.6-win-x64.msi'
+    $powerShellMsiPath = Join-Path $env:TEMP 'mcp-powershell-7.msi'
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    $powerShellInstall = $null
+    try {
+        Invoke-WebRequest -Uri $powerShellMsiUri -OutFile $powerShellMsiPath -UseBasicParsing
+        $powerShellInstall = Start-Process -FilePath 'msiexec.exe' `
+            -ArgumentList @('/i', "`"$powerShellMsiPath`"", '/qn', '/norestart') -Wait -PassThru
     }
-    if ([string]::IsNullOrWhiteSpace($wingetPath)) {
-        throw 'winget.exe is required to install PowerShell 7.'
+    finally {
+        Remove-Item -LiteralPath $powerShellMsiPath -Force -ErrorAction SilentlyContinue
     }
-
-    & $wingetPath install --id Microsoft.PowerShell --exact --silent --disable-interactivity `
-        --accept-package-agreements --accept-source-agreements --source winget
-    if ($LASTEXITCODE -ne 0) {
+    if ($null -eq $powerShellInstall -or $powerShellInstall.ExitCode -ne 0) {
         throw 'The official PowerShell 7 package installation failed.'
     }
 
