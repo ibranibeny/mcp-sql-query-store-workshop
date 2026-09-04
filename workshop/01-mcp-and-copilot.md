@@ -53,7 +53,7 @@ Copilot in SSMS exposes several surfaces:
 - **Database instructions** — a `CONSTITUTION.md` stored with the database supplies business rules and an optional least-privilege execution identity, so Copilot-generated queries can run under a dedicated account instead of your own login.
 - **Mermaid diagrams** — Copilot can render entity relationships and flowcharts directly in the editor.
 
-Starting with **SSMS 22.7**, Copilot adds **Agent mode**, which pursues a high-level goal autonomously: it can execute queries, read execution plans, and modify schema, each only with your explicit approval. Agent mode is extended by two mechanisms:
+Starting with **SSMS 22.7**, Copilot adds **Agent mode**, which pursues a high-level goal autonomously: in general it can execute queries, read execution plans, and modify schema, each only with your explicit approval. In this workshop it stays within the same read-only evidence surface as Ask mode — the `workshop-reader` principal holds no DDL or write grant, so SQL Server permissions and policy, not the agent, prevent any schema change here. Agent mode is extended by two mechanisms:
 
 - **Agent skills** — reusable, task-specific instruction files that teach the agent a repeatable procedure.
 - **MCP servers** — the same Model Context Protocol described above. Agent mode is a second MCP client for this workshop's DAB SQL MCP server; Ask mode does not support MCP. Each MCP tool is disabled by default and must be enabled explicitly, and every query or tool call requests confirmation.

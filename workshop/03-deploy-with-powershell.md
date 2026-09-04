@@ -112,6 +112,7 @@ WHERE fs.OrderDate >= '2013-06-01' AND fs.OrderDate < '2013-07-01'
 GROUP BY fs.TerritoryID;
 -- CREATE NONCLUSTERED INDEX IX_FactSales_OrderDate_Territory
 --   ON lab.FactSales (OrderDate, TerritoryID) INCLUDE (SalesAmount);
+-- Rollback: DROP INDEX IX_FactSales_OrderDate_Territory ON lab.FactSales;
 ```
 
 The target is to move query-workspace grant utilization from an approximately 80% baseline toward approximately 40% — a target, not a promised result. If the target is missed, report the observed outcome.
