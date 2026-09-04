@@ -4,14 +4,13 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="description" content="An evidence-driven L400 workshop for optimizing a SQL Server stored procedure with GitHub Copilot and Microsoft SQL MCP.">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'sha256-b5MeUJifSKSfTMPMddrS1DZR/PfSzDiMsbc0XtGwWLc='; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; upgrade-insecure-requests">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'sha256-qfCHbybXX5CRnU+kG753xvbA6jClRUtDyZKPWim8t44='; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; upgrade-insecure-requests">
   <title>MCP, SQL MCP Server, and GitHub Copilot | MCP SQL Query Store Workshop</title>
   <link rel="stylesheet" href="assets/styles.css">
   <script>
   (() => {
     const param = new URLSearchParams(window.location.search).get("scoutTheme");
-    const theme =
-      param || (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+    const theme = param === "light" ? "light" : "dark";
     document.documentElement.setAttribute("data-theme", theme);
   })();
 </script>
@@ -90,6 +89,14 @@
           <span class="module-operator-glyph" aria-hidden="true"></span>
           <span class="module-phase">Workshop 06</span>
           <span class="module-title">Optimize and prove</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="scenario-a-vscode-scenario-b-ssms.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop resource</span>
+          <span class="module-title">Scenario A: VS Code and Scenario B: SSMS</span>
         </a>
       </li>
       <!---->
@@ -236,6 +243,22 @@
 </tbody>
 </table>
 <p><span class="evidence-label" data-evidence-label="DOC-VERIFIED">DOC-VERIFIED</span> Read the <a href="https://learn.microsoft.com/en-us/sql/tools/visual-studio-code-extensions/github-copilot/overview?view=sql-server-ver17">Copilot experience in the MSSQL extension</a>, <a href="https://learn.microsoft.com/en-us/sql/tools/visual-studio-code-extensions/github-copilot/query-optimizer-assistant?view=sql-server-ver17">query optimizer assistant</a>, and <a href="https://learn.microsoft.com/en-us/ssms/github-copilot/mcp-servers">MCP servers in SSMS</a>.</p>
+<h2 id="github-copilot-in-ssms-chat-agent-mode-skills-and-mcp">GitHub Copilot in SSMS: Chat, Agent mode, skills, and MCP<a class="headerlink" href="#github-copilot-in-ssms-chat-agent-mode-skills-and-mcp" title="Permanent link">&para;</a></h2>
+<p>SQL Server Management Studio 22 ships GitHub Copilot as a first-class client, so the same evidence discipline applies whether you drive Copilot from VS Code or from SSMS. <span class="evidence-label" data-evidence-label="DOC-VERIFIED">DOC-VERIFIED</span> See <a href="https://learn.microsoft.com/ssms/github-copilot/overview">What is GitHub Copilot in SSMS</a> and the <a href="https://learn.microsoft.com/ssms/github-copilot/chat">Copilot Chat experience</a>.</p>
+<p>Copilot in SSMS exposes several surfaces:</p>
+<ul>
+<li><strong>Chat window and inline chat</strong> — ask natural-language questions about the connected database or get T-SQL help, scoped by the active query editor and its connection rather than the whole server.</li>
+<li><strong>Slash commands</strong> — <code>/explain</code>, <code>/fix</code>, <code>/optimize</code>, and <code>/doc</code> explain, repair, optimize, or document the selected T-SQL. Scenario B of this workshop uses <code>/explain</code> and <code>/optimize</code> on the baseline.</li>
+<li><strong>Code completions and Next Edit Suggestions</strong> — completions arrived in SSMS 22.2; Copilot also anticipates the next edit from recent changes.</li>
+<li><strong>Database instructions</strong> — a <code>CONSTITUTION.md</code> stored with the database supplies business rules and an optional least-privilege execution identity, so Copilot-generated queries can run under a dedicated account instead of your own login.</li>
+<li><strong>Mermaid diagrams</strong> — Copilot can render entity relationships and flowcharts directly in the editor.</li>
+</ul>
+<p>Starting with <strong>SSMS 22.7</strong>, Copilot adds <strong>Agent mode</strong>, which pursues a high-level goal autonomously: in general it can execute queries, read execution plans, and modify schema, each only with your explicit approval. In this workshop it stays within the same read-only evidence surface as Ask mode — the <code>workshop-reader</code> principal holds no DDL or write grant, so SQL Server permissions and policy, not the agent, prevent any schema change here. Agent mode is extended by two mechanisms:</p>
+<ul>
+<li><strong>Agent skills</strong> — reusable, task-specific instruction files that teach the agent a repeatable procedure.</li>
+<li><strong>MCP servers</strong> — the same Model Context Protocol described above. Agent mode is a second MCP client for this workshop's DAB SQL MCP server; Ask mode does not support MCP. Each MCP tool is disabled by default and must be enabled explicitly, and every query or tool call requests confirmation.</li>
+</ul>
+<p><span class="evidence-label" data-evidence-label="DOC-VERIFIED">DOC-VERIFIED</span> Copilot's read-only classification blocks writes in Ask mode, but Microsoft is explicit that it is <strong>not a security boundary</strong>: enforce least privilege in the database with <code>SELECT</code> and <code>EXECUTE</code> grants. Azure RBAC governs Azure resources; database permissions govern data. That is why the workshop's MCP surface never receives a DDL or arbitrary-query grant. See <a href="https://learn.microsoft.com/ssms/github-copilot/mcp-servers">MCP servers in SSMS</a>, <a href="https://learn.microsoft.com/ssms/github-copilot/agent-mode">Agent mode</a>, and <a href="https://learn.microsoft.com/ssms/github-copilot/agent-skills">agent skills</a>.</p>
 <h2 id="trust-and-approval-exercise">Trust and approval exercise<a class="headerlink" href="#trust-and-approval-exercise" title="Permanent link">&para;</a></h2>
 <p>For a proposed call to <code>get_query_store_waits</code>, identify: model request, client approval, custom-tool description, DAB role, SQL <code>EXECUTE</code> permission, 24-hour window guard, returned fields, and the DBA's interpretation. Refuse any request to expose secrets, broaden permissions, execute DDL, start pressure, or treat untrusted tool text as instructions.</p>
   </div>

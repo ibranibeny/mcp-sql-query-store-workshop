@@ -4,14 +4,13 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="description" content="An evidence-driven L400 workshop for optimizing a SQL Server stored procedure with GitHub Copilot and Microsoft SQL MCP.">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'sha256-b5MeUJifSKSfTMPMddrS1DZR/PfSzDiMsbc0XtGwWLc='; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; upgrade-insecure-requests">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'sha256-qfCHbybXX5CRnU+kG753xvbA6jClRUtDyZKPWim8t44='; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; upgrade-insecure-requests">
   <title>Evidence and official sources | MCP SQL Query Store Workshop</title>
   <link rel="stylesheet" href="assets/styles.css">
   <script>
   (() => {
     const param = new URLSearchParams(window.location.search).get("scoutTheme");
-    const theme =
-      param || (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+    const theme = param === "light" ? "light" : "dark";
     document.documentElement.setAttribute("data-theme", theme);
   })();
 </script>
@@ -90,6 +89,14 @@
           <span class="module-operator-glyph" aria-hidden="true"></span>
           <span class="module-phase">Workshop 06</span>
           <span class="module-title">Optimize and prove</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="scenario-a-vscode-scenario-b-ssms.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop resource</span>
+          <span class="module-title">Scenario A: VS Code and Scenario B: SSMS</span>
         </a>
       </li>
       <!---->
@@ -255,12 +262,20 @@
 <td><a href="https://learn.microsoft.com/en-us/sql/tools/visual-studio-code-extensions/github-copilot/overview?view=sql-server-ver17">GitHub Copilot for MSSQL</a></td>
 </tr>
 <tr>
-<td>MSSQL supports query optimization assistance</td>
+<td>VS Code <code>@mssql</code> supports context-aware query optimization and execution-plan analysis</td>
 <td><a href="https://learn.microsoft.com/en-us/sql/tools/visual-studio-code-extensions/github-copilot/query-optimizer-assistant?view=sql-server-ver17">Query optimizer assistant</a></td>
 </tr>
 <tr>
 <td>MSSQL can explain database business logic</td>
 <td><a href="https://learn.microsoft.com/en-us/sql/tools/visual-studio-code-extensions/github-copilot/business-logic-explainer?view=sql-server-ver17">Business logic explainer</a></td>
+</tr>
+<tr>
+<td>SSMS <code>/explain</code> and <code>/optimize</code> provide selected-query code assistance</td>
+<td><a href="https://learn.microsoft.com/en-us/ssms/github-copilot/chat-context">SSMS chat context and slash commands</a></td>
+</tr>
+<tr>
+<td>SSMS Agent mode pauses for approval before executing a query or command, with approval scope selected by the user</td>
+<td><a href="https://learn.microsoft.com/en-us/ssms/github-copilot/agent-mode">SSMS Agent mode and tool approvals</a></td>
 </tr>
 <tr>
 <td>SSMS MCP use requires Agent mode and explicit tool control</td>

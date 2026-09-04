@@ -4,14 +4,13 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="description" content="An evidence-driven L400 workshop for optimizing a SQL Server stored procedure with GitHub Copilot and Microsoft SQL MCP.">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'sha256-b5MeUJifSKSfTMPMddrS1DZR/PfSzDiMsbc0XtGwWLc='; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; upgrade-insecure-requests">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'sha256-qfCHbybXX5CRnU+kG753xvbA6jClRUtDyZKPWim8t44='; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; upgrade-insecure-requests">
   <title>Optimize and prove | MCP SQL Query Store Workshop</title>
   <link rel="stylesheet" href="assets/styles.css">
   <script>
   (() => {
     const param = new URLSearchParams(window.location.search).get("scoutTheme");
-    const theme =
-      param || (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+    const theme = param === "light" ? "light" : "dark";
     document.documentElement.setAttribute("data-theme", theme);
   })();
 </script>
@@ -90,6 +89,14 @@
           <span class="module-operator-glyph" aria-hidden="true"></span>
           <span class="module-phase">Workshop 06</span>
           <span class="module-title">Optimize and prove</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="scenario-a-vscode-scenario-b-ssms.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop resource</span>
+          <span class="module-title">Scenario A: VS Code and Scenario B: SSMS</span>
         </a>
       </li>
       <!---->
@@ -184,6 +191,7 @@
   <div class="workshop-content">
     <h1 id="optimize-and-prove">Optimize and prove<a class="headerlink" href="#optimize-and-prove" title="Permanent link">&para;</a></h1>
 <p><strong>Instruction: 55 minutes · Workshop elapsed: 340 minutes</strong></p>
+<p>Use the untimed <a href="scenario-a-vscode-scenario-b-ssms.html">Scenario A: VS Code and Scenario B: SSMS runbook</a> when facilitating the independent Candidate A and Candidate B reviews before this module's approval and proof gates.</p>
 <h2 id="use-an-evidence-first-copilot-workflow">Use an evidence-first Copilot workflow<a class="headerlink" href="#use-an-evidence-first-copilot-workflow" title="Permanent link">&para;</a></h2>
 <p>Require every analysis to separate <strong>Observations</strong>, <strong>Missing evidence</strong>, <strong>Hypotheses ranked by confidence</strong>, <strong>Proposed experiments</strong>, <strong>Candidate changes</strong>, <strong>Risks and rollback</strong>, and <strong>Validation criteria</strong>. Copilot assists the workflow; the DBA owns approvals and the final decision.</p>
 <p>Start with the actual baseline source in <code>sql/04-CreateBaselineProcedure.sql</code>. Correlate its non-SARGable date conversion, wide intermediate payload, repeated fact access, late aggregation, hash/sort operators, estimates, actual rows, grants, spills, waits, and Query Store windows. Do not infer causality from one plan or execution.</p>
@@ -220,7 +228,7 @@
   <a rel="prev" href="05-investigate-with-vscode.html">Previous: Investigate from VS Code</a>
 
 
-  <a rel="next" href="07-teardown.html">Next: Teardown and review</a>
+  <a rel="next" href="scenario-a-vscode-scenario-b-ssms.html">Next: Scenario A: VS Code and Scenario B: SSMS</a>
 
 </nav>
 

@@ -18,7 +18,7 @@ CLAWPILOT_THEME_SCRIPT = (
     "\n"
     "  (() => {\n"
     '    const param = new URLSearchParams(window.location.search).get("scoutTheme");\n'
-    '    const theme = param || "dark";\n'
+    '    const theme = param === "light" ? "light" : "dark";\n'
     '    document.documentElement.setAttribute("data-theme", theme);\n'
     "  })();\n"
 )

@@ -4,14 +4,13 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="description" content="An evidence-driven L400 workshop for optimizing a SQL Server stored procedure with GitHub Copilot and Microsoft SQL MCP.">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'sha256-b5MeUJifSKSfTMPMddrS1DZR/PfSzDiMsbc0XtGwWLc='; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; upgrade-insecure-requests">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'sha256-qfCHbybXX5CRnU+kG753xvbA6jClRUtDyZKPWim8t44='; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; upgrade-insecure-requests">
   <title>Investigate from VS Code | MCP SQL Query Store Workshop</title>
   <link rel="stylesheet" href="assets/styles.css">
   <script>
   (() => {
     const param = new URLSearchParams(window.location.search).get("scoutTheme");
-    const theme =
-      param || (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+    const theme = param === "light" ? "light" : "dark";
     document.documentElement.setAttribute("data-theme", theme);
   })();
 </script>
@@ -90,6 +89,14 @@
           <span class="module-operator-glyph" aria-hidden="true"></span>
           <span class="module-phase">Workshop 06</span>
           <span class="module-title">Optimize and prove</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="scenario-a-vscode-scenario-b-ssms.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop resource</span>
+          <span class="module-title">Scenario A: VS Code and Scenario B: SSMS</span>
         </a>
       </li>
       <!---->
@@ -184,6 +191,7 @@
   <div class="workshop-content">
     <h1 id="investigate-from-vs-code-on-the-admin-vm">Investigate from VS Code on the admin VM<a class="headerlink" href="#investigate-from-vs-code-on-the-admin-vm" title="Permanent link">&para;</a></h1>
 <p><strong>Instruction: 65 minutes + 10-minute break · Workshop elapsed: 285 minutes</strong></p>
+<p>For the complete side-by-side procedure, use the untimed <a href="scenario-a-vscode-scenario-b-ssms.html">Scenario A: VS Code and Scenario B: SSMS runbook</a>. It preserves one baseline, two independent Copilot reviews, and one guarded candidate approval.</p>
 <h2 id="1-verify-the-workstation-boundary">1. Verify the workstation boundary<a class="headerlink" href="#1-verify-the-workstation-boundary" title="Permanent link">&para;</a></h2>
 <p>Install or confirm exactly <code>ms-mssql.mssql</code>, <code>GitHub.copilot</code>, and <code>GitHub.copilot-chat</code>. The PowerShell extension is useful but not part of the three required database/Copilot IDs. Connect MSSQL to <code>sql01.mcpworkshop.internal,1433</code>, database <code>AdventureWorks2022</code>, with encryption enabled, certificate validation enabled, and hostname <code>sql01.mcpworkshop.internal</code>. If TLS validation fails, repair DNS, certificate trust, or hostname; do not normalize <code>TrustServerCertificate=True</code>.</p>
 <p>Use <code>@mssql</code> for connected schema, stored-procedure business logic, query execution, and actual execution-plan analysis. <span class="evidence-label" data-evidence-label="DOC-VERIFIED">DOC-VERIFIED</span> Review the <a href="https://learn.microsoft.com/en-us/sql/tools/visual-studio-code-extensions/github-copilot/overview?view=sql-server-ver17">MSSQL Copilot overview</a> and <a href="https://learn.microsoft.com/en-us/sql/tools/visual-studio-code-extensions/github-copilot/business-logic-explainer?view=sql-server-ver17">business logic explainer</a>.</p>

@@ -4,14 +4,13 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="description" content="An evidence-driven L400 workshop for optimizing a SQL Server stored procedure with GitHub Copilot and Microsoft SQL MCP.">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'sha256-b5MeUJifSKSfTMPMddrS1DZR/PfSzDiMsbc0XtGwWLc='; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; upgrade-insecure-requests">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'sha256-qfCHbybXX5CRnU+kG753xvbA6jClRUtDyZKPWim8t44='; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; upgrade-insecure-requests">
   <title>Deploy with native Az PowerShell | MCP SQL Query Store Workshop</title>
   <link rel="stylesheet" href="assets/styles.css">
   <script>
   (() => {
     const param = new URLSearchParams(window.location.search).get("scoutTheme");
-    const theme =
-      param || (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+    const theme = param === "light" ? "light" : "dark";
     document.documentElement.setAttribute("data-theme", theme);
   })();
 </script>
@@ -90,6 +89,14 @@
           <span class="module-operator-glyph" aria-hidden="true"></span>
           <span class="module-phase">Workshop 06</span>
           <span class="module-title">Optimize and prove</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="scenario-a-vscode-scenario-b-ssms.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop resource</span>
+          <span class="module-title">Scenario A: VS Code and Scenario B: SSMS</span>
         </a>
       </li>
       <!---->
@@ -236,6 +243,32 @@
 <p>RDP only to the admin public IP from the attested <code>/32</code>. From that VM, verify private DNS and validated TLS to <code>sql01.mcpworkshop.internal,1433</code>. <code>TrustServerCertificate=True</code> is not the success path. Do not expose or directly RDP to the SQL VM from the internet.</p>
 <h3 id="break-10-minutes">Break — 10 minutes<a class="headerlink" href="#break-10-minutes" title="Permanent link">&para;</a></h3>
 <p>Leave no workload running during the break. If deployment is incomplete, retain the exact failed checkpoint; do not use the break to bypass a failed preflight or readiness gate.</p>
+<h2 id="the-non-optimized-workload-you-will-tune">The non-optimized workload you will tune<a class="headerlink" href="#the-non-optimized-workload-you-will-tune" title="Permanent link">&para;</a></h2>
+<p>Deployment provisions AdventureWorks2022 with an 8,000,000-row <code>lab.FactSales</code> table and the deliberately non-optimized <code>lab.usp_MonthEndSalesBaseline</code> procedure. After the environment is ready, this is the shape you profile with Query Store and the SQL MCP tools, then optimize while preserving the result contract. You never edit the baseline in place: you create a contract-equivalent candidate, prove equivalence, then compare with frozen A/B trials.</p>
+<p>The baseline concentrates several classic anti-patterns. The headline one is a <strong>non-SARGable date filter</strong>, where a function wraps the column so no index seek is possible and the 8M-row clustered index is scanned on every run:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="c1">-- Non-optimized: a function on the column defeats an index seek and forces a full scan</span>
+<a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a><span class="k">SELECT</span><span class="w"> </span><span class="n">fs</span><span class="p">.</span><span class="n">TerritoryID</span><span class="p">,</span><span class="w"> </span><span class="k">SUM</span><span class="p">(</span><span class="n">fs</span><span class="p">.</span><span class="n">SalesAmount</span><span class="p">)</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">TotalSales</span><span class="p">,</span><span class="w"> </span><span class="n">COUNT_BIG</span><span class="p">(</span><span class="o">*</span><span class="p">)</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">OrderCount</span>
+<a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a><span class="k">FROM</span><span class="w"> </span><span class="n">lab</span><span class="p">.</span><span class="n">FactSales</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">fs</span>
+<a id="__codelineno-3-4" name="__codelineno-3-4" href="#__codelineno-3-4"></a><span class="k">WHERE</span><span class="w"> </span><span class="k">YEAR</span><span class="p">(</span><span class="n">fs</span><span class="p">.</span><span class="n">OrderDate</span><span class="p">)</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">2013</span><span class="w"> </span><span class="k">AND</span><span class="w"> </span><span class="k">MONTH</span><span class="p">(</span><span class="n">fs</span><span class="p">.</span><span class="n">OrderDate</span><span class="p">)</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">6</span>
+<a id="__codelineno-3-5" name="__codelineno-3-5" href="#__codelineno-3-5"></a><span class="k">GROUP</span><span class="w"> </span><span class="k">BY</span><span class="w"> </span><span class="n">fs</span><span class="p">.</span><span class="n">TerritoryID</span><span class="p">;</span>
+</code></pre></div>
+<p>Three more non-optimized shapes reinforce the lesson:</p>
+<ul>
+<li><strong>Wide over-materialization with late aggregation</strong> — the procedure carries a <code>char(400)</code> payload through intermediate work before aggregating, inflating the query-workspace memory grant that this workshop measures.</li>
+<li><strong><code>SELECT *</code> with a sort on an unindexed column</strong> — drags unused wide columns through a sort that can spill to TempDB.</li>
+<li><strong>Leading-wildcard <code>LIKE</code></strong> — <code>LIKE '%…%'</code> on a wide column forces a full scan because no index can seek it.</li>
+</ul>
+<p>The optimized rewrite you build later replaces the function-wrapped predicate with a half-open range, projects only the needed columns, and adds a covering index:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="c1">-- Optimized shape: SARGable range plus a covering index (run the index as admin, not via SQL MCP)</span>
+<a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a><span class="k">SELECT</span><span class="w"> </span><span class="n">fs</span><span class="p">.</span><span class="n">TerritoryID</span><span class="p">,</span><span class="w"> </span><span class="k">SUM</span><span class="p">(</span><span class="n">fs</span><span class="p">.</span><span class="n">SalesAmount</span><span class="p">)</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">TotalSales</span><span class="p">,</span><span class="w"> </span><span class="n">COUNT_BIG</span><span class="p">(</span><span class="o">*</span><span class="p">)</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">OrderCount</span>
+<a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a><span class="k">FROM</span><span class="w"> </span><span class="n">lab</span><span class="p">.</span><span class="n">FactSales</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">fs</span>
+<a id="__codelineno-4-4" name="__codelineno-4-4" href="#__codelineno-4-4"></a><span class="k">WHERE</span><span class="w"> </span><span class="n">fs</span><span class="p">.</span><span class="n">OrderDate</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="s1">'2013-06-01'</span><span class="w"> </span><span class="k">AND</span><span class="w"> </span><span class="n">fs</span><span class="p">.</span><span class="n">OrderDate</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="s1">'2013-07-01'</span>
+<a id="__codelineno-4-5" name="__codelineno-4-5" href="#__codelineno-4-5"></a><span class="k">GROUP</span><span class="w"> </span><span class="k">BY</span><span class="w"> </span><span class="n">fs</span><span class="p">.</span><span class="n">TerritoryID</span><span class="p">;</span>
+<a id="__codelineno-4-6" name="__codelineno-4-6" href="#__codelineno-4-6"></a><span class="c1">-- CREATE NONCLUSTERED INDEX IX_FactSales_OrderDate_Territory</span>
+<a id="__codelineno-4-7" name="__codelineno-4-7" href="#__codelineno-4-7"></a><span class="c1">--   ON lab.FactSales (OrderDate, TerritoryID) INCLUDE (SalesAmount);</span>
+<a id="__codelineno-4-8" name="__codelineno-4-8" href="#__codelineno-4-8"></a><span class="c1">-- Rollback: DROP INDEX IX_FactSales_OrderDate_Territory ON lab.FactSales;</span>
+</code></pre></div>
+<p>The target is to move query-workspace grant utilization from an approximately 80% baseline toward approximately 40% — a target, not a promised result. If the target is missed, report the observed outcome.</p>
   </div>
 
 </article>

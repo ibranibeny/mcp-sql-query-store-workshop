@@ -4,14 +4,13 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="description" content="An evidence-driven L400 workshop for optimizing a SQL Server stored procedure with GitHub Copilot and Microsoft SQL MCP.">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'sha256-b5MeUJifSKSfTMPMddrS1DZR/PfSzDiMsbc0XtGwWLc='; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; upgrade-insecure-requests">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'sha256-qfCHbybXX5CRnU+kG753xvbA6jClRUtDyZKPWim8t44='; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; upgrade-insecure-requests">
   <title>Orientation and safety contract | MCP SQL Query Store Workshop</title>
   <link rel="stylesheet" href="assets/styles.css">
   <script>
   (() => {
     const param = new URLSearchParams(window.location.search).get("scoutTheme");
-    const theme =
-      param || (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+    const theme = param === "light" ? "light" : "dark";
     document.documentElement.setAttribute("data-theme", theme);
   })();
 </script>
@@ -90,6 +89,14 @@
           <span class="module-operator-glyph" aria-hidden="true"></span>
           <span class="module-phase">Workshop 06</span>
           <span class="module-title">Optimize and prove</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="scenario-a-vscode-scenario-b-ssms.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop resource</span>
+          <span class="module-title">Scenario A: VS Code and Scenario B: SSMS</span>
         </a>
       </li>
       <!---->
@@ -187,6 +194,10 @@
 <h2 id="primary-workshop-goal">Primary workshop goal<a class="headerlink" href="#primary-workshop-goal" title="Permanent link">&para;</a></h2>
 <p>Use <strong>GitHub Copilot</strong>, grounded by <strong>Microsoft SQL MCP</strong> and verified SQL Server evidence, to help a DBA optimize a complex stored procedure while preserving its result contract. Copilot proposes and explains; the DBA validates, measures, and decides.</p>
 <p><span class="evidence-label" data-evidence-label="DOC-VERIFIED">DOC-VERIFIED</span> <a href="https://learn.microsoft.com/azure/data-api-builder/mcp/overview">SQL MCP Server</a> exposes configured database entities through Data API Builder permissions, while <a href="https://learn.microsoft.com/sql/relational-databases/security/authentication-access/getting-started-with-database-engine-permissions">SQL Server Database Engine permissions</a> continue to authorize database actions. This controlled tool boundary is not permission to bypass database authorization or human review.</p>
+<h2 id="background-story">Background story<a class="headerlink" href="#background-story" title="Permanent link">&para;</a></h2>
+<p>Adventure Works closes its books every month with a single stored procedure that aggregates sales into a territory-by-customer summary. As the fact data grew past millions of rows, that month-end run began to dominate an isolated SQL Server query-workspace memory pool: wide rows are materialized early, carried through intermediate work, and aggregated late, so a large share of the pool's grant is consumed on every execution while the business result never changes.</p>
+<p>A skeptical DBA is asked to make it faster without changing a single output row. Rather than guess, the DBA pairs <strong>GitHub Copilot</strong> — for explanations, hypotheses, and candidate rewrites — with the <strong>Microsoft SQL MCP server</strong>, which exposes only bounded, read-only Query Store and diagnostic evidence. Copilot proposes; the SQL MCP tools and Query Store supply the measurements; the DBA validates equivalence and decides. Every artifact runs inside a disposable, isolated two-VM lab so the experiment can never touch production.</p>
+<p>That tension — an AI assistant that is genuinely useful but must be grounded in verifiable evidence and human judgment — is the story this workshop lets you live through end to end.</p>
 <h2 id="architecture-and-public-ingress-boundary">Architecture and public ingress boundary<a class="headerlink" href="#architecture-and-public-ingress-boundary" title="Permanent link">&para;</a></h2>
 <figure class="architecture-diagram flowchart-diagram"><svg xmlns="http://www.w3.org/2000/svg" viewbox="0 0 660 132" role="img" aria-labelledby="flow-arrow-b58b616600-title flow-arrow-b58b616600-desc"><title id="flow-arrow-b58b616600-title">LR architecture flowchart: Facilitator, Windows 11 administration VM, SQL Server 2022 Enterprise VM / No public IP</title><desc id="flow-arrow-b58b616600-desc">Nodes: Facilitator, Windows 11 administration VM, SQL Server 2022 Enterprise VM / No public IP. Edges: Facilitator to Windows 11 administration VM (Public RDP 3389 from approved /32 only); Windows 11 administration VM to SQL Server 2022 Enterprise VM / No public IP (Private encrypted TDS 1433).</desc><defs><marker id="flow-arrow-b58b616600" markerwidth="10" markerheight="10" refx="9" refy="3" orient="auto"><path class="diagram-arrowhead" d="M0,0 L0,6 L9,3 z"></path></marker></defs><path class="diagram-edge" data-source="F" data-target="A" d="M 190 66 L 250 66" fill="none" marker-end="url(#flow-arrow-b58b616600)"></path><text class="diagram-edge-label" text-anchor="middle"><tspan x="220" y="48">Public RDP 3389 from</tspan><tspan x="220" y="65">approved /32 only</tspan></text><path class="diagram-edge" data-source="A" data-target="S" d="M 410 66 L 470 66" fill="none" marker-end="url(#flow-arrow-b58b616600)"></path><text class="diagram-edge-label" text-anchor="middle"><tspan x="440" y="56">Private encrypted TDS 1433</tspan></text><rect class="diagram-node" data-node-id="F" x="30" y="30" width="160" height="72" rx="8"></rect><text class="diagram-node-label" text-anchor="middle"><tspan x="110" y="71">Facilitator</tspan></text><rect class="diagram-node" data-node-id="A" x="250" y="30" width="160" height="72" rx="8"></rect><text class="diagram-node-label" text-anchor="middle"><tspan x="330" y="71">Windows 11 administration VM</tspan></text><rect class="diagram-node" data-node-id="S" x="470" y="30" width="160" height="72" rx="8"></rect><text class="diagram-node-label" text-anchor="middle"><tspan x="550" y="55">SQL Server 2022 Enterprise</tspan><tspan x="550" y="72">VM</tspan><tspan x="550" y="89">No public IP</tspan></text></svg><details><summary>Diagram source</summary><pre>flowchart LR
     F[&quot;Facilitator&quot;] --&gt;|&quot;Public RDP 3389 from approved /32 only&quot;| A[&quot;Windows 11 administration VM&quot;]

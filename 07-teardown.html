@@ -4,14 +4,13 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="description" content="An evidence-driven L400 workshop for optimizing a SQL Server stored procedure with GitHub Copilot and Microsoft SQL MCP.">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'sha256-b5MeUJifSKSfTMPMddrS1DZR/PfSzDiMsbc0XtGwWLc='; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; upgrade-insecure-requests">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'sha256-qfCHbybXX5CRnU+kG753xvbA6jClRUtDyZKPWim8t44='; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; upgrade-insecure-requests">
   <title>Teardown and review | MCP SQL Query Store Workshop</title>
   <link rel="stylesheet" href="assets/styles.css">
   <script>
   (() => {
     const param = new URLSearchParams(window.location.search).get("scoutTheme");
-    const theme =
-      param || (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+    const theme = param === "light" ? "light" : "dark";
     document.documentElement.setAttribute("data-theme", theme);
   })();
 </script>
@@ -90,6 +89,14 @@
           <span class="module-operator-glyph" aria-hidden="true"></span>
           <span class="module-phase">Workshop 06</span>
           <span class="module-title">Optimize and prove</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="scenario-a-vscode-scenario-b-ssms.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop resource</span>
+          <span class="module-title">Scenario A: VS Code and Scenario B: SSMS</span>
         </a>
       </li>
       <!---->
@@ -201,9 +208,10 @@
 <a id="__codelineno-1-4" name="__codelineno-1-4" href="#__codelineno-1-4"></a>  <span class="n">-ConfirmationPhrase</span> <span class="s1">'DELETE rg-mcp-sql-workshop'</span> <span class="p">`</span>
 <a id="__codelineno-1-5" name="__codelineno-1-5" href="#__codelineno-1-5"></a>  <span class="n">-Confirm</span><span class="p">:</span><span class="nv">$false</span>
 </code></pre></div>
-<p>The exact case-sensitive phrase is <code>DELETE rg-mcp-sql-workshop</code>. The function waits for deletion and fails if the resource group or any tagged workshop resource remains.</p>
+<p>The exact case-sensitive phrase is <code>DELETE rg-mcp-sql-workshop</code>. The function waits for deletion and fails if the resource group or any tagged workshop resource remains. The tagged-resource check searches the whole subscription, not just the deleted group, so a workshop-tagged resource that was created elsewhere still fails teardown.</p>
+<p>If this deployment used the local emergency-stop fallback instead of a DevTestLab schedule, removal also unregisters the <code>McpSqlWorkshop-EmergencyStop</code> scheduled task on this workstation and proves it is gone. The returned checkpoint list reports <code>Local emergency-stop task removed</code> or <code>Local emergency-stop task absent</code>; treat any other value as teardown incomplete.</p>
 <h2 id="5-prove-cost-stop">5. Prove cost stop<a class="headerlink" href="#5-prove-cost-stop" title="Permanent link">&para;</a></h2>
-<p>Do not end at a successful delete request. Record positive evidence that the resource group is absent and no tagged workshop resources remain. If access prevents proof or a dependency blocks deletion, report teardown incomplete and ongoing billing risk; escalate to the subscription owner.</p>
+<p>Do not end at a successful delete request. Record positive evidence that the resource group is absent, no tagged workshop resources remain, and the local emergency-stop task is gone. If access prevents proof or a dependency blocks deletion, report teardown incomplete and ongoing billing risk; escalate to the subscription owner.</p>
 <h2 id="6-close-the-workshop">6. Close the workshop<a class="headerlink" href="#6-close-the-workshop" title="Permanent link">&para;</a></h2>
 <p>Complete the attendee evidence table, attach only reviewed artifacts, and write a short report with outcome, correctness verdict, performance evidence, security boundary, limitations, rollback, and teardown proof. Use the organization's approved mail or ticket system to send the report; do not commit recipient addresses or sensitive evidence. Remove local ignored <code>.env</code> and transient credentials after evidence review.</p>
 <p>Production adoption requires separate workload replay, security review, change control, maintenance-window planning, monitoring, and rollback. This disposable lab is not production approval.</p>
@@ -213,7 +221,7 @@
 </article>
 <nav class="page-navigation" aria-label="Previous and next pages">
 
-  <a rel="prev" href="06-optimize-and-prove.html">Previous: Optimize and prove</a>
+  <a rel="prev" href="scenario-a-vscode-scenario-b-ssms.html">Previous: Scenario A: VS Code and Scenario B: SSMS</a>
 
 
   <a rel="next" href="facilitator-guide.html">Next: Facilitator guide</a>
