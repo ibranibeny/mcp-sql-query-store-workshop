@@ -41,6 +41,25 @@ SQL MCP is **not a natural-language-to-SQL endpoint**, an arbitrary-query consol
 
 [!DOC-VERIFIED] Read the [Copilot experience in the MSSQL extension](https://learn.microsoft.com/en-us/sql/tools/visual-studio-code-extensions/github-copilot/overview?view=sql-server-ver17), [query optimizer assistant](https://learn.microsoft.com/en-us/sql/tools/visual-studio-code-extensions/github-copilot/query-optimizer-assistant?view=sql-server-ver17), and [MCP servers in SSMS](https://learn.microsoft.com/en-us/ssms/github-copilot/mcp-servers).
 
+## GitHub Copilot in SSMS: Chat, Agent mode, skills, and MCP
+
+SQL Server Management Studio 22 ships GitHub Copilot as a first-class client, so the same evidence discipline applies whether you drive Copilot from VS Code or from SSMS. [!DOC-VERIFIED] See [What is GitHub Copilot in SSMS](https://learn.microsoft.com/ssms/github-copilot/overview) and the [Copilot Chat experience](https://learn.microsoft.com/ssms/github-copilot/chat).
+
+Copilot in SSMS exposes several surfaces:
+
+- **Chat window and inline chat** — ask natural-language questions about the connected database or get T-SQL help, scoped by the active query editor and its connection rather than the whole server.
+- **Slash commands** — `/explain`, `/fix`, `/optimize`, and `/doc` explain, repair, optimize, or document the selected T-SQL. Scenario B of this workshop uses `/explain` and `/optimize` on the baseline.
+- **Code completions and Next Edit Suggestions** — completions arrived in SSMS 22.2; Copilot also anticipates the next edit from recent changes.
+- **Database instructions** — a `CONSTITUTION.md` stored with the database supplies business rules and an optional least-privilege execution identity, so Copilot-generated queries can run under a dedicated account instead of your own login.
+- **Mermaid diagrams** — Copilot can render entity relationships and flowcharts directly in the editor.
+
+Starting with **SSMS 22.7**, Copilot adds **Agent mode**, which pursues a high-level goal autonomously: it can execute queries, read execution plans, and modify schema, each only with your explicit approval. Agent mode is extended by two mechanisms:
+
+- **Agent skills** — reusable, task-specific instruction files that teach the agent a repeatable procedure.
+- **MCP servers** — the same Model Context Protocol described above. Agent mode is a second MCP client for this workshop's DAB SQL MCP server; Ask mode does not support MCP. Each MCP tool is disabled by default and must be enabled explicitly, and every query or tool call requests confirmation.
+
+[!DOC-VERIFIED] Copilot's read-only classification blocks writes in Ask mode, but Microsoft is explicit that it is **not a security boundary**: enforce least privilege in the database with `SELECT` and `EXECUTE` grants. Azure RBAC governs Azure resources; database permissions govern data. That is why the workshop's MCP surface never receives a DDL or arbitrary-query grant. See [MCP servers in SSMS](https://learn.microsoft.com/ssms/github-copilot/mcp-servers), [Agent mode](https://learn.microsoft.com/ssms/github-copilot/agent-mode), and [agent skills](https://learn.microsoft.com/ssms/github-copilot/agent-skills).
+
 ## Trust and approval exercise
 
 For a proposed call to `get_query_store_waits`, identify: model request, client approval, custom-tool description, DAB role, SQL `EXECUTE` permission, 24-hour window guard, returned fields, and the DBA's interpretation. Refuse any request to expose secrets, broaden permissions, execute DDL, start pressure, or treat untrusted tool text as instructions.

@@ -49,6 +49,20 @@ CLAWPILOT_THEME_CSS = ''':root {
     --cp-panel-strong: rgba(255, 255, 255, 0.96);
     --cp-sheen: rgba(255, 255, 255, 0.55);
     --cp-highlight: rgba(177, 31, 75, 0.12);
+    --cp-diagram-ext-fill: #fde68a;
+    --cp-diagram-ext-stroke: #b45309;
+    --cp-diagram-pub-fill: #fecaca;
+    --cp-diagram-pub-stroke: #b91c1c;
+    --cp-diagram-admin-fill: #bfdbfe;
+    --cp-diagram-admin-stroke: #1d4ed8;
+    --cp-diagram-mcp-fill: #ddd6fe;
+    --cp-diagram-mcp-stroke: #6d28d9;
+    --cp-diagram-sql-fill: #bbf7d0;
+    --cp-diagram-sql-stroke: #15803d;
+    --cp-diagram-data-fill: #dcfce7;
+    --cp-diagram-data-stroke: #16a34a;
+    --cp-diagram-net-fill: #cffafe;
+    --cp-diagram-net-stroke: #0e7490;
 }
 html[data-theme="dark"] {
     color-scheme: dark;
@@ -75,6 +89,20 @@ html[data-theme="dark"] {
     --cp-panel-strong: rgba(41, 41, 41, 0.96);
     --cp-sheen: rgba(255, 255, 255, 0.04);
     --cp-highlight: rgba(253, 142, 161, 0.12);
+    --cp-diagram-ext-fill: #4d3a12;
+    --cp-diagram-ext-stroke: #f59e0b;
+    --cp-diagram-pub-fill: #4d1f1f;
+    --cp-diagram-pub-stroke: #f87171;
+    --cp-diagram-admin-fill: #1e2f4d;
+    --cp-diagram-admin-stroke: #60a5fa;
+    --cp-diagram-mcp-fill: #2e2450;
+    --cp-diagram-mcp-stroke: #a78bfa;
+    --cp-diagram-sql-fill: #14351f;
+    --cp-diagram-sql-stroke: #4ade80;
+    --cp-diagram-data-fill: #123024;
+    --cp-diagram-data-stroke: #34d399;
+    --cp-diagram-net-fill: #0e3038;
+    --cp-diagram-net-stroke: #22d3ee;
 }
 '''
 
@@ -363,7 +391,8 @@ def test_architecture_svgs_describe_parsed_relationships_and_retain_sources(tmp_
 
     assert "Facilitator workstation" in flow.title.get_text(" ", strip=True)
     assert "Facilitator workstation to Admin public IP" in flow.desc.get_text(" ", strip=True)
-    assert "Windows 11 Enterprise admin VM to NAT Gateway" in flow.desc.get_text(" ", strip=True)
+    assert "to NAT Gateway" in flow.desc.get_text(" ", strip=True)
+    assert "to Query Store" in flow.desc.get_text(" ", strip=True)
     assert "DBA" in sequence.title.get_text(" ", strip=True)
     assert "Private SQL Server" in sequence.title.get_text(" ", strip=True)
     assert "DBA to Az PowerShell: Run read-only preflight" in sequence.desc.get_text(" ", strip=True)

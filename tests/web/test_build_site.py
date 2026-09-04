@@ -118,6 +118,24 @@ def test_manifest_has_unique_ordered_routes_and_existing_sources() -> None:
     assert all((ROOT / entry["source"]).is_file() for entry in manifest["pages"])
 
 
+def test_flowchart_renders_colored_node_categories() -> None:
+    rendered = render_markdown(
+        "```mermaid\n"
+        "flowchart LR\n"
+        '  A["Client"]:::admin -->|"call"| B["Server"]:::sql\n'
+        "  classDef admin fill:#bfdbfe,stroke:#1d4ed8\n"
+        "  classDef sql fill:#bbf7d0,stroke:#15803d\n"
+        "```\n"
+    )
+    assert '<figure class="architecture-diagram flowchart-diagram">' in rendered
+    assert "diagram-node--admin" in rendered
+    assert "diagram-node--sql" in rendered
+    # classDef declarations must be ignored by the parser, not emitted as nodes.
+    svg_only = rendered.split("<details>")[0]
+    assert "classDef" not in svg_only
+    assert svg_only.count("<rect ") == 2
+
+
 def test_load_manifest_requires_site_metadata_and_nonempty_pages(tmp_path: Path) -> None:
     (tmp_path / "content.md").write_text("# Content", encoding="utf-8")
     missing_site = tmp_path / "missing-site.json"

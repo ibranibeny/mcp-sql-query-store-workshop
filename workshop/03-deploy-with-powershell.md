@@ -81,3 +81,37 @@ RDP only to the admin public IP from the attested `/32`. From that VM, verify pr
 ### Break — 10 minutes
 
 Leave no workload running during the break. If deployment is incomplete, retain the exact failed checkpoint; do not use the break to bypass a failed preflight or readiness gate.
+
+## The non-optimized workload you will tune
+
+Deployment provisions AdventureWorks2022 with an 8,000,000-row `lab.FactSales` table and the deliberately non-optimized `lab.usp_MonthEndSalesBaseline` procedure. After the environment is ready, this is the shape you profile with Query Store and the SQL MCP tools, then optimize while preserving the result contract. You never edit the baseline in place: you create a contract-equivalent candidate, prove equivalence, then compare with frozen A/B trials.
+
+The baseline concentrates several classic anti-patterns. The headline one is a **non-SARGable date filter**, where a function wraps the column so no index seek is possible and the 8M-row clustered index is scanned on every run:
+
+```sql
+-- Non-optimized: a function on the column defeats an index seek and forces a full scan
+SELECT fs.TerritoryID, SUM(fs.SalesAmount) AS TotalSales, COUNT_BIG(*) AS OrderCount
+FROM lab.FactSales AS fs
+WHERE YEAR(fs.OrderDate) = 2013 AND MONTH(fs.OrderDate) = 6
+GROUP BY fs.TerritoryID;
+```
+
+Three more non-optimized shapes reinforce the lesson:
+
+- **Wide over-materialization with late aggregation** — the procedure carries a `char(400)` payload through intermediate work before aggregating, inflating the query-workspace memory grant that this workshop measures.
+- **`SELECT *` with a sort on an unindexed column** — drags unused wide columns through a sort that can spill to TempDB.
+- **Leading-wildcard `LIKE`** — `LIKE '%…%'` on a wide column forces a full scan because no index can seek it.
+
+The optimized rewrite you build later replaces the function-wrapped predicate with a half-open range, projects only the needed columns, and adds a covering index:
+
+```sql
+-- Optimized shape: SARGable range plus a covering index (run the index as admin, not via SQL MCP)
+SELECT fs.TerritoryID, SUM(fs.SalesAmount) AS TotalSales, COUNT_BIG(*) AS OrderCount
+FROM lab.FactSales AS fs
+WHERE fs.OrderDate >= '2013-06-01' AND fs.OrderDate < '2013-07-01'
+GROUP BY fs.TerritoryID;
+-- CREATE NONCLUSTERED INDEX IX_FactSales_OrderDate_Territory
+--   ON lab.FactSales (OrderDate, TerritoryID) INCLUDE (SalesAmount);
+```
+
+The target is to move query-workspace grant utilization from an approximately 80% baseline toward approximately 40% — a target, not a promised result. If the target is missed, report the observed outcome.
