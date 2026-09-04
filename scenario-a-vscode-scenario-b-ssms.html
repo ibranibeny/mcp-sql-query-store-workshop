@@ -1,0 +1,868 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="An evidence-driven L400 workshop for optimizing a SQL Server stored procedure with GitHub Copilot and Microsoft SQL MCP.">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'sha256-qfCHbybXX5CRnU+kG753xvbA6jClRUtDyZKPWim8t44='; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; upgrade-insecure-requests">
+  <title>Scenario A: VS Code and Scenario B: SSMS | MCP SQL Query Store Workshop</title>
+  <link rel="stylesheet" href="assets/styles.css">
+  <script>
+  (() => {
+    const param = new URLSearchParams(window.location.search).get("scoutTheme");
+    const theme = param === "light" ? "light" : "dark";
+    document.documentElement.setAttribute("data-theme", theme);
+  })();
+</script>
+  <script type="module" src="assets/app.js"></script>
+</head>
+<body data-page-route="scenario-a-vscode-scenario-b-ssms.html">
+  <a class="skip-link" href="#main-content">Skip to main content</a>
+  <header class="site-header">
+    <div>
+      <p class="site-kicker">SQL PERFORMANCE LAB // EVIDENCE FIRST</p>
+      <p class="site-title"><a href="index.html">MCP SQL Query Store Workshop</a></p>
+      <p class="site-description">An evidence-driven L400 workshop for optimizing a SQL Server stored procedure with GitHub Copilot and Microsoft SQL MCP.</p>
+    </div>
+    <button class="nav-toggle" type="button" data-nav-toggle aria-controls="module-navigation" aria-expanded="false">
+      <span aria-hidden="true">☰</span>
+      Modules
+    </button>
+  </header>
+  <nav id="module-navigation" class="module-navigation" aria-label="Workshop modules" data-open="false">
+    <form class="site-search" role="search" data-site-search>
+      <label for="site-search-input">Filter workshop pages</label>
+      <input id="site-search-input" type="search" autocomplete="off" placeholder="Search titles and phases" data-site-search-input>
+      <span role="status" aria-live="polite" data-site-search-status></span>
+    </form>
+    <ol><!---->
+      <li class="module-node">
+        <a class="module-node-link" href="index.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop 00</span>
+          <span class="module-title">Orientation and safety contract</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="01-mcp-and-copilot.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop 01</span>
+          <span class="module-title">MCP, SQL MCP Server, and GitHub Copilot</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="02-scenario-and-architecture.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop 02</span>
+          <span class="module-title">Scenario and two-tier architecture</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="03-deploy-with-powershell.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop 03</span>
+          <span class="module-title">Deploy with native Az PowerShell</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="04-create-memory-pressure.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop 04</span>
+          <span class="module-title">Create bounded query-memory pressure</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="05-investigate-with-vscode.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop 05</span>
+          <span class="module-title">Investigate from VS Code</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="06-optimize-and-prove.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop 06</span>
+          <span class="module-title">Optimize and prove</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="scenario-a-vscode-scenario-b-ssms.html" aria-current="page">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop resource</span>
+          <span class="module-title">Scenario A: VS Code and Scenario B: SSMS</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="07-teardown.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop 07</span>
+          <span class="module-title">Teardown and review</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="facilitator-guide.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Facilitator resource</span>
+          <span class="module-title">Facilitator guide</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="attendee-guide.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop resource</span>
+          <span class="module-title">Attendee guide</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="troubleshooting.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop resource</span>
+          <span class="module-title">Troubleshooting</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="evidence-and-sources.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop resource</span>
+          <span class="module-title">Evidence and official sources</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="investigation-prompts.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop resource</span>
+          <span class="module-title">Investigation prompt book</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="prompt-evaluation-rubric.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop resource</span>
+          <span class="module-title">Prompt evaluation rubric</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="offline-dependencies.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop resource</span>
+          <span class="module-title">Offline development dependencies</span>
+        </a>
+      </li>
+      <!---->
+    </ol>
+  </nav>
+  <main id="main-content" tabindex="-1">
+
+<article>
+  <header class="module-header">
+    <p class="module-meta">Workshop resource · 0 minutes</p>
+    <h1>Scenario A: VS Code and Scenario B: SSMS</h1>
+    <div class="progress-control">
+      <button type="button" data-progress-toggle data-module-id="scenario-a-vscode-scenario-b-ssms.html" aria-pressed="false">
+        Mark module complete
+      </button>
+      <span role="status" data-progress-status aria-live="polite">Progress is stored only in this browser.</span>
+    </div>
+  </header>
+  <aside class="evidence-workbench" aria-labelledby="evidence-path-title">
+    <p class="workbench-label">DBA DECISION PATH</p>
+    <h2 id="evidence-path-title">Move claims through evidence</h2>
+    <ol class="evidence-path">
+      <li data-evidence-stage="hypothesis">TARGET / HYPOTHESIS</li>
+      <li data-evidence-stage="measured">MEASURED</li>
+      <li data-evidence-stage="decision">DECISION</li>
+    </ol>
+  </aside>
+  <div class="workshop-content">
+    <p><strong>Level:</strong> L400
+<strong>Database:</strong> <code>AdventureWorks2022</code>
+<strong>SQL endpoint:</strong> private DNS <code>sql01.mcpworkshop.internal,1433</code>
+<strong>Principle:</strong> one baseline, two independent Copilot reviews, one DBA-approved candidate, one correctness and A/B performance gate</p>
+<h2 id="outcome">Outcome<a class="headerlink" href="#outcome" title="Permanent link">&para;</a></h2>
+<p>Use the same deliberately inefficient stored procedure and the same measured evidence in two tools:</p>
+<ul>
+<li><strong>Scenario A:</strong> RDP to the Windows 11 administration VM, connect from Visual Studio Code with MSSQL, use GitHub Copilot and the local read-only SQL MCP server.</li>
+<li><strong>Scenario B:</strong> remain in the same RDP session, connect from SQL Server Management Studio, and use GitHub Copilot <code>/explain</code> and <code>/optimize</code> against the same source and actual execution plan.</li>
+</ul>
+<p>Do not apply either generated proposal immediately. Save both reviews, reconcile them, and apply exactly one candidate through the guarded DBA approval entry point.</p>
+<h2 id="how-to-run-this-workshop">How to run this workshop<a class="headerlink" href="#how-to-run-this-workshop" title="Permanent link">&para;</a></h2>
+<h3 id="phase-1-deploy-the-environment">Phase 1. Deploy the environment<a class="headerlink" href="#phase-1-deploy-the-environment" title="Permanent link">&para;</a></h3>
+<p>The facilitator runs these once from the repository root, signed in to Azure PowerShell.</p>
+<table>
+<thead>
+<tr>
+<th>Step</th>
+<th>Script</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td><code>deploy/Test-WorkshopPrerequisites.ps1</code></td>
+<td>Read-only preflight of context, providers, quota, SKUs, images, and policy</td>
+</tr>
+<tr>
+<td>2</td>
+<td><code>deploy/Deploy-WorkshopEnvironment.ps1</code></td>
+<td>Creates the network, both VMs, and runs guest bootstrap</td>
+</tr>
+<tr>
+<td>3</td>
+<td><code>deploy/Capture-DeploymentEvidence.ps1</code></td>
+<td>Records the deployed state as evidence</td>
+</tr>
+</tbody>
+</table>
+<p><code>-FacilitatorCidr</code> is the only ingress the administration NSG allows. Supply the facilitator public IPv4 as a <code>/32</code>.</p>
+<p>Deployment proceeds through network and NAT, NSGs and ASGs, private DNS, the SQL VM, SQL bootstrap, the administration VM, and administration bootstrap. SQL bootstrap is the longest stage because it restores <code>AdventureWorks2022</code> and builds <code>lab.FactSales</code>.</p>
+<p>Between sessions, control cost with these scripts:</p>
+<table>
+<thead>
+<tr>
+<th>Script</th>
+<th>Effect</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>deploy/Stop-WorkshopEnvironment.ps1</code></td>
+<td>Deallocates both VMs; billing for compute stops</td>
+</tr>
+<tr>
+<td><code>deploy/Start-WorkshopEnvironment.ps1</code></td>
+<td>Reads each VM power state and starts only the VMs that are not already running</td>
+</tr>
+<tr>
+<td><code>deploy/Resume-WorkshopEnvironment.ps1</code></td>
+<td>Repairs a partially deployed environment; requires its confirmation phrase</td>
+</tr>
+<tr>
+<td><code>deploy/Remove-WorkshopEnvironment.ps1</code></td>
+<td>Deletes everything; requires <code>DELETE rg-mcp-sql-workshop</code></td>
+</tr>
+</tbody>
+</table>
+<p>Start reports <code>already-running</code> for a VM it did not need to touch, and
+<code>started-and-verified</code> only after reading the power state back.</p>
+<h3 id="phase-2-access-path-on-workshop-day">Phase 2. Access path on workshop day<a class="headerlink" href="#phase-2-access-path-on-workshop-day" title="Permanent link">&para;</a></h3>
+<p>This environment contains no Azure Bastion. Access is RDP to the administration VM public IP, restricted by the administration NSG to the facilitator <code>/32</code>.</p>
+<figure class="architecture-diagram flowchart-diagram"><svg xmlns="http://www.w3.org/2000/svg" viewbox="0 0 1100 412" role="img" aria-labelledby="flow-arrow-2fa7e93ff2-title flow-arrow-2fa7e93ff2-desc"><title id="flow-arrow-2fa7e93ff2-title">LR architecture flowchart: Facilitator workstation / approved IPv4 /32, Admin public IP, Windows 11 administration VM / every workshop tool runs here, VS Code, MSSQL, GitHub Copilot, SSMS 22.7+ with Copilot, Read-only SQL MCP server, SQL Server 2022 VM / 10.20.2.10, no public IP</title><desc id="flow-arrow-2fa7e93ff2-desc">Nodes: Facilitator workstation / approved IPv4 /32, Admin public IP, Windows 11 administration VM / every workshop tool runs here, VS Code, MSSQL, GitHub Copilot, SSMS 22.7+ with Copilot, Read-only SQL MCP server, SQL Server 2022 VM / 10.20.2.10, no public IP. Edges: Facilitator workstation / approved IPv4 /32 to Admin public IP (RDP, TCP 3389); Admin public IP to Windows 11 administration VM / every workshop tool runs here; Windows 11 administration VM / every workshop tool runs here to VS Code, MSSQL, GitHub Copilot; Windows 11 administration VM / every workshop tool runs here to SSMS 22.7+ with Copilot; Windows 11 administration VM / every workshop tool runs here to Read-only SQL MCP server; VS Code, MSSQL, GitHub Copilot to SQL Server 2022 VM / 10.20.2.10, no public IP (private DNS, validated TLS, TCP 1433); SSMS 22.7+ with Copilot to SQL Server 2022 VM / 10.20.2.10, no public IP; Read-only SQL MCP server to SQL Server 2022 VM / 10.20.2.10, no public IP.</desc><defs><marker id="flow-arrow-2fa7e93ff2" markerwidth="10" markerheight="10" refx="9" refy="3" orient="auto"><path class="diagram-arrowhead" d="M0,0 L0,6 L9,3 z"></path></marker></defs><path class="diagram-edge" data-source="F" data-target="P" d="M 190 66 L 250 66" fill="none" marker-end="url(#flow-arrow-2fa7e93ff2)"></path><text class="diagram-edge-label" text-anchor="middle"><tspan x="220" y="56">RDP, TCP 3389</tspan></text><path class="diagram-edge" data-source="P" data-target="A" d="M 410 66 L 470 66" fill="none" marker-end="url(#flow-arrow-2fa7e93ff2)"></path><path class="diagram-edge" data-source="A" data-target="V" d="M 630 66 L 690 66" fill="none" marker-end="url(#flow-arrow-2fa7e93ff2)"></path><path class="diagram-edge" data-source="A" data-target="M" d="M 630 66 L 660 66 L 660 206 L 690 206" fill="none" marker-end="url(#flow-arrow-2fa7e93ff2)"></path><path class="diagram-edge" data-source="A" data-target="C" d="M 630 66 L 660 66 L 660 346 L 690 346" fill="none" marker-end="url(#flow-arrow-2fa7e93ff2)"></path><path class="diagram-edge" data-source="V" data-target="S" d="M 850 66 L 910 66" fill="none" marker-end="url(#flow-arrow-2fa7e93ff2)"></path><text class="diagram-edge-label" text-anchor="middle"><tspan x="880" y="48">private DNS, validated TLS,</tspan><tspan x="880" y="65">TCP 1433</tspan></text><path class="diagram-edge" data-source="M" data-target="S" d="M 850 206 L 880 206 L 880 66 L 910 66" fill="none" marker-end="url(#flow-arrow-2fa7e93ff2)"></path><path class="diagram-edge" data-source="C" data-target="S" d="M 850 346 L 880 346 L 880 66 L 910 66" fill="none" marker-end="url(#flow-arrow-2fa7e93ff2)"></path><rect class="diagram-node" data-node-id="F" x="30" y="30" width="160" height="72" rx="8"></rect><text class="diagram-node-label" text-anchor="middle"><tspan x="110" y="63">Facilitator workstation</tspan><tspan x="110" y="80">approved IPv4 /32</tspan></text><rect class="diagram-node" data-node-id="P" x="250" y="30" width="160" height="72" rx="8"></rect><text class="diagram-node-label" text-anchor="middle"><tspan x="330" y="71">Admin public IP</tspan></text><rect class="diagram-node" data-node-id="A" x="470" y="30" width="160" height="72" rx="8"></rect><text class="diagram-node-label" text-anchor="middle"><tspan x="550" y="55">Windows 11 administration VM</tspan><tspan x="550" y="72">every workshop tool runs</tspan><tspan x="550" y="89">here</tspan></text><rect class="diagram-node" data-node-id="V" x="690" y="30" width="160" height="72" rx="8"></rect><text class="diagram-node-label" text-anchor="middle"><tspan x="770" y="63">VS Code, MSSQL, GitHub</tspan><tspan x="770" y="80">Copilot</tspan></text><rect class="diagram-node" data-node-id="M" x="690" y="170" width="160" height="72" rx="8"></rect><text class="diagram-node-label" text-anchor="middle"><tspan x="770" y="211">SSMS 22.7+ with Copilot</tspan></text><rect class="diagram-node" data-node-id="C" x="690" y="310" width="160" height="72" rx="8"></rect><text class="diagram-node-label" text-anchor="middle"><tspan x="770" y="351">Read-only SQL MCP server</tspan></text><rect class="diagram-node" data-node-id="S" x="910" y="30" width="160" height="72" rx="8"></rect><text class="diagram-node-label" text-anchor="middle"><tspan x="990" y="63">SQL Server 2022 VM</tspan><tspan x="990" y="80">10.20.2.10, no public IP</tspan></text></svg><details><summary>Diagram source</summary><pre>flowchart LR
+  F[&quot;Facilitator workstation&lt;br/&gt;approved IPv4 /32&quot;] --&gt;|&quot;RDP, TCP 3389&quot;| P[&quot;Admin public IP&quot;]
+  P --&gt; A[&quot;Windows 11 administration VM&lt;br/&gt;every workshop tool runs here&quot;]
+  A --&gt; V[&quot;VS Code, MSSQL, GitHub Copilot&quot;]
+  A --&gt; M[&quot;SSMS 22.7+ with Copilot&quot;]
+  A --&gt; C[&quot;Read-only SQL MCP server&quot;]
+  V --&gt;|&quot;private DNS, validated TLS, TCP 1433&quot;| S[&quot;SQL Server 2022 VM&lt;br/&gt;10.20.2.10, no public IP&quot;]
+  M --&gt; S
+  C --&gt; S</pre></details></figure>
+<p>Every workshop action happens inside the administration VM. Do not try to reach SQL Server from a laptop. The SQL VM has no public IP, and that is the intended boundary rather than an obstacle to work around.</p>
+<h2 id="safety-rules">Safety rules<a class="headerlink" href="#safety-rules" title="Permanent link">&para;</a></h2>
+<ol>
+<li>SQL Server remains private. Never add a public IP, public SQL listener, internet firewall exception, or HTTP MCP endpoint.</li>
+<li>Never paste passwords, connection strings, tokens, or unredacted infrastructure identifiers into Copilot.</li>
+<li>SQL MCP is read-only and bounded. It is not an arbitrary SQL or DDL engine.</li>
+<li>The baseline procedure remains unchanged.</li>
+<li>A manual query execution is diagnostic evidence, not benchmark evidence.</li>
+<li>Targets of 75–85% baseline and 35–45% optimized grant utilization are not measurements.</li>
+<li>Candidate DDL requires explicit DBA review and the guarded approval script.</li>
+<li>Correctness must pass before performance can be accepted.</li>
+</ol>
+<h2 id="readiness-gate">Readiness gate<a class="headerlink" href="#readiness-gate" title="Permanent link">&para;</a></h2>
+<p>Proceed only when all checks pass:</p>
+<table>
+<thead>
+<tr>
+<th>Check</th>
+<th>Required state</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Windows 11 administration VM</td>
+<td>Running; RDP from the approved facilitator <code>/32</code> succeeds</td>
+</tr>
+<tr>
+<td>SQL VM</td>
+<td>Running; bootstrap readiness complete</td>
+</tr>
+<tr>
+<td>SQL network</td>
+<td>No public IP; private TCP 1433 reachable only from the administration ASG</td>
+</tr>
+<tr>
+<td>DNS</td>
+<td><code>sql01.mcpworkshop.internal</code> resolves to the SQL VM private IP</td>
+</tr>
+<tr>
+<td>TLS</td>
+<td>Encryption enabled, certificate validation enabled, hostname validated</td>
+</tr>
+<tr>
+<td>VS Code</td>
+<td>MSSQL and GitHub Copilot extensions installed</td>
+</tr>
+<tr>
+<td>SQL MCP</td>
+<td>DAB configuration validates; exactly two summary views and six custom diagnostics are visible</td>
+</tr>
+<tr>
+<td>SSMS</td>
+<td>Version 22.7 or later with AI Assistance installed</td>
+</tr>
+<tr>
+<td>Authentication</td>
+<td>GitHub Copilot interactive sign-in complete in each product</td>
+</tr>
+</tbody>
+</table>
+<p>If a readiness check fails, stop and repair that layer. Do not weaken TLS or expose SQL publicly.</p>
+<hr>
+<h2 id="shared-nonoptimized-workload">Shared nonoptimized workload<a class="headerlink" href="#shared-nonoptimized-workload" title="Permanent link">&para;</a></h2>
+<h3 id="business-request">Business request<a class="headerlink" href="#business-request" title="Permanent link">&para;</a></h3>
+<p>Return the top month-end sales groups by territory, customer, and product. For each group calculate order count, total quantity, total sales, quantity-weighted average unit price, and global sales rank.</p>
+<p>The complete runnable baseline definition is <a href="https://github.com/ibranibeny/mcp-sql-query-store-workshop/blob/1aebe319edd7760a6f37fa21149c0474df23b284/sql/04-CreateBaselineProcedure.sql">sql/04-CreateBaselineProcedure.sql</a>. It deliberately contains multiple realistic anti-patterns while remaining bounded.</p>
+<h3 id="representative-nonoptimized-query-shape">Representative nonoptimized query shape<a class="headerlink" href="#representative-nonoptimized-query-shape" title="Permanent link">&para;</a></h3>
+<p>The core baseline behavior is equivalent to the following excerpt from <code>lab.usp_MonthEndSalesBaseline</code>:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="c1">-- Deliberately non-SARGable and wide intermediate materialization.</span>
+<a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a><span class="k">INSERT</span><span class="w"> </span><span class="o">@</span><span class="n">WideWork</span>
+<a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a><span class="w">    </span><span class="p">(</span><span class="n">SyntheticSalesID</span><span class="p">,</span><span class="w"> </span><span class="n">TerritoryID</span><span class="p">,</span><span class="w"> </span><span class="n">CustomerID</span><span class="p">,</span><span class="w"> </span><span class="n">ProductID</span><span class="p">,</span>
+<a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a><span class="w">     </span><span class="n">OrderQty</span><span class="p">,</span><span class="w"> </span><span class="n">SalesAmount</span><span class="p">,</span><span class="w"> </span><span class="n">WidePayload</span><span class="p">)</span>
+<a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a><span class="k">SELECT</span>
+<a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a><span class="w">    </span><span class="n">fs</span><span class="p">.</span><span class="n">SyntheticSalesID</span><span class="p">,</span>
+<a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a><span class="w">    </span><span class="n">fs</span><span class="p">.</span><span class="n">TerritoryID</span><span class="p">,</span>
+<a id="__codelineno-0-8" name="__codelineno-0-8" href="#__codelineno-0-8"></a><span class="w">    </span><span class="n">fs</span><span class="p">.</span><span class="n">CustomerID</span><span class="p">,</span>
+<a id="__codelineno-0-9" name="__codelineno-0-9" href="#__codelineno-0-9"></a><span class="w">    </span><span class="n">fs</span><span class="p">.</span><span class="n">ProductID</span><span class="p">,</span>
+<a id="__codelineno-0-10" name="__codelineno-0-10" href="#__codelineno-0-10"></a><span class="w">    </span><span class="n">fs</span><span class="p">.</span><span class="n">OrderQty</span><span class="p">,</span>
+<a id="__codelineno-0-11" name="__codelineno-0-11" href="#__codelineno-0-11"></a><span class="w">    </span><span class="n">fs</span><span class="p">.</span><span class="n">SalesAmount</span><span class="p">,</span>
+<a id="__codelineno-0-12" name="__codelineno-0-12" href="#__codelineno-0-12"></a><span class="w">    </span><span class="n">fs</span><span class="p">.</span><span class="n">WidePayload</span>
+<a id="__codelineno-0-13" name="__codelineno-0-13" href="#__codelineno-0-13"></a><span class="k">FROM</span><span class="w"> </span><span class="n">lab</span><span class="p">.</span><span class="n">FactSales</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">fs</span>
+<a id="__codelineno-0-14" name="__codelineno-0-14" href="#__codelineno-0-14"></a><span class="k">WHERE</span><span class="w"> </span><span class="k">CONVERT</span><span class="p">(</span><span class="nb">date</span><span class="p">,</span><span class="w"> </span><span class="n">fs</span><span class="p">.</span><span class="n">OrderDate</span><span class="p">)</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="o">@</span><span class="n">StartDate</span>
+<a id="__codelineno-0-15" name="__codelineno-0-15" href="#__codelineno-0-15"></a><span class="w">  </span><span class="k">AND</span><span class="w"> </span><span class="k">CONVERT</span><span class="p">(</span><span class="nb">date</span><span class="p">,</span><span class="w"> </span><span class="n">fs</span><span class="p">.</span><span class="n">OrderDate</span><span class="p">)</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="o">@</span><span class="n">EndDateExclusive</span><span class="p">;</span>
+<a id="__codelineno-0-16" name="__codelineno-0-16" href="#__codelineno-0-16"></a>
+<a id="__codelineno-0-17" name="__codelineno-0-17" href="#__codelineno-0-17"></a><span class="c1">-- Deliberately late aggregation after carrying a 400-byte payload.</span>
+<a id="__codelineno-0-18" name="__codelineno-0-18" href="#__codelineno-0-18"></a><span class="k">INSERT</span><span class="w"> </span><span class="o">@</span><span class="n">OrderStats</span>
+<a id="__codelineno-0-19" name="__codelineno-0-19" href="#__codelineno-0-19"></a><span class="w">    </span><span class="p">(</span><span class="n">TerritoryID</span><span class="p">,</span><span class="w"> </span><span class="n">CustomerID</span><span class="p">,</span><span class="w"> </span><span class="n">ProductID</span><span class="p">,</span><span class="w"> </span><span class="n">OrderCount</span><span class="p">,</span>
+<a id="__codelineno-0-20" name="__codelineno-0-20" href="#__codelineno-0-20"></a><span class="w">     </span><span class="n">TotalQuantity</span><span class="p">,</span><span class="w"> </span><span class="n">TotalSales</span><span class="p">,</span><span class="w"> </span><span class="n">CarriedPayload</span><span class="p">)</span>
+<a id="__codelineno-0-21" name="__codelineno-0-21" href="#__codelineno-0-21"></a><span class="k">SELECT</span>
+<a id="__codelineno-0-22" name="__codelineno-0-22" href="#__codelineno-0-22"></a><span class="w">    </span><span class="n">w</span><span class="p">.</span><span class="n">TerritoryID</span><span class="p">,</span>
+<a id="__codelineno-0-23" name="__codelineno-0-23" href="#__codelineno-0-23"></a><span class="w">    </span><span class="n">w</span><span class="p">.</span><span class="n">CustomerID</span><span class="p">,</span>
+<a id="__codelineno-0-24" name="__codelineno-0-24" href="#__codelineno-0-24"></a><span class="w">    </span><span class="n">w</span><span class="p">.</span><span class="n">ProductID</span><span class="p">,</span>
+<a id="__codelineno-0-25" name="__codelineno-0-25" href="#__codelineno-0-25"></a><span class="w">    </span><span class="n">COUNT_BIG</span><span class="p">(</span><span class="o">*</span><span class="p">),</span>
+<a id="__codelineno-0-26" name="__codelineno-0-26" href="#__codelineno-0-26"></a><span class="w">    </span><span class="k">CONVERT</span><span class="p">(</span><span class="nb">bigint</span><span class="p">,</span><span class="w"> </span><span class="k">SUM</span><span class="p">(</span><span class="k">CONVERT</span><span class="p">(</span><span class="nb">bigint</span><span class="p">,</span><span class="w"> </span><span class="n">w</span><span class="p">.</span><span class="n">OrderQty</span><span class="p">))),</span>
+<a id="__codelineno-0-27" name="__codelineno-0-27" href="#__codelineno-0-27"></a><span class="w">    </span><span class="k">CONVERT</span><span class="p">(</span><span class="nb">decimal</span><span class="p">(</span><span class="mi">38</span><span class="p">,</span><span class="mi">4</span><span class="p">),</span><span class="w"> </span><span class="k">SUM</span><span class="p">(</span><span class="k">CONVERT</span><span class="p">(</span><span class="nb">decimal</span><span class="p">(</span><span class="mi">38</span><span class="p">,</span><span class="mi">4</span><span class="p">),</span><span class="w"> </span><span class="n">w</span><span class="p">.</span><span class="n">SalesAmount</span><span class="p">))),</span>
+<a id="__codelineno-0-28" name="__codelineno-0-28" href="#__codelineno-0-28"></a><span class="w">    </span><span class="k">MAX</span><span class="p">(</span><span class="n">w</span><span class="p">.</span><span class="n">WidePayload</span><span class="p">)</span>
+<a id="__codelineno-0-29" name="__codelineno-0-29" href="#__codelineno-0-29"></a><span class="k">FROM</span><span class="w"> </span><span class="o">@</span><span class="n">WideWork</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">w</span>
+<a id="__codelineno-0-30" name="__codelineno-0-30" href="#__codelineno-0-30"></a><span class="k">WHERE</span><span class="w"> </span><span class="p">(</span><span class="o">@</span><span class="n">TerritoryID</span><span class="w"> </span><span class="k">IS</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">OR</span><span class="w"> </span><span class="n">w</span><span class="p">.</span><span class="n">TerritoryID</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">@</span><span class="n">TerritoryID</span><span class="p">)</span>
+<a id="__codelineno-0-31" name="__codelineno-0-31" href="#__codelineno-0-31"></a><span class="k">GROUP</span><span class="w"> </span><span class="k">BY</span><span class="w"> </span><span class="n">w</span><span class="p">.</span><span class="n">TerritoryID</span><span class="p">,</span><span class="w"> </span><span class="n">w</span><span class="p">.</span><span class="n">CustomerID</span><span class="p">,</span><span class="w"> </span><span class="n">w</span><span class="p">.</span><span class="n">ProductID</span><span class="p">;</span>
+<a id="__codelineno-0-32" name="__codelineno-0-32" href="#__codelineno-0-32"></a>
+<a id="__codelineno-0-33" name="__codelineno-0-33" href="#__codelineno-0-33"></a><span class="c1">-- Deliberately reads the fact source a second time.</span>
+<a id="__codelineno-0-34" name="__codelineno-0-34" href="#__codelineno-0-34"></a><span class="k">INSERT</span><span class="w"> </span><span class="o">@</span><span class="n">PriceStats</span>
+<a id="__codelineno-0-35" name="__codelineno-0-35" href="#__codelineno-0-35"></a><span class="w">    </span><span class="p">(</span><span class="n">TerritoryID</span><span class="p">,</span><span class="w"> </span><span class="n">CustomerID</span><span class="p">,</span><span class="w"> </span><span class="n">ProductID</span><span class="p">,</span><span class="w"> </span><span class="n">AverageUnitPrice</span><span class="p">)</span>
+<a id="__codelineno-0-36" name="__codelineno-0-36" href="#__codelineno-0-36"></a><span class="k">SELECT</span>
+<a id="__codelineno-0-37" name="__codelineno-0-37" href="#__codelineno-0-37"></a><span class="w">    </span><span class="n">fs</span><span class="p">.</span><span class="n">TerritoryID</span><span class="p">,</span>
+<a id="__codelineno-0-38" name="__codelineno-0-38" href="#__codelineno-0-38"></a><span class="w">    </span><span class="n">fs</span><span class="p">.</span><span class="n">CustomerID</span><span class="p">,</span>
+<a id="__codelineno-0-39" name="__codelineno-0-39" href="#__codelineno-0-39"></a><span class="w">    </span><span class="n">fs</span><span class="p">.</span><span class="n">ProductID</span><span class="p">,</span>
+<a id="__codelineno-0-40" name="__codelineno-0-40" href="#__codelineno-0-40"></a><span class="w">    </span><span class="k">CONVERT</span><span class="p">(</span><span class="nb">decimal</span><span class="p">(</span><span class="mi">19</span><span class="p">,</span><span class="mi">4</span><span class="p">),</span>
+<a id="__codelineno-0-41" name="__codelineno-0-41" href="#__codelineno-0-41"></a><span class="w">        </span><span class="k">SUM</span><span class="p">(</span><span class="k">CONVERT</span><span class="p">(</span><span class="nb">decimal</span><span class="p">(</span><span class="mi">38</span><span class="p">,</span><span class="mi">4</span><span class="p">),</span><span class="w"> </span><span class="n">fs</span><span class="p">.</span><span class="n">SalesAmount</span><span class="p">))</span><span class="w"> </span><span class="o">/</span>
+<a id="__codelineno-0-42" name="__codelineno-0-42" href="#__codelineno-0-42"></a><span class="w">        </span><span class="k">NULLIF</span><span class="p">(</span><span class="k">SUM</span><span class="p">(</span><span class="k">CONVERT</span><span class="p">(</span><span class="nb">decimal</span><span class="p">(</span><span class="mi">38</span><span class="p">,</span><span class="mi">4</span><span class="p">),</span><span class="w"> </span><span class="n">fs</span><span class="p">.</span><span class="n">OrderQty</span><span class="p">)),</span><span class="w"> </span><span class="mi">0</span><span class="p">))</span>
+<a id="__codelineno-0-43" name="__codelineno-0-43" href="#__codelineno-0-43"></a><span class="k">FROM</span><span class="w"> </span><span class="n">lab</span><span class="p">.</span><span class="n">FactSales</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">fs</span>
+<a id="__codelineno-0-44" name="__codelineno-0-44" href="#__codelineno-0-44"></a><span class="k">WHERE</span><span class="w"> </span><span class="k">CONVERT</span><span class="p">(</span><span class="nb">date</span><span class="p">,</span><span class="w"> </span><span class="n">fs</span><span class="p">.</span><span class="n">OrderDate</span><span class="p">)</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="o">@</span><span class="n">StartDate</span>
+<a id="__codelineno-0-45" name="__codelineno-0-45" href="#__codelineno-0-45"></a><span class="w">  </span><span class="k">AND</span><span class="w"> </span><span class="k">CONVERT</span><span class="p">(</span><span class="nb">date</span><span class="p">,</span><span class="w"> </span><span class="n">fs</span><span class="p">.</span><span class="n">OrderDate</span><span class="p">)</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="o">@</span><span class="n">EndDateExclusive</span>
+<a id="__codelineno-0-46" name="__codelineno-0-46" href="#__codelineno-0-46"></a><span class="k">GROUP</span><span class="w"> </span><span class="k">BY</span><span class="w"> </span><span class="n">fs</span><span class="p">.</span><span class="n">TerritoryID</span><span class="p">,</span><span class="w"> </span><span class="n">fs</span><span class="p">.</span><span class="n">CustomerID</span><span class="p">,</span><span class="w"> </span><span class="n">fs</span><span class="p">.</span><span class="n">ProductID</span><span class="p">;</span>
+</code></pre></div>
+<p>Expected anti-patterns to investigate, not assume as measured causes:</p>
+<ul>
+<li><code>CONVERT(date, fs.OrderDate)</code> makes the range predicate non-SARGable.</li>
+<li>The 400-byte <code>WidePayload</code> is carried through intermediate work and ranking but does not affect the business result.</li>
+<li>Aggregation occurs after wide materialization.</li>
+<li><code>lab.FactSales</code> is accessed twice.</li>
+<li>Ranking sorts a wider rowset than required.</li>
+<li>Table variables can contribute to estimate uncertainty depending on plan and compatibility behavior.</li>
+<li><code>(@TerritoryID IS NULL OR ...)</code> can produce parameter-sensitive behavior.</li>
+</ul>
+<h3 id="bounded-diagnostic-invocation">Bounded diagnostic invocation<a class="headerlink" href="#bounded-diagnostic-invocation" title="Permanent link">&para;</a></h3>
+<p>Use this invocation in either editor only for a representative actual plan. The workload controller remains the benchmark authority.</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="n">USE</span><span class="w"> </span><span class="n">AdventureWorks2022</span><span class="p">;</span>
+<a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a><span class="k">GO</span>
+<a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a>
+<a id="__codelineno-1-4" name="__codelineno-1-4" href="#__codelineno-1-4"></a><span class="k">DECLARE</span><span class="w"> </span><span class="o">@</span><span class="n">RunId</span><span class="w"> </span><span class="n">uniqueidentifier</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">NEWID</span><span class="p">();</span>
+<a id="__codelineno-1-5" name="__codelineno-1-5" href="#__codelineno-1-5"></a><span class="k">EXEC</span><span class="w"> </span><span class="n">sys</span><span class="p">.</span><span class="n">sp_set_session_context</span>
+<a id="__codelineno-1-6" name="__codelineno-1-6" href="#__codelineno-1-6"></a><span class="w">    </span><span class="o">@</span><span class="k">key</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">N</span><span class="s1">'WorkshopRunId'</span><span class="p">,</span>
+<a id="__codelineno-1-7" name="__codelineno-1-7" href="#__codelineno-1-7"></a><span class="w">    </span><span class="o">@</span><span class="n">value</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">@</span><span class="n">RunId</span><span class="p">;</span>
+<a id="__codelineno-1-8" name="__codelineno-1-8" href="#__codelineno-1-8"></a><span class="k">EXEC</span><span class="w"> </span><span class="n">sys</span><span class="p">.</span><span class="n">sp_set_session_context</span>
+<a id="__codelineno-1-9" name="__codelineno-1-9" href="#__codelineno-1-9"></a><span class="w">    </span><span class="o">@</span><span class="k">key</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">N</span><span class="s1">'WorkshopManualExecution'</span><span class="p">,</span>
+<a id="__codelineno-1-10" name="__codelineno-1-10" href="#__codelineno-1-10"></a><span class="w">    </span><span class="o">@</span><span class="n">value</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span>
+<a id="__codelineno-1-11" name="__codelineno-1-11" href="#__codelineno-1-11"></a>
+<a id="__codelineno-1-12" name="__codelineno-1-12" href="#__codelineno-1-12"></a><span class="k">SET</span><span class="w"> </span><span class="k">STATISTICS</span><span class="w"> </span><span class="n">IO</span><span class="w"> </span><span class="k">ON</span><span class="p">;</span>
+<a id="__codelineno-1-13" name="__codelineno-1-13" href="#__codelineno-1-13"></a><span class="k">SET</span><span class="w"> </span><span class="k">STATISTICS</span><span class="w"> </span><span class="k">TIME</span><span class="w"> </span><span class="k">ON</span><span class="p">;</span>
+<a id="__codelineno-1-14" name="__codelineno-1-14" href="#__codelineno-1-14"></a>
+<a id="__codelineno-1-15" name="__codelineno-1-15" href="#__codelineno-1-15"></a><span class="k">EXEC</span><span class="w"> </span><span class="n">lab</span><span class="p">.</span><span class="n">usp_MonthEndSalesBaseline</span>
+<a id="__codelineno-1-16" name="__codelineno-1-16" href="#__codelineno-1-16"></a><span class="w">    </span><span class="o">@</span><span class="n">StartDate</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s1">'2022-01-01'</span><span class="p">,</span>
+<a id="__codelineno-1-17" name="__codelineno-1-17" href="#__codelineno-1-17"></a><span class="w">    </span><span class="o">@</span><span class="n">EndDateExclusive</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s1">'2023-01-01'</span><span class="p">,</span>
+<a id="__codelineno-1-18" name="__codelineno-1-18" href="#__codelineno-1-18"></a><span class="w">    </span><span class="o">@</span><span class="n">TerritoryID</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<a id="__codelineno-1-19" name="__codelineno-1-19" href="#__codelineno-1-19"></a><span class="w">    </span><span class="o">@</span><span class="n">TopCount</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">100</span><span class="p">;</span>
+<a id="__codelineno-1-20" name="__codelineno-1-20" href="#__codelineno-1-20"></a>
+<a id="__codelineno-1-21" name="__codelineno-1-21" href="#__codelineno-1-21"></a><span class="k">SET</span><span class="w"> </span><span class="k">STATISTICS</span><span class="w"> </span><span class="k">TIME</span><span class="w"> </span><span class="k">OFF</span><span class="p">;</span>
+<a id="__codelineno-1-22" name="__codelineno-1-22" href="#__codelineno-1-22"></a><span class="k">SET</span><span class="w"> </span><span class="k">STATISTICS</span><span class="w"> </span><span class="n">IO</span><span class="w"> </span><span class="k">OFF</span><span class="p">;</span>
+<a id="__codelineno-1-23" name="__codelineno-1-23" href="#__codelineno-1-23"></a>
+<a id="__codelineno-1-24" name="__codelineno-1-24" href="#__codelineno-1-24"></a><span class="k">EXEC</span><span class="w"> </span><span class="n">sys</span><span class="p">.</span><span class="n">sp_set_session_context</span>
+<a id="__codelineno-1-25" name="__codelineno-1-25" href="#__codelineno-1-25"></a><span class="w">    </span><span class="o">@</span><span class="k">key</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">N</span><span class="s1">'WorkshopManualExecution'</span><span class="p">,</span>
+<a id="__codelineno-1-26" name="__codelineno-1-26" href="#__codelineno-1-26"></a><span class="w">    </span><span class="o">@</span><span class="n">value</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">NULL</span><span class="p">;</span>
+<a id="__codelineno-1-27" name="__codelineno-1-27" href="#__codelineno-1-27"></a><span class="k">EXEC</span><span class="w"> </span><span class="n">sys</span><span class="p">.</span><span class="n">sp_set_session_context</span>
+<a id="__codelineno-1-28" name="__codelineno-1-28" href="#__codelineno-1-28"></a><span class="w">    </span><span class="o">@</span><span class="k">key</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">N</span><span class="s1">'WorkshopRunId'</span><span class="p">,</span>
+<a id="__codelineno-1-29" name="__codelineno-1-29" href="#__codelineno-1-29"></a><span class="w">    </span><span class="o">@</span><span class="n">value</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">NULL</span><span class="p">;</span>
+<a id="__codelineno-1-30" name="__codelineno-1-30" href="#__codelineno-1-30"></a><span class="k">GO</span>
+</code></pre></div>
+<p>Capture:</p>
+<ul>
+<li>actual execution plan;</li>
+<li>Messages output for elapsed/CPU time and logical reads;</li>
+<li>execution start/end UTC;</li>
+<li>parameter values;</li>
+<li>Query ID and Plan ID when correlated with Query Store;</li>
+<li>warnings, estimates versus actual rows, grant properties, and spills.</li>
+</ul>
+<hr>
+<h2 id="scenario-a-rdp-vs-code-mssql-github-copilot-and-sql-mcp">Scenario A — RDP, VS Code, MSSQL, GitHub Copilot, and SQL MCP<a class="headerlink" href="#scenario-a-rdp-vs-code-mssql-github-copilot-and-sql-mcp" title="Permanent link">&para;</a></h2>
+<h3 id="a1-enter-the-administration-vm">A1. Enter the administration VM<a class="headerlink" href="#a1-enter-the-administration-vm" title="Permanent link">&para;</a></h3>
+<ol>
+<li>Connect by RDP only from the approved facilitator source <code>/32</code>.</li>
+<li>Sign in with the prepared workshop administrator account.</li>
+<li>Open the cloned repository in Visual Studio Code.</li>
+<li>Do not display or record the RDP endpoint, username, subscription, tenant, or credentials in screenshots.</li>
+</ol>
+<h3 id="a2-verify-vs-code-tooling">A2. Verify VS Code tooling<a class="headerlink" href="#a2-verify-vs-code-tooling" title="Permanent link">&para;</a></h3>
+<p>Confirm these extension IDs:</p>
+<ul>
+<li><code>ms-mssql.mssql</code></li>
+<li><code>GitHub.copilot</code></li>
+<li><code>GitHub.copilot-chat</code></li>
+</ul>
+<p>Complete GitHub Copilot sign-in interactively if prompted. Authentication tokens must never pass through the model or workshop evidence.</p>
+<h3 id="a3-connect-mssql-to-the-private-database">A3. Connect MSSQL to the private database<a class="headerlink" href="#a3-connect-mssql-to-the-private-database" title="Permanent link">&para;</a></h3>
+<p>Create or select a connection profile with:</p>
+<table>
+<thead>
+<tr>
+<th>Setting</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Server</td>
+<td><code>sql01.mcpworkshop.internal,1433</code></td>
+</tr>
+<tr>
+<td>Database</td>
+<td><code>AdventureWorks2022</code></td>
+</tr>
+<tr>
+<td>Encryption</td>
+<td>Enabled</td>
+</tr>
+<tr>
+<td>Trust server certificate</td>
+<td>Disabled</td>
+</tr>
+<tr>
+<td>Host name in certificate</td>
+<td><code>sql01.mcpworkshop.internal</code></td>
+</tr>
+<tr>
+<td>Authentication</td>
+<td>Prepared least-privileged workshop or DBA credential appropriate to the action</td>
+</tr>
+</tbody>
+</table>
+<p>If connection validation fails, repair DNS, TCP 1433, certificate trust, or hostname. Do not set <code>TrustServerCertificate=True</code> as a shortcut.</p>
+<h3 id="a4-validate-and-start-sql-mcp">A4. Validate and start SQL MCP<a class="headerlink" href="#a4-validate-and-start-sql-mcp" title="Permanent link">&para;</a></h3>
+<p>From the repository root, validate the checked-in DAB configuration:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="n">dotnet</span> <span class="n">tool</span> <span class="n">run</span> <span class="n">dab</span> <span class="p">--</span> <span class="n">validate</span> <span class="p">-</span><span class="n">-config</span> <span class="n">mcp</span><span class="p">/</span><span class="n">dab-config</span><span class="p">.</span><span class="n">json</span>
+</code></pre></div>
+<p>Then:</p>
+<ol>
+<li>Open the Command Palette.</li>
+<li>Run <strong>MCP: List Servers</strong>.</li>
+<li>Start <code>mcp-sql-query-store-workshop</code>.</li>
+<li>Review the server status and output.</li>
+<li>Inspect tools before approving any call.</li>
+<li>Confirm <code>describe_entities</code> sees only the two configured summary views and six diagnostics.</li>
+</ol>
+<p>Expected custom tools:</p>
+<table>
+<thead>
+<tr>
+<th>Tool</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>get_memory_snapshot</code></td>
+<td>Current Resource Governor semaphore, host, process, and SQL memory context</td>
+</tr>
+<tr>
+<td><code>get_active_workshop_grants</code></td>
+<td>Bounded tagged request grants</td>
+</tr>
+<tr>
+<td><code>get_query_store_top_queries</code></td>
+<td>Runtime metrics for the two workshop procedures in a bounded UTC window</td>
+</tr>
+<tr>
+<td><code>get_query_store_waits</code></td>
+<td>Query Store waits in a bounded UTC window</td>
+</tr>
+<tr>
+<td><code>get_procedure_plan_summary</code></td>
+<td>Query/plan identity and forcing state for an exact procedure</td>
+</tr>
+<tr>
+<td><code>compare_workshop_runs</code></td>
+<td>Final completed-run comparison after correctness and twelve trials</td>
+</tr>
+</tbody>
+</table>
+<p>Do not approve create, update, delete, arbitrary query, DDL, workload-control, or session-termination operations.</p>
+<h3 id="a5-learn-the-schema-with-github-copilot">A5. Learn the schema with GitHub Copilot<a class="headerlink" href="#a5-learn-the-schema-with-github-copilot" title="Permanent link">&para;</a></h3>
+<p>Understand the data model before judging any optimization proposal. Schema exploration is an MSSQL extension capability, because the extension supplies live database context to Copilot Chat. The SQL MCP server cannot do this. Its <code>describe_entities</code> tool reports only the configured read-only entities and never reads user tables.</p>
+<ol>
+<li>Expand <code>AdventureWorks2022</code> in the MSSQL object explorer.</li>
+<li>Review <code>lab.FactSales</code>, its clustered key, and its existing indexes.</li>
+<li>Note the declared column widths, especially <code>WidePayload</code>.</li>
+</ol>
+<p>Then ask Copilot Chat one question at a time:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a>@mssql Describe the tables in the lab schema, their primary keys, and how
+<a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a>lab.FactSales relates to the AdventureWorks2022 dimension tables.
+</code></pre></div>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a>@mssql List the existing indexes on lab.FactSales. For each index state the key
+<a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a>columns, the included columns, and which query shapes it can serve.
+</code></pre></div>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a>@mssql Based on this schema alone, which access path would a date-range filter on
+<a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a>lab.FactSales.OrderDate take today, and what would change if that predicate were
+<a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a>wrapped in CONVERT(date, ...)?
+</code></pre></div>
+<p>Ghost-text completions inside a <code>.sql</code> file do not carry schema context. Use <code>@mssql</code> in the chat panel when you want schema-aware answers.</p>
+<p>Record what the schema implies before running anything. A schema reading is a hypothesis about access paths, not a measurement.</p>
+<h3 id="a6-inspect-the-baseline">A6. Inspect the baseline<a class="headerlink" href="#a6-inspect-the-baseline" title="Permanent link">&para;</a></h3>
+<ol>
+<li>Open <a href="https://github.com/ibranibeny/mcp-sql-query-store-workshop/blob/1aebe319edd7760a6f37fa21149c0474df23b284/sql/04-CreateBaselineProcedure.sql">sql/04-CreateBaselineProcedure.sql</a>.</li>
+<li>Connect the editor to <code>AdventureWorks2022</code>.</li>
+<li>Open a second editor with the bounded invocation shown above.</li>
+<li>Enable <strong>Actual Execution Plan</strong> in MSSQL.</li>
+<li>Run the invocation once.</li>
+<li>Save the <code>.sqlplan</code> file and Messages output under the ignored run evidence directory.</li>
+</ol>
+<h3 id="a7-ask-github-copilot-to-explain">A7. Ask GitHub Copilot to explain<a class="headerlink" href="#a7-ask-github-copilot-to-explain" title="Permanent link">&para;</a></h3>
+<p>Select the baseline source and attach or reference the actual plan. In Copilot Chat use <code>@mssql /explain</code>, followed by:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a>Analyze only the selected lab.usp_MonthEndSalesBaseline source and the attached
+<a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a>actual execution plan for the shown parameters. Explain the business result
+<a id="__codelineno-6-3" name="__codelineno-6-3" href="#__codelineno-6-3"></a>contract first, then identify observed operators, estimates versus actual rows,
+<a id="__codelineno-6-4" name="__codelineno-6-4" href="#__codelineno-6-4"></a>scan/seek behavior, sorts, hashes, joins, memory grant properties, warnings,
+<a id="__codelineno-6-5" name="__codelineno-6-5" href="#__codelineno-6-5"></a>and spills. Do not claim causality from one execution. Do not propose DDL yet.
+<a id="__codelineno-6-6" name="__codelineno-6-6" href="#__codelineno-6-6"></a>
+<a id="__codelineno-6-7" name="__codelineno-6-7" href="#__codelineno-6-7"></a>Use exactly these headings:
+<a id="__codelineno-6-8" name="__codelineno-6-8" href="#__codelineno-6-8"></a>Observations
+<a id="__codelineno-6-9" name="__codelineno-6-9" href="#__codelineno-6-9"></a>Missing evidence
+<a id="__codelineno-6-10" name="__codelineno-6-10" href="#__codelineno-6-10"></a>Hypotheses (ranked)
+<a id="__codelineno-6-11" name="__codelineno-6-11" href="#__codelineno-6-11"></a>Experiments
+<a id="__codelineno-6-12" name="__codelineno-6-12" href="#__codelineno-6-12"></a>Candidate changes
+<a id="__codelineno-6-13" name="__codelineno-6-13" href="#__codelineno-6-13"></a>Risks and rollback
+<a id="__codelineno-6-14" name="__codelineno-6-14" href="#__codelineno-6-14"></a>Validation
+</code></pre></div>
+<p>Reject a response that does not identify the source, parameter values, plan properties, units, or missing evidence.</p>
+<h3 id="a8-ground-the-review-with-sql-mcp">A8. Ground the review with SQL MCP<a class="headerlink" href="#a8-ground-the-review-with-sql-mcp" title="Permanent link">&para;</a></h3>
+<p>In Agent mode, request only the bounded diagnostics needed for the exact run and UTC window. Approve each tool invocation individually.</p>
+<p>Use this prompt:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a>Use only the configured read-only SQL MCP tools. Correlate the exact baseline
+<a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a>run ID, UTC window, procedure, Query ID, and Plan ID. Collect a bounded memory
+<a id="__codelineno-7-3" name="__codelineno-7-3" href="#__codelineno-7-3"></a>snapshot, tagged active grants, Query Store runtime, Query Store waits, and the
+<a id="__codelineno-7-4" name="__codelineno-7-4" href="#__codelineno-7-4"></a>procedure plan summary. Distinguish pool utilization from requested, granted,
+<a id="__codelineno-7-5" name="__codelineno-7-5" href="#__codelineno-7-5"></a>ideal, used, and max-used request memory. Label every unit. Do not execute DDL,
+<a id="__codelineno-7-6" name="__codelineno-7-6" href="#__codelineno-7-6"></a>arbitrary SQL, workload control, or session termination.
+<a id="__codelineno-7-7" name="__codelineno-7-7" href="#__codelineno-7-7"></a>
+<a id="__codelineno-7-8" name="__codelineno-7-8" href="#__codelineno-7-8"></a>Use exactly these headings:
+<a id="__codelineno-7-9" name="__codelineno-7-9" href="#__codelineno-7-9"></a>Observations
+<a id="__codelineno-7-10" name="__codelineno-7-10" href="#__codelineno-7-10"></a>Missing evidence
+<a id="__codelineno-7-11" name="__codelineno-7-11" href="#__codelineno-7-11"></a>Hypotheses (ranked)
+<a id="__codelineno-7-12" name="__codelineno-7-12" href="#__codelineno-7-12"></a>Experiments
+<a id="__codelineno-7-13" name="__codelineno-7-13" href="#__codelineno-7-13"></a>Candidate changes
+<a id="__codelineno-7-14" name="__codelineno-7-14" href="#__codelineno-7-14"></a>Risks and rollback
+<a id="__codelineno-7-15" name="__codelineno-7-15" href="#__codelineno-7-15"></a>Validation
+</code></pre></div>
+<p>A point-in-time snapshot is not sufficient to classify the baseline target. The workload controller requires three consecutive samples in the target band.</p>
+<h3 id="a9-ask-github-copilot-to-optimize">A9. Ask GitHub Copilot to optimize<a class="headerlink" href="#a9-ask-github-copilot-to-optimize" title="Permanent link">&para;</a></h3>
+<p>Select the same baseline and include the reviewed plan and SQL MCP output. Use <code>@mssql /optimize</code>, followed by:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a>Propose a contract-preserving optimization for lab.usp_MonthEndSalesBaseline.
+<a id="__codelineno-8-2" name="__codelineno-8-2" href="#__codelineno-8-2"></a>Address the non-SARGable date predicate, wide intermediate payload, repeated
+<a id="__codelineno-8-3" name="__codelineno-8-3" href="#__codelineno-8-3"></a>fact access, late aggregation, and wide ranking sort only where supported by
+<a id="__codelineno-8-4" name="__codelineno-8-4" href="#__codelineno-8-4"></a>the supplied evidence. Evaluate a narrow covering index separately from the
+<a id="__codelineno-8-5" name="__codelineno-8-5" href="#__codelineno-8-5"></a>query rewrite. Preserve parameter names, types, defaults, validation errors,
+<a id="__codelineno-8-6" name="__codelineno-8-6" href="#__codelineno-8-6"></a>result columns and types, null semantics, values, row identity, ranking, and
+<a id="__codelineno-8-7" name="__codelineno-8-7" href="#__codelineno-8-7"></a>contractual ordering. Do not alter server-wide memory settings. Do not apply
+<a id="__codelineno-8-8" name="__codelineno-8-8" href="#__codelineno-8-8"></a>DDL. Return an unapplied Candidate A with rollback and a correctness/performance
+<a id="__codelineno-8-9" name="__codelineno-8-9" href="#__codelineno-8-9"></a>validation plan.
+<a id="__codelineno-8-10" name="__codelineno-8-10" href="#__codelineno-8-10"></a>
+<a id="__codelineno-8-11" name="__codelineno-8-11" href="#__codelineno-8-11"></a>Use exactly these headings:
+<a id="__codelineno-8-12" name="__codelineno-8-12" href="#__codelineno-8-12"></a>Observations
+<a id="__codelineno-8-13" name="__codelineno-8-13" href="#__codelineno-8-13"></a>Missing evidence
+<a id="__codelineno-8-14" name="__codelineno-8-14" href="#__codelineno-8-14"></a>Hypotheses (ranked)
+<a id="__codelineno-8-15" name="__codelineno-8-15" href="#__codelineno-8-15"></a>Experiments
+<a id="__codelineno-8-16" name="__codelineno-8-16" href="#__codelineno-8-16"></a>Candidate changes
+<a id="__codelineno-8-17" name="__codelineno-8-17" href="#__codelineno-8-17"></a>Risks and rollback
+<a id="__codelineno-8-18" name="__codelineno-8-18" href="#__codelineno-8-18"></a>Validation
+</code></pre></div>
+<p>Save the reviewed response as <code>evidence/runs/&lt;run-id&gt;/candidate-a-vscode.md</code>. Generated run evidence remains ignored until human provenance and redaction review.</p>
+<hr>
+<h2 id="scenario-b-rdp-ssms-and-github-copilot">Scenario B — RDP, SSMS, and GitHub Copilot<a class="headerlink" href="#scenario-b-rdp-ssms-and-github-copilot" title="Permanent link">&para;</a></h2>
+<h3 id="b1-open-ssms-and-connect">B1. Open SSMS and connect<a class="headerlink" href="#b1-open-ssms-and-connect" title="Permanent link">&para;</a></h3>
+<ol>
+<li>Stay on the same Windows 11 administration VM.</li>
+<li>Open SSMS 22.7 or later.</li>
+<li>Verify the <strong>AI Assistance</strong> workload is installed.</li>
+<li>Select the GitHub Copilot badge and complete interactive sign-in.</li>
+<li>Connect an active query editor to <code>sql01.mcpworkshop.internal</code> and <code>AdventureWorks2022</code> with encryption and certificate validation.</li>
+</ol>
+<p>Copilot executes only with the SQL permissions of its configured login or execution context. It does not bypass SQL authorization.</p>
+<h3 id="b2-recreate-the-same-review-context">B2. Recreate the same review context<a class="headerlink" href="#b2-recreate-the-same-review-context" title="Permanent link">&para;</a></h3>
+<p>Before displaying Candidate A or the checked-in optimized procedure:</p>
+<ol>
+<li>Open the same baseline source.</li>
+<li>Open the same bounded invocation and use the same parameter set.</li>
+<li>Enable <strong>Include Actual Execution Plan</strong>.</li>
+<li>Execute once for diagnostic context.</li>
+<li>Confirm the plan and results pane belong to the same source and parameters used in Scenario A.</li>
+<li>Keep Candidate A hidden to preserve an independent review.</li>
+</ol>
+<h3 id="b3-use-explain">B3. Use <code>/explain</code><a class="headerlink" href="#b3-use-explain" title="Permanent link">&para;</a></h3>
+<p>Select the baseline T-SQL in the active editor. Open GitHub Copilot Chat or inline chat and run <code>/explain</code>, followed by:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-9-1" name="__codelineno-9-1" href="#__codelineno-9-1"></a>Explain the selected lab.usp_MonthEndSalesBaseline as a senior SQL Server
+<a id="__codelineno-9-2" name="__codelineno-9-2" href="#__codelineno-9-2"></a>performance engineer. Use the active AdventureWorks2022 connection and the
+<a id="__codelineno-9-3" name="__codelineno-9-3" href="#__codelineno-9-3"></a>actual execution plan in the results pane. Define the result contract and list
+<a id="__codelineno-9-4" name="__codelineno-9-4" href="#__codelineno-9-4"></a>only observed anti-patterns and plan properties. Separate observations from
+<a id="__codelineno-9-5" name="__codelineno-9-5" href="#__codelineno-9-5"></a>hypotheses and identify evidence still required before optimization.
+<a id="__codelineno-9-6" name="__codelineno-9-6" href="#__codelineno-9-6"></a>
+<a id="__codelineno-9-7" name="__codelineno-9-7" href="#__codelineno-9-7"></a>Use exactly these headings:
+<a id="__codelineno-9-8" name="__codelineno-9-8" href="#__codelineno-9-8"></a>Observations
+<a id="__codelineno-9-9" name="__codelineno-9-9" href="#__codelineno-9-9"></a>Missing evidence
+<a id="__codelineno-9-10" name="__codelineno-9-10" href="#__codelineno-9-10"></a>Hypotheses (ranked)
+<a id="__codelineno-9-11" name="__codelineno-9-11" href="#__codelineno-9-11"></a>Experiments
+<a id="__codelineno-9-12" name="__codelineno-9-12" href="#__codelineno-9-12"></a>Candidate changes
+<a id="__codelineno-9-13" name="__codelineno-9-13" href="#__codelineno-9-13"></a>Risks and rollback
+<a id="__codelineno-9-14" name="__codelineno-9-14" href="#__codelineno-9-14"></a>Validation
+</code></pre></div>
+<h3 id="b4-use-optimize">B4. Use <code>/optimize</code><a class="headerlink" href="#b4-use-optimize" title="Permanent link">&para;</a></h3>
+<p>With the same T-SQL selected, run <code>/optimize</code>, followed by:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-10-1" name="__codelineno-10-1" href="#__codelineno-10-1"></a>Produce an unapplied Candidate B for the selected baseline. Preserve the full
+<a id="__codelineno-10-2" name="__codelineno-10-2" href="#__codelineno-10-2"></a>stored-procedure contract. Explain whether a SARGable half-open date predicate,
+<a id="__codelineno-10-3" name="__codelineno-10-3" href="#__codelineno-10-3"></a>early applied territory filter, narrow projection, one fact-table access,
+<a id="__codelineno-10-4" name="__codelineno-10-4" href="#__codelineno-10-4"></a>pre-aggregation, ranking after aggregation, and a covering index are justified
+<a id="__codelineno-10-5" name="__codelineno-10-5" href="#__codelineno-10-5"></a>by the plan. Separate index and query-shape effects. Do not execute or apply
+<a id="__codelineno-10-6" name="__codelineno-10-6" href="#__codelineno-10-6"></a>DDL. Include semantic risks, parameter-sensitivity risks, rollback, equivalence
+<a id="__codelineno-10-7" name="__codelineno-10-7" href="#__codelineno-10-7"></a>tests, and the unchanged A/B measurement conditions.
+<a id="__codelineno-10-8" name="__codelineno-10-8" href="#__codelineno-10-8"></a>
+<a id="__codelineno-10-9" name="__codelineno-10-9" href="#__codelineno-10-9"></a>Use exactly these headings:
+<a id="__codelineno-10-10" name="__codelineno-10-10" href="#__codelineno-10-10"></a>Observations
+<a id="__codelineno-10-11" name="__codelineno-10-11" href="#__codelineno-10-11"></a>Missing evidence
+<a id="__codelineno-10-12" name="__codelineno-10-12" href="#__codelineno-10-12"></a>Hypotheses (ranked)
+<a id="__codelineno-10-13" name="__codelineno-10-13" href="#__codelineno-10-13"></a>Experiments
+<a id="__codelineno-10-14" name="__codelineno-10-14" href="#__codelineno-10-14"></a>Candidate changes
+<a id="__codelineno-10-15" name="__codelineno-10-15" href="#__codelineno-10-15"></a>Risks and rollback
+<a id="__codelineno-10-16" name="__codelineno-10-16" href="#__codelineno-10-16"></a>Validation
+</code></pre></div>
+<p>Save the reviewed response as <code>evidence/runs/&lt;run-id&gt;/candidate-b-ssms.md</code>.</p>
+<h3 id="b5-optional-agent-mode-demonstration">B5. Optional Agent mode demonstration<a class="headerlink" href="#b5-optional-agent-mode-demonstration" title="Permanent link">&para;</a></h3>
+<p>SSMS 22.7 introduces Agent mode as a preview. Use it only if the workshop explicitly demonstrates multi-step orchestration:</p>
+<ol>
+<li>Select <strong>Agent</strong> in the Copilot mode selector.</li>
+<li>Inspect enabled <code>sql-tools</code> before use.</li>
+<li>Include the server and database explicitly in the prompt.</li>
+<li>Review every proposed query or command.</li>
+<li>Select <strong>Allow once</strong> only for read-only diagnostic actions.</li>
+<li>Dismiss DDL, configuration, or unrelated tool calls.</li>
+</ol>
+<p>Ask mode remains preferred for the controlled Candidate B review.</p>
+<hr>
+<h2 id="reconcile-approve-and-prove">Reconcile, approve, and prove<a class="headerlink" href="#reconcile-approve-and-prove" title="Permanent link">&para;</a></h2>
+<h3 id="compare-candidate-a-and-candidate-b">Compare Candidate A and Candidate B<a class="headerlink" href="#compare-candidate-a-and-candidate-b" title="Permanent link">&para;</a></h3>
+<p>Use this review matrix:</p>
+<table>
+<thead>
+<tr>
+<th>Dimension</th>
+<th>Candidate A</th>
+<th>Candidate B</th>
+<th>DBA decision</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Result contract preserved</td>
+<td>Evidence required</td>
+<td>Evidence required</td>
+<td>Accept/reject</td>
+</tr>
+<tr>
+<td>SARGable date range</td>
+<td>Proposed/not proposed</td>
+<td>Proposed/not proposed</td>
+<td>Rationale</td>
+</tr>
+<tr>
+<td>Territory filtering</td>
+<td>Location and semantics</td>
+<td>Location and semantics</td>
+<td>Rationale</td>
+</tr>
+<tr>
+<td>Fact-table access count</td>
+<td>Expected plan effect</td>
+<td>Expected plan effect</td>
+<td>Rationale</td>
+</tr>
+<tr>
+<td>Projection width</td>
+<td>Columns retained</td>
+<td>Columns retained</td>
+<td>Rationale</td>
+</tr>
+<tr>
+<td>Aggregation grain</td>
+<td>Exact grouping keys</td>
+<td>Exact grouping keys</td>
+<td>Rationale</td>
+</tr>
+<tr>
+<td>Ranking and ordering</td>
+<td>Tie behavior</td>
+<td>Tie behavior</td>
+<td>Rationale</td>
+</tr>
+<tr>
+<td>Covering index</td>
+<td>Keys/includes/write cost</td>
+<td>Keys/includes/write cost</td>
+<td>Rationale</td>
+</tr>
+<tr>
+<td>Parameter sensitivity</td>
+<td>Risks and tests</td>
+<td>Risks and tests</td>
+<td>Rationale</td>
+</tr>
+<tr>
+<td>Rollback</td>
+<td>Exact objects</td>
+<td>Exact objects</td>
+<td>Approved owner</td>
+</tr>
+</tbody>
+</table>
+<p>Agreement between Copilot responses is not proof. Compare both against the reference candidate in <a href="https://github.com/ibranibeny/mcp-sql-query-store-workshop/blob/1aebe319edd7760a6f37fa21149c0474df23b284/sql/06-CreateOptimizedProcedure.sql">sql/06-CreateOptimizedProcedure.sql</a>.</p>
+<h3 id="apply-exactly-one-approved-candidate">Apply exactly one approved candidate<a class="headerlink" href="#apply-exactly-one-approved-candidate" title="Permanent link">&para;</a></h3>
+<p>Do not run scripts 06 or 07 directly. After DBA review, use the guarded <a href="https://github.com/ibranibeny/mcp-sql-query-store-workshop/blob/1aebe319edd7760a6f37fa21149c0474df23b284/deploy/Approve-WorkshopCandidate.ps1">Approve-WorkshopCandidate.ps1</a> entry point:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-11-1" name="__codelineno-11-1" href="#__codelineno-11-1"></a><span class="nv">$candidateDba</span> <span class="p">=</span> <span class="nb">Get-Credential</span> <span class="n">-Message</span> <span class="s1">'DBA credential for approved candidate creation'</span>
+<a id="__codelineno-11-2" name="__codelineno-11-2" href="#__codelineno-11-2"></a><span class="p">./</span><span class="n">deploy</span><span class="p">/</span><span class="nb">Approve-WorkshopCandidate</span><span class="p">.</span><span class="n">ps1</span> <span class="p">`</span>
+<a id="__codelineno-11-3" name="__codelineno-11-3" href="#__codelineno-11-3"></a>  <span class="n">-Credential</span> <span class="nv">$candidateDba</span> <span class="p">`</span>
+<a id="__codelineno-11-4" name="__codelineno-11-4" href="#__codelineno-11-4"></a>  <span class="n">-ServerInstance</span> <span class="s1">'sql01.mcpworkshop.internal'</span> <span class="p">`</span>
+<a id="__codelineno-11-5" name="__codelineno-11-5" href="#__codelineno-11-5"></a>  <span class="n">-ExpectedServerName</span> <span class="s1">'sql01.mcpworkshop.internal'</span> <span class="p">`</span>
+<a id="__codelineno-11-6" name="__codelineno-11-6" href="#__codelineno-11-6"></a>  <span class="n">-ExpectedDatabaseName</span> <span class="s1">'AdventureWorks2022'</span> <span class="p">`</span>
+<a id="__codelineno-11-7" name="__codelineno-11-7" href="#__codelineno-11-7"></a>  <span class="n">-ConfirmationPhrase</span> <span class="s1">'APPROVE AdventureWorks2022 candidate'</span>
+</code></pre></div>
+<p>The entry point applies the exact candidate and invokes <a href="https://github.com/ibranibeny/mcp-sql-query-store-workshop/blob/1aebe319edd7760a6f37fa21149c0474df23b284/sql/07-ValidateEquivalence.sql">sql/07-ValidateEquivalence.sql</a>.</p>
+<h3 id="correctness-gate">Correctness gate<a class="headerlink" href="#correctness-gate" title="Permanent link">&para;</a></h3>
+<p>Require all of the following:</p>
+<ul>
+<li>identical first-result metadata;</li>
+<li>matching parameter names, types, and defaults;</li>
+<li>matching row counts and deterministic hashes;</li>
+<li>empty baseline <code>EXCEPT</code> candidate result;</li>
+<li>empty candidate <code>EXCEPT</code> baseline result;</li>
+<li>matching error behavior for invalid inputs;</li>
+<li>matching null behavior, ranking, and ordering;</li>
+<li>every parameter case passes.</li>
+</ul>
+<p>Any mismatch rejects the candidate regardless of speed.</p>
+<h3 id="shared-performance-gate">Shared performance gate<a class="headerlink" href="#shared-performance-gate" title="Permanent link">&para;</a></h3>
+<p>Run the bounded controller described in <a href="04-create-memory-pressure.html">Workshop 04: Create bounded query-memory pressure</a>. Reuse the frozen:</p>
+<ul>
+<li>worker count;</li>
+<li>parameter schedule and hash;</li>
+<li>dataset and statistics;</li>
+<li>index set after approved candidate creation;</li>
+<li>Resource Governor pool and group;</li>
+<li>server-memory configuration;</li>
+<li>database-scoped settings;</li>
+<li>Query Store state.</li>
+</ul>
+<p>The controller performs exactly twelve interleaved <code>ABBA BAAB ABBA</code> trials. Compare actual peak/median grant utilization, duration, CPU, logical reads, spills, waits, and completed requests.</p>
+<p>Use <code>compare_workshop_runs</code> only after the run, validation batch, frozen-settings hash, and all twelve trials are complete.</p>
+<h3 id="decision">Decision<a class="headerlink" href="#decision" title="Permanent link">&para;</a></h3>
+<p>Retain the candidate only when:</p>
+<ol>
+<li>correctness passes;</li>
+<li>query-grant utilization materially improves;</li>
+<li>at least one secondary metric improves;</li>
+<li>no primary metric materially regresses;</li>
+<li>evidence identity and frozen settings are valid.</li>
+</ol>
+<p>Use the actual classification: <code>TargetMet</code>, <code>ImprovedOutsideTarget</code>, <code>NoMaterialImprovement</code>, <code>BaselineTargetNotReached</code>, <code>SafetyStop</code>, <code>ManualStop</code>, or <code>Failed</code>.</p>
+<h3 id="screenshot-checklist">Screenshot checklist<a class="headerlink" href="#screenshot-checklist" title="Permanent link">&para;</a></h3>
+<p>Capture only after each milestone is verified:</p>
+<ol>
+<li>RDP desktop with sensitive connection details excluded.</li>
+<li>VS Code extensions and private MSSQL connection.</li>
+<li>VS Code baseline source and actual plan.</li>
+<li>SQL MCP tool list and bounded evidence.</li>
+<li>Candidate A Copilot analysis.</li>
+<li>SSMS private connection and actual plan.</li>
+<li>SSMS <code>/explain</code> and <code>/optimize</code> output for Candidate B.</li>
+<li>Equivalence result.</li>
+<li>Final A/B evidence and outcome.</li>
+</ol>
+<p>Redact public IP, subscription, tenant, usernames, credentials, tokens, and connection strings before promotion.</p>
+<h2 id="official-references">Official references<a class="headerlink" href="#official-references" title="Permanent link">&para;</a></h2>
+<ul>
+<li><a href="https://learn.microsoft.com/sql/tools/visual-studio-code-extensions/github-copilot/overview?view=sql-server-ver17">GitHub Copilot for MSSQL in VS Code</a></li>
+<li><a href="https://learn.microsoft.com/sql/tools/visual-studio-code-extensions/github-copilot/query-optimizer-assistant?view=sql-server-ver17">MSSQL query optimizer assistant</a></li>
+<li><a href="https://learn.microsoft.com/sql/tools/visual-studio-code-extensions/github-copilot/slash-commands?view=sql-server-ver17">MSSQL slash commands</a></li>
+<li><a href="https://learn.microsoft.com/ssms/github-copilot/overview">GitHub Copilot in SSMS</a></li>
+<li><a href="https://learn.microsoft.com/ssms/github-copilot/chat-context">SSMS Copilot context and slash commands</a></li>
+<li><a href="https://learn.microsoft.com/ssms/github-copilot/agent-mode">SSMS Agent mode</a></li>
+<li><a href="https://learn.microsoft.com/azure/data-api-builder/mcp/overview">SQL MCP Server overview</a></li>
+</ul>
+  </div>
+
+</article>
+<nav class="page-navigation" aria-label="Previous and next pages">
+
+  <a rel="prev" href="06-optimize-and-prove.html">Previous: Optimize and prove</a>
+
+
+  <a rel="next" href="07-teardown.html">Next: Teardown and review</a>
+
+</nav>
+
+  </main>
+  <footer class="site-footer">
+    <p>Evidence-driven SQL tuning with human review. Do not run the workshop workload against production.</p>
+  </footer>
+</body>
+</html>

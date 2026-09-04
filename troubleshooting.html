@@ -4,14 +4,13 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="description" content="An evidence-driven L400 workshop for optimizing a SQL Server stored procedure with GitHub Copilot and Microsoft SQL MCP.">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'sha256-b5MeUJifSKSfTMPMddrS1DZR/PfSzDiMsbc0XtGwWLc='; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; upgrade-insecure-requests">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'sha256-qfCHbybXX5CRnU+kG753xvbA6jClRUtDyZKPWim8t44='; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; upgrade-insecure-requests">
   <title>Troubleshooting | MCP SQL Query Store Workshop</title>
   <link rel="stylesheet" href="assets/styles.css">
   <script>
   (() => {
     const param = new URLSearchParams(window.location.search).get("scoutTheme");
-    const theme =
-      param || (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+    const theme = param === "light" ? "light" : "dark";
     document.documentElement.setAttribute("data-theme", theme);
   })();
 </script>
@@ -90,6 +89,14 @@
           <span class="module-operator-glyph" aria-hidden="true"></span>
           <span class="module-phase">Workshop 06</span>
           <span class="module-title">Optimize and prove</span>
+        </a>
+      </li>
+      <!---->
+      <li class="module-node">
+        <a class="module-node-link" href="scenario-a-vscode-scenario-b-ssms.html">
+          <span class="module-operator-glyph" aria-hidden="true"></span>
+          <span class="module-phase">Workshop resource</span>
+          <span class="module-title">Scenario A: VS Code and Scenario B: SSMS</span>
         </a>
       </li>
       <!---->
