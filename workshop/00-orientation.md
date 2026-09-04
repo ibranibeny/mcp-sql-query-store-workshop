@@ -8,6 +8,14 @@ Use **GitHub Copilot**, grounded by **Microsoft SQL MCP** and verified SQL Serve
 
 [!DOC-VERIFIED] [SQL MCP Server](https://learn.microsoft.com/azure/data-api-builder/mcp/overview) exposes configured database entities through Data API Builder permissions, while [SQL Server Database Engine permissions](https://learn.microsoft.com/sql/relational-databases/security/authentication-access/getting-started-with-database-engine-permissions) continue to authorize database actions. This controlled tool boundary is not permission to bypass database authorization or human review.
 
+## Background story
+
+Adventure Works closes its books every month with a single stored procedure that aggregates sales into a territory-by-customer summary. As the fact data grew past millions of rows, that month-end run began to dominate an isolated SQL Server query-workspace memory pool: wide rows are materialized early, carried through intermediate work, and aggregated late, so a large share of the pool's grant is consumed on every execution while the business result never changes.
+
+A skeptical DBA is asked to make it faster without changing a single output row. Rather than guess, the DBA pairs **GitHub Copilot** — for explanations, hypotheses, and candidate rewrites — with the **Microsoft SQL MCP server**, which exposes only bounded, read-only Query Store and diagnostic evidence. Copilot proposes; the SQL MCP tools and Query Store supply the measurements; the DBA validates equivalence and decides. Every artifact runs inside a disposable, isolated two-VM lab so the experiment can never touch production.
+
+That tension — an AI assistant that is genuinely useful but must be grounded in verifiable evidence and human judgment — is the story this workshop lets you live through end to end.
+
 ## Architecture and public ingress boundary
 
 ```mermaid

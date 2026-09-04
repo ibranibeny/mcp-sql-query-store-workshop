@@ -32,7 +32,8 @@ REQUIRED_SITE_PROPERTIES = ("title", "description", "language")
 REQUIRED_PAGE_PROPERTIES = ("source", "route", "title", "phase", "durationMinutes")
 ALLOWED_URL_SCHEMES = {"", "http", "https", "mailto"}
 FLOW_NODE_RE = re.compile(
-    r'^\s*(?P<id>[A-Za-z][A-Za-z0-9_-]*)(?:\["(?P<quoted>.*?)"\]|\[(?P<plain>.*?)\])?\s*$'
+    r'^\s*(?P<id>[A-Za-z][A-Za-z0-9_-]*)(?:\["(?P<quoted>.*?)"\]|\[(?P<plain>.*?)\])?'
+    r'(?::::(?P<cls>[A-Za-z][A-Za-z0-9_-]*))?\s*$'
 )
 FLOW_ARROW_RE = re.compile(r'\s*-->\s*(?:\|"?(.*?)"?\|\s*)?')
 SEQUENCE_PARTICIPANT_RE = re.compile(
@@ -303,12 +304,13 @@ def _svg_text(x: int, y: int, value: str, *, css_class: str) -> str:
     return f'<text class="{css_class}" text-anchor="middle">{spans}</text>'
 
 
-def _parse_flow_node(specification: str) -> tuple[str, str]:
+def _parse_flow_node(specification: str) -> tuple[str, str, str | None]:
     match = FLOW_NODE_RE.match(specification)
     if match is None:
         raise ValueError(f"Unsupported flowchart node: {specification.strip()}")
     identifier = match.group("id")
-    return identifier, match.group("quoted") or match.group("plain") or identifier
+    label = match.group("quoted") or match.group("plain") or identifier
+    return identifier, label, match.group("cls")
 
 
 def _accessible_text(value: str) -> str:
@@ -438,17 +440,22 @@ def _render_flowchart(diagram: str) -> str:
         raise ValueError(f"Unsupported flowchart direction: {direction}")
 
     nodes: dict[str, str] = {}
+    node_classes: dict[str, str] = {}
     edges: list[tuple[str, str, str]] = []
     for line in lines[1:]:
         parts = FLOW_ARROW_RE.split(line.strip())
         if len(parts) < 3:
             continue
-        source_id, source_label = _parse_flow_node(parts[0])
+        source_id, source_label, source_class = _parse_flow_node(parts[0])
         nodes.setdefault(source_id, source_label)
+        if source_class:
+            node_classes.setdefault(source_id, source_class)
         for index in range(1, len(parts), 2):
             edge_label = (parts[index] or "").strip('"')
-            target_id, target_label = _parse_flow_node(parts[index + 1])
+            target_id, target_label, target_class = _parse_flow_node(parts[index + 1])
             nodes.setdefault(target_id, target_label)
+            if target_class:
+                node_classes.setdefault(target_id, target_class)
             edges.append((source_id, target_id, edge_label))
             source_id = target_id
 
@@ -513,8 +520,12 @@ def _render_flowchart(diagram: str) -> str:
             parts.append(_svg_text(label_x, label_y, edge_label, css_class="diagram-edge-label"))
     for identifier, label in nodes.items():
         x, y = positions[identifier]
+        category = node_classes.get(identifier)
+        node_class = "diagram-node"
+        if category:
+            node_class += f" diagram-node--{category}"
         parts.append(
-            f'<rect class="diagram-node" data-node-id="{html.escape(identifier, quote=True)}" '
+            f'<rect class="{node_class}" data-node-id="{html.escape(identifier, quote=True)}" '
             f'x="{x - 80}" y="{y - 36}" width="160" height="72" rx="8"></rect>'
         )
         parts.append(_svg_text(x, y + 5, label, css_class="diagram-node-label"))
